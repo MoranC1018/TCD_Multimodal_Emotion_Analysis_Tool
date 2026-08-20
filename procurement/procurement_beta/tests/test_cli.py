@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
@@ -11,18 +12,21 @@ from application import backend
 
 from procurement.procurement_beta.cli import (
     cache_root_from_output_root,
+    catalog_video_from_context,
     download_youtube_video,
     format_result_line,
     choose_random_video,
     normalise_video_id,
     options_from_args,
     prepare_work_item,
+    publish_catalog_media,
     read_json,
     run_child_process,
     select_videos,
     parse_args,
     summary_options_from_args,
     videos_from_source_input,
+    video_item_from_json,
     youtube_format_fallback_selectors,
     youtube_format_selector,
 )
@@ -74,6 +78,201 @@ def test_cli_defaults_match_ui_expected_starting_values() -> None:
     assert args.cpu_throttle_low_percent == 90
     assert args.ram_throttle_high_percent == 95
     assert args.ram_throttle_low_percent == 90
+
+
+def test_cli_accepts_repeated_catalog_source_ids_and_context_path() -> None:
+    args = parse_args(
+        [
+            "--source",
+            "video.mp4",
+            "--output-root",
+            "out",
+            "--source-context",
+            "source_context.json",
+            "--source-id",
+            "source-0002",
+            "--source-id",
+            "source-0004",
+        ]
+    )
+
+    assert args.source_context == Path("source_context.json")
+    assert args.source_id == ["source-0002", "source-0004"]
+
+
+def test_catalog_context_preserves_source_id_metadata_and_pooled_blank_speaker(tmp_path: Path) -> None:
+    original = tmp_path / "speech.mp4"
+    snapshot = tmp_path / "snapshot.mp4"
+    sealed_bytes = b"video"
+    original.write_bytes(sealed_bytes)
+    snapshot.write_bytes(sealed_bytes)
+    context_path = tmp_path / "source_context.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "source_id": "source-0007",
+                "speaker": "",
+                "speaker_display": "Pooled (no speaker)",
+                "source_kind": "local",
+                "resolved_link": str(original.resolve()),
+                "catalog_sha256": "a" * 64,
+                "local_identity": {
+                    "canonical_path": str(original.resolve()),
+                    "sha256": hashlib.sha256(sealed_bytes).hexdigest(),
+                    "size_bytes": len(sealed_bytes),
+                },
+                "user_metadata": {"Country": "Ireland"},
+                "system_metadata": {
+                    "title": "Speech",
+                    "duration_seconds": 12,
+                    "youtube_language": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    original.write_bytes(b"mutated after coordinator snapshot")
+
+    item = catalog_video_from_context(
+        str(snapshot),
+        context_path,
+        selected_source_ids=["source-0007"],
+    )
+
+    assert item.source_id == "source-0007"
+    assert item.speaker == ""
+    assert item.metadata == {"Country": "Ireland"}
+    assert item.source_kind == "file"
+    assert Path(item.source_path) == snapshot.resolve()
+    assert Path(item.source_path).read_bytes() == sealed_bytes
+
+
+def test_catalog_context_rejects_local_snapshot_that_does_not_match_identity(tmp_path: Path) -> None:
+    original = tmp_path / "speech.mp4"
+    snapshot = tmp_path / "snapshot.mp4"
+    original.write_bytes(b"sealed")
+    snapshot.write_bytes(b"tampered")
+    context_path = tmp_path / "source_context.json"
+    context_path.write_text(
+        json.dumps(
+            {
+                "source_id": "source-0007",
+                "speaker": "",
+                "source_kind": "local",
+                "resolved_link": str(original.resolve()),
+                "local_identity": {
+                    "canonical_path": str(original.resolve()),
+                    "sha256": hashlib.sha256(b"sealed").hexdigest(),
+                    "size_bytes": len(b"sealed"),
+                },
+                "user_metadata": {},
+                "system_metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="immutable local media identity"):
+        catalog_video_from_context(
+            str(snapshot),
+            context_path,
+            selected_source_ids=["source-0007"],
+        )
+
+
+def test_catalog_publication_rejects_non_cache_output_without_replacing_existing(tmp_path: Path) -> None:
+    output_root = tmp_path / "source-output"
+    cache_root = output_root / "_clean_speaker_beta_cache"
+    output_root.mkdir()
+    cache_root.mkdir()
+    existing = output_root / "stitched_imotions.mp4"
+    existing.write_bytes(b"preserve this published result")
+    unrelated = tmp_path / "stitched_imotions.mp4"
+    unrelated.write_bytes(b"unbound result")
+    args = parse_args(
+        [
+            "--source",
+            "input.mp4",
+            "--output-root",
+            str(output_root),
+            "--source-context",
+            str(output_root / "source_context.json"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="canonical cache artifact"):
+        publish_catalog_media(
+            args=args,
+            results=[
+                VideoRunResult(
+                    status="ok",
+                    input_video=Path("input.mp4"),
+                    output_dir=unrelated.parent,
+                    output_video=unrelated,
+                    message="Synthetic result",
+                )
+            ],
+            output_root=output_root,
+            cache_root=cache_root,
+        )
+
+    assert existing.read_bytes() == b"preserve this published result"
+
+
+def test_isolated_video_json_round_trip_preserves_explicit_pooled_blank_speaker(tmp_path: Path) -> None:
+    path = tmp_path / "video.json"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "source-0007",
+                "source_id": "source-0007",
+                "title": "Speech",
+                "speaker": "",
+                "source_path": "speech.mp4",
+                "source_kind": "file",
+                "metadata": {"Country": "Ireland"},
+                "youtube_language": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    item = video_item_from_json(path)
+
+    assert item.speaker == ""
+    assert item.source_id == "source-0007"
+    assert item.metadata == {"Country": "Ireland"}
+
+
+def test_isolated_video_control_supports_metadata_over_legacy_one_mib_limit(tmp_path: Path) -> None:
+    path = tmp_path / "video.json"
+    metadata_value = "x" * (1024 * 1024 + 32)
+    path.write_text(
+        json.dumps(
+            {
+                "id": "source-0007",
+                "source_id": "source-0007",
+                "title": "Speech",
+                "speaker": "",
+                "source_path": "speech.mp4",
+                "source_kind": "file",
+                "metadata": {"Notes": metadata_value},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    item = video_item_from_json(path)
+
+    assert item.metadata["Notes"] == metadata_value
+
+
+def test_isolated_video_control_fails_closed_on_malformed_required_json(tmp_path: Path) -> None:
+    path = tmp_path / "video.json"
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        video_item_from_json(path)
 
 def test_cli_maps_explicit_beta_options() -> None:
     args = parse_args(

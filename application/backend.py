@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -26,8 +27,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from docx import Document
+from procurement.catalog import POOLED_SPEAKER_LABEL, read_catalog
 from procurement.input_limits import read_control_json
+from procurement.video_sampling.full_video_download import make_filename_safe
 from application import credential_store
+from processing.audio_analysis.audio_pipeline.source_context import snapshot_run_sidecars
 
 from analysis.audio import (
     discover_audio_analysis_inputs,
@@ -116,6 +120,9 @@ class VideoItem:
     license: str = "Unknown"
     relative_path: str = ""
     thumbnail_url: str = ""
+    source_id: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
+    youtube_language: str = ""
 
 
 @dataclass(frozen=True)
@@ -203,6 +210,10 @@ class ScanResult:
     source_path: str
     source_kind: str
     groups: list[SpeakerGroup]
+    sources: list[VideoItem] = field(default_factory=list)
+    catalog_sha256: str = ""
+    catalog_format: str = ""
+    metadata_headers: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -217,6 +228,8 @@ class RunRequest:
     segment_expected_source: str = ""
     selected_ids: list[str] | None = None
     selected_speakers: list[str] | None = None
+    catalog_sha256: str = ""
+    internal_youtube_source: bool = False
     max_segment_seconds: int = 30
     percentage: float = 0.10
     beta_output_mode: str = "clean"
@@ -266,6 +279,8 @@ class AudioRunRequest:
     keep_temp_audio: bool = False
     debug: bool = False
     stop_on_error: bool = False
+    selected_source_ids: tuple[str, ...] = ()
+    catalog_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -599,15 +614,20 @@ def scan_input_source(
         return scan_youtube_source(raw_source, enrich_youtube=enrich_youtube, logger=logger)
 
     path = Path(raw_source).expanduser().resolve()
-    if path.suffix.casefold() == ".docx":
-        return scan_docx_source(path, enrich_youtube=enrich_youtube, logger=logger)
+    if path.suffix.casefold() in {".csv", ".docx"}:
+        return scan_catalog_source(
+            path,
+            duration_reader=duration_reader,
+            enrich_youtube=enrich_youtube,
+            logger=logger,
+        )
     if path.suffix.casefold() in VIDEO_EXTENSIONS:
         return scan_single_video_source(path, duration_reader=duration_reader)
     if path.exists() and path.is_file():
         supported = ", ".join(sorted(VIDEO_EXTENSIONS))
         raise ValueError(
             f"Unsupported input file type '{path.suffix or '(none)'}'. "
-            f"Supported videos: {supported}; lists: .docx."
+            f"Supported videos: {supported}; catalogs: .csv or .docx."
         )
     return scan_folder_source(path, duration_reader=duration_reader)
 
@@ -766,66 +786,187 @@ def scan_docx_source(
     enrich_youtube: bool = True,
     logger: Callable[[str], None] | None = None,
 ) -> ScanResult:
-    """Read YouTube rows from a DOCX and enrich them when API metadata exists."""
+    """Compatibility-named entry point using the shared catalog parser."""
 
-    if not docx_path.exists() or docx_path.suffix.casefold() != ".docx":
-        raise FileNotFoundError(f"DOCX does not exist: {docx_path}")
+    return scan_catalog_source(
+        docx_path,
+        enrich_youtube=enrich_youtube,
+        logger=logger,
+    )
+
+
+def scan_catalog_source(
+    catalog_path: Path,
+    *,
+    duration_reader: Callable[[Path], float | None] | None = None,
+    enrich_youtube: bool = True,
+    logger: Callable[[str], None] | None = None,
+) -> ScanResult:
+    """Read CSV/DOCX rows into one ordered UI model without changing selection."""
 
     log = logger or (lambda _message: None)
-    log(f"Opening DOCX for scan: {docx_path}")
-    document = run_docx_extractions.open_docx_document(docx_path, logger=log)
-    # Materialise python-docx table and row proxies once. Accessing these
-    # properties repeatedly becomes very expensive on documents with thousands
-    # of rows because python-docx reconstructs the proxy collections each time.
-    document_tables = list(document.tables)
-    rows_by_table = [list(table.rows) for table in document_tables]
-    header_maps = [header_map_for_rows(table_rows) for table_rows in rows_by_table]
-    rows = run_docx_extractions.find_video_rows(document)
-    log(f"Found {len(rows)} YouTube video rows in {len(document_tables)} tables.")
-    if not rows:
-        raise ValueError("No YouTube links were found in the DOCX tables.")
+    catalog = read_catalog(catalog_path)
+    duration_reader = duration_reader or read_duration_seconds
     items: list[VideoItem] = []
-
-    for row in rows:
-        # DOCX files vary in their column wording, so read by a small set of
-        # accepted header names instead of relying on fixed column indexes.
-        table_row = rows_by_table[row.table_index][row.row_index]
-        header_map = header_maps[row.table_index]
-        title = first_non_empty(
-            cell_text_by_header(table_row, header_map, ["Video", "Video name", "Title", "Link"]),
-            table_row.cells[0].text.strip() if table_row.cells else "",
-            row.video_id,
-        )
-        duration_seconds = parse_duration_seconds(
-            cell_text_by_header(table_row, header_map, ["Length", "Duration", "Video length"])
-        )
-        upload_date = cell_text_by_header(table_row, header_map, ["Upload date", "Date uploaded", "Published", "Published at"])
-        license_text = cell_text_by_header(table_row, header_map, ["License", "Licence", "YouTube API License"]) or "Unknown"
-        item = VideoItem(
-            id=f"docx:{row.video_id}:{row.table_index}:{row.row_index}",
-            title=clean_display_title(title, row.url),
-            speaker=row.speaker,
-            source_path=str(docx_path),
-            source_kind="docx",
-            youtube_url=row.url,
-            video_id=row.video_id,
-            duration_seconds=duration_seconds,
-            upload_date=upload_date,
-            license=license_text,
-            relative_path=f"table {row.table_index + 1}, row {row.row_index + 1}",
-            thumbnail_url=youtube_thumbnail_url(row.video_id),
-        )
+    for source in catalog.sources:
+        if source.source_kind == "youtube":
+            item = VideoItem(
+                id=source.source_id,
+                source_id=source.source_id,
+                title=source.resolved_link,
+                speaker=source.speaker_display,
+                source_path=source.resolved_link,
+                source_kind="youtube",
+                youtube_url=source.resolved_link,
+                video_id=source.youtube_id,
+                license="Unknown",
+                relative_path=f"catalog row {source.row_number}",
+                thumbnail_url=youtube_thumbnail_url(source.youtube_id),
+                metadata=dict(source.metadata),
+            )
+        else:
+            local_path = Path(source.resolved_link)
+            item = VideoItem(
+                id=source.source_id,
+                source_id=source.source_id,
+                title=local_path.stem,
+                speaker=source.speaker_display,
+                source_path=str(local_path),
+                source_kind="file",
+                duration_seconds=duration_reader(local_path),
+                license="Local file / unknown",
+                relative_path=source.link,
+                metadata=dict(source.metadata),
+            )
         items.append(item)
 
     if enrich_youtube:
         items = enrich_youtube_items(items, logger=log)
-
     groups = group_video_items_by_speaker(items)
-    log(f"Grouped scan into {len(groups)} speaker groups.")
     return ScanResult(
-        source_path=str(docx_path),
-        source_kind="docx",
+        source_path=str(catalog.path),
+        source_kind="catalog",
         groups=groups,
+        sources=items,
+        catalog_sha256=catalog.sha256,
+        catalog_format=catalog.format,
+        metadata_headers=list(catalog.metadata_headers),
+    )
+
+
+def scan_audio_catalog_run(source_path: Path) -> ScanResult | None:
+    """Reopen the immutable catalog manifest belonging to one audio batch root."""
+
+    run_root = source_path.expanduser().resolve(strict=True)
+    if not run_root.is_dir():
+        raise ValueError(f"Audio catalog source must be a folder: {run_root}")
+    pair = snapshot_run_sidecars(run_root)
+    if pair is None:
+        return None
+    try:
+        manifest = json.loads(pair[0].decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid source manifest JSON: {run_root / 'source_manifest.json'}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Source manifest must be a JSON object: {run_root / 'source_manifest.json'}")
+    catalog = manifest.get("catalog")
+    raw_sources = manifest.get("sources")
+    if not isinstance(catalog, dict) or not isinstance(raw_sources, list):
+        raise ValueError(f"Catalog source manifest has an invalid structure: {run_root / 'source_manifest.json'}")
+    catalog_sha256 = str(catalog.get("sha256") or "").strip().casefold()
+    if re.fullmatch(r"[0-9a-f]{64}", catalog_sha256) is None:
+        raise ValueError(f"Catalog source manifest has an invalid catalog digest: {run_root / 'source_manifest.json'}")
+
+    metadata_headers: list[str] = []
+    seen_headers: set[str] = set()
+
+    def add_metadata_header(raw_header: object) -> None:
+        if not isinstance(raw_header, str) or not raw_header.strip():
+            raise ValueError(f"Catalog source manifest has an invalid metadata header: {run_root / 'source_manifest.json'}")
+        header = raw_header.strip()
+        if header not in seen_headers:
+            seen_headers.add(header)
+            metadata_headers.append(header)
+
+    raw_headers = catalog.get("metadata_headers", [])
+    if not isinstance(raw_headers, list):
+        raise ValueError(f"Catalog source manifest metadata_headers must be a list: {run_root / 'source_manifest.json'}")
+    for raw_header in raw_headers:
+        add_metadata_header(raw_header)
+
+    items: list[VideoItem] = []
+    seen_source_ids: set[str] = set()
+    for raw_entry in raw_sources:
+        if not isinstance(raw_entry, dict) or not bool(raw_entry.get("selected")):
+            continue
+        source_id = str(raw_entry.get("source_id") or "").strip()
+        if re.fullmatch(r"source-\d{4,6}", source_id) is None or source_id in seen_source_ids:
+            raise ValueError(
+                f"Catalog source manifest has invalid or duplicate selected SourceIDs: {run_root / 'source_manifest.json'}"
+            )
+        seen_source_ids.add(source_id)
+        source_kind = str(raw_entry.get("source_kind") or "").strip().casefold()
+        if source_kind not in {"local", "youtube"}:
+            raise ValueError(f"Catalog source manifest has an invalid source kind for {source_id}")
+        speaker = raw_entry.get("speaker_display")
+        resolved_link = raw_entry.get("resolved_link")
+        system_metadata = raw_entry.get("system_metadata")
+        user_metadata = raw_entry.get("user_metadata")
+        if not isinstance(speaker, str) or not speaker.strip():
+            raise ValueError(f"Catalog source manifest has no speaker display for {source_id}")
+        if not isinstance(resolved_link, str) or not resolved_link.strip():
+            raise ValueError(f"Catalog source manifest has no resolved link for {source_id}")
+        if not isinstance(system_metadata, dict):
+            raise ValueError(f"Catalog source manifest has invalid system metadata for {source_id}")
+        if not isinstance(user_metadata, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in user_metadata.items()
+        ):
+            raise ValueError(f"Catalog source manifest has invalid user metadata for {source_id}")
+        for header in user_metadata:
+            add_metadata_header(header)
+
+        raw_duration = system_metadata.get("duration_seconds")
+        duration = (
+            float(raw_duration)
+            if isinstance(raw_duration, (int, float))
+            and not isinstance(raw_duration, bool)
+            and math.isfinite(float(raw_duration))
+            and float(raw_duration) >= 0
+            else None
+        )
+        youtube = raw_entry.get("youtube") if source_kind == "youtube" else None
+        if source_kind == "youtube" and not isinstance(youtube, dict):
+            raise ValueError(f"Catalog source manifest has invalid YouTube metadata for {source_id}")
+        video_id = str(youtube.get("video_id") or "") if isinstance(youtube, dict) else ""
+        youtube_url = str(youtube.get("url") or resolved_link) if isinstance(youtube, dict) else ""
+        title = str(system_metadata.get("title") or Path(resolved_link).stem or source_id).strip()
+        items.append(
+            VideoItem(
+                id=source_id,
+                source_id=source_id,
+                title=title,
+                speaker=speaker.strip(),
+                source_path=resolved_link,
+                source_kind="youtube" if source_kind == "youtube" else "file",
+                youtube_url=youtube_url,
+                video_id=video_id,
+                duration_seconds=duration,
+                relative_path=source_id,
+                thumbnail_url=youtube_thumbnail_url(video_id),
+                metadata=dict(user_metadata),
+                youtube_language=str(system_metadata.get("youtube_language") or ""),
+            )
+        )
+
+    return ScanResult(
+        source_path=str(run_root),
+        source_kind="catalog",
+        groups=group_video_items_by_speaker(items),
+        sources=items,
+        catalog_sha256=catalog_sha256,
+        catalog_format=str(catalog.get("format") or ""),
+        metadata_headers=metadata_headers,
     )
 
 
@@ -1662,6 +1803,9 @@ def fetch_youtube_api_metadata(video_ids: Iterable[str], api_key: str, *, timeou
                 "upload_date": str(snippet.get("publishedAt") or "")[:10],
                 "license": youtube_license_label(str(status.get("license") or "")),
                 "thumbnail_url": best_thumbnail_url(snippet.get("thumbnails") if isinstance(snippet, dict) else {}),
+                "youtube_language": str(
+                    snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
+                ).strip(),
             }
     return metadata
 
@@ -1814,6 +1958,13 @@ def apply_youtube_metadata(
             license_text = str(metadata.get("license") or license_text or "Unknown")
 
         thumbnail_url = str(metadata.get("thumbnail_url") or item.thumbnail_url or youtube_thumbnail_url(item.video_id))
+        youtube_language = str(
+            metadata.get("youtube_language")
+            or metadata.get("defaultAudioLanguage")
+            or metadata.get("defaultLanguage")
+            or item.youtube_language
+            or ""
+        ).strip()
         updated.append(
             replace(
                 item,
@@ -1822,6 +1973,7 @@ def apply_youtube_metadata(
                 upload_date=upload_date,
                 license=license_text,
                 thumbnail_url=thumbnail_url,
+                youtube_language=youtube_language,
             )
         )
     return updated
@@ -1969,6 +2121,75 @@ def build_imotions_concat_command(
     ]
 
 
+def append_catalog_clean_speaker_options(command: list[str], request: RunRequest) -> None:
+    """Forward every existing Clean Speaker option to the catalog coordinator."""
+
+    command.extend(
+        [
+            "--output-mode",
+            str(request.beta_output_mode),
+            "--min-clean-seconds",
+            str(float(request.beta_min_clean_seconds)),
+            "--gap-seconds",
+            str(float(request.beta_gap_seconds)),
+            "--identity-stills",
+            str(int(request.beta_identity_stills)),
+            "--scan-fps",
+            str(float(request.beta_scan_fps)),
+            "--validation-fps",
+            str(float(request.beta_validation_fps)),
+            "--face-confidence",
+            str(float(request.beta_face_confidence)),
+            "--speaker-confidence",
+            str(float(request.beta_speaker_confidence)),
+            "--workers",
+            str(int(request.beta_worker_count)),
+            "--device",
+            str(request.beta_device),
+            "--resource-guard-percent",
+            str(float(request.beta_resource_guard_percent)),
+            "--resource-poll-seconds",
+            str(float(request.beta_resource_poll_seconds)),
+            "--resource-guard-timeout-seconds",
+            str(float(request.beta_resource_guard_timeout_seconds)),
+            "--max-download-height",
+            str(int(request.beta_max_download_height)),
+            "--video-cooldown-seconds",
+            str(float(request.beta_video_cooldown_seconds)),
+            "--max-affinity-cores",
+            str(int(request.beta_max_affinity_cores)),
+            "--native-threads",
+            str(int(request.beta_native_threads)),
+            "--cpu-throttle-high-percent",
+            str(float(request.beta_cpu_throttle_high_percent)),
+            "--cpu-throttle-low-percent",
+            str(float(request.beta_cpu_throttle_low_percent)),
+            "--ram-throttle-high-percent",
+            str(float(request.beta_ram_throttle_high_percent)),
+            "--ram-throttle-low-percent",
+            str(float(request.beta_ram_throttle_low_percent)),
+        ]
+    )
+    for video_id in request.beta_only_video_ids or []:
+        command.extend(["--only-video-id", str(video_id)])
+    if request.beta_random_one:
+        command.append("--random-one")
+    if request.beta_random_seed:
+        command.extend(["--random-seed", str(request.beta_random_seed)])
+    if request.beta_isolated_video_processes:
+        command.append("--isolated-video-processes")
+    if request.beta_skip_first_videos > 0:
+        command.extend(["--skip-first-videos", str(int(request.beta_skip_first_videos))])
+    if request.beta_skip_completed_outputs:
+        command.append("--skip-completed-outputs")
+    if request.beta_parallel_detector_streams:
+        command.append("--parallel-detectors")
+    if request.beta_keep_debug:
+        command.append("--keep-debug")
+    if request.beta_reference_audio is not None:
+        command.extend(["--reference-audio", str(request.beta_reference_audio.expanduser().resolve())])
+
+
 def build_run_command(
     request: RunRequest,
     *,
@@ -1986,6 +2207,62 @@ def build_run_command(
     source = request.source_path.expanduser().resolve()
     output_root = request.output_root.expanduser().resolve()
     mode = request.mode
+
+    if request.internal_youtube_source:
+        allowed_internal_root = (repo_root.expanduser().resolve() / "_local" / "youtube_sources").resolve()
+        if source.parent != allowed_internal_root or not re.fullmatch(r"youtube_[A-Za-z0-9_-]{11}\.docx", source.name):
+            raise ValueError("Internal YouTube materialization is not a trusted launcher source.")
+    is_catalog = source.suffix.casefold() in {".csv", ".docx"} and not request.internal_youtube_source
+    if is_catalog:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", request.catalog_sha256):
+            raise ValueError("Catalog runs require the launcher-validated catalog SHA-256.")
+        selected_ids = list(request.selected_ids or [])
+        if not selected_ids or len(selected_ids) != len(set(selected_ids)):
+            raise ValueError("Catalog runs require unique selected source IDs.")
+        human_stem = make_filename_safe(source.stem, max_length=60)
+        unique_suffix = (
+            f"catalog_{mode}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
+            f"{secrets.token_hex(4)}"
+        )
+        run_label = f"{human_stem}_{unique_suffix}"
+        command = [
+            str(python_executable),
+            "-m",
+            "procurement.catalog_runner",
+            str(source),
+            "--run-root",
+            str(output_root / run_label),
+            "--mode",
+            mode,
+            "--catalog-sha256",
+            request.catalog_sha256.casefold(),
+            "--percentage",
+            str(float(request.percentage)),
+            "--max-segment-seconds",
+            str(int(request.max_segment_seconds)),
+        ]
+        for source_id in selected_ids:
+            command.extend(["--source-id", source_id])
+        if mode == "manual":
+            if request.segment_manifest is None:
+                raise ValueError("Manual catalog mode requires a segment manifest.")
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", request.segment_manifest_sha256):
+                raise ValueError("Manual catalog mode requires the launcher-validated manifest SHA-256.")
+            if not str(request.segment_expected_source or "").strip():
+                raise ValueError("Manual catalog mode requires the launcher-validated source identity.")
+            command.extend(
+                [
+                    "--segments-json",
+                    str(request.segment_manifest.expanduser().resolve()),
+                    "--manifest-sha256",
+                    request.segment_manifest_sha256.casefold(),
+                    "--expected-source",
+                    str(request.segment_expected_source),
+                ]
+            )
+        if mode == "clean-speaker-beta":
+            append_catalog_clean_speaker_options(command, request)
+        return command
 
     if mode == "manual":
         if request.segment_manifest is None:
@@ -2258,6 +2535,18 @@ def build_audio_command(
     device = str(request.device or "").casefold()
     if device not in {"auto", "cpu", "cuda"}:
         raise ValueError(f"Unsupported emotion model device: {request.device}")
+    source_ids = tuple(str(source_id).strip() for source_id in request.selected_source_ids)
+    catalog_sha256 = str(request.catalog_sha256 or "").strip().casefold()
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError("Selected audio SourceIDs must be unique.")
+    if any(re.fullmatch(r"source-\d{4,6}", source_id) is None for source_id in source_ids):
+        raise ValueError("Selected audio SourceIDs must use the source-0001 format.")
+    if source_ids and mode != "batch":
+        raise ValueError("Audio SourceID selection is available only for batch folders.")
+    if source_ids and re.fullmatch(r"[0-9a-f]{64}", catalog_sha256) is None:
+        raise ValueError("Selected audio SourceIDs require the chosen catalog run SHA-256.")
+    if catalog_sha256 and not source_ids:
+        raise ValueError("An audio catalog SHA-256 requires one or more selected SourceIDs.")
 
     command = [
         str(python_executable),
@@ -2283,6 +2572,10 @@ def build_audio_command(
         command.append("--debug")
     if mode == "batch" and request.stop_on_error:
         command.append("--stop-on-error")
+    if catalog_sha256:
+        command.extend(["--catalog-sha256", catalog_sha256])
+    for source_id in source_ids:
+        command.extend(["--source-id", source_id])
     return command
 
 

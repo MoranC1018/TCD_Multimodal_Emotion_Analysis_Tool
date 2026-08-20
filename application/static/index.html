@@ -271,6 +271,39 @@
               <button id="runAudioButton" type="button" class="primary-wide">Run audio processing</button>
             </section>
 
+            <section id="audioCatalogSelection" class="input-panel audio-catalog-panel hidden">
+              <div>
+                <h3>Catalog sources</h3>
+                <p id="audioCatalogSelectionSummary">Choose from the metadata sealed into this audio source folder.</p>
+              </div>
+              <div class="catalog-metadata-controls">
+                <label>
+                  Filter field
+                  <select id="audioCatalogFilterField"></select>
+                </label>
+                <label>
+                  Filter value
+                  <input id="audioCatalogFilterText" type="search" placeholder="Hide non-matching sources">
+                </label>
+                <label>
+                  Sort field
+                  <select id="audioCatalogSortField"></select>
+                </label>
+                <label>
+                  Sort direction
+                  <select id="audioCatalogSortDirection">
+                    <option value="asc">Ascending</option>
+                    <option value="desc">Descending</option>
+                  </select>
+                </label>
+                <div class="catalog-selection-actions">
+                  <button id="audioSelectVisibleSourcesButton" type="button" class="secondary-button">Select visible</button>
+                  <button id="audioClearVisibleSourcesButton" type="button" class="secondary-button">Clear visible</button>
+                </div>
+              </div>
+              <div id="audioCatalogSourceList" class="audio-catalog-source-list"></div>
+            </section>
+
             <section class="input-panel audio-options-panel">
               <h3>Options</h3>
               <label class="check-option">
@@ -604,8 +637,8 @@
                   <span>Scans subfolders recursively and preserves speaker folders.</span>
                 </div>
                 <div>
-                  <strong>DOCX list</strong>
-                  <span>.docx file with YouTube links stored in table rows.</span>
+                  <strong>CSV or DOCX catalog</strong>
+                  <span>A Link column is required; Speaker and any research metadata are optional.</span>
                 </div>
                 <div>
                   <strong>Local video</strong>
@@ -658,6 +691,31 @@
                     <option value="length-asc">Length shortest</option>
                   </select>
                 </label>
+              </div>
+              <div id="catalogMetadataControls" class="catalog-metadata-controls hidden" aria-label="Catalog metadata controls">
+                <label>
+                  Filter field
+                  <select id="catalogFilterField"><option value="">All metadata</option></select>
+                </label>
+                <label>
+                  Contains
+                  <input id="catalogFilterText" type="search" autocomplete="off" placeholder="Filter visible sources">
+                </label>
+                <label>
+                  Metadata sort
+                  <select id="catalogSortField"><option value="">Catalog order</option></select>
+                </label>
+                <label>
+                  Direction
+                  <select id="catalogSortDirection">
+                    <option value="asc">A to Z</option>
+                    <option value="desc">Z to A</option>
+                  </select>
+                </label>
+                <div class="catalog-selection-actions">
+                  <button id="selectVisibleSourcesButton" type="button" class="secondary-button">Select visible</button>
+                  <button id="clearVisibleSourcesButton" type="button" class="secondary-button">Clear visible</button>
+                </div>
               </div>
               <div id="videoGroups" class="video-groups"></div>
             </section>
@@ -884,7 +942,7 @@
       </div>
       <div class="source-picker-actions">
         <button id="chooseSourceFolderButton" type="button" class="primary-wide">Folder</button>
-        <button id="chooseSourceFileButton" type="button" class="secondary-wide">DOCX or video</button>
+        <button id="chooseSourceFileButton" type="button" class="secondary-wide">CSV, DOCX, or video</button>
       </div>
     </dialog>
 

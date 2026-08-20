@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 from spreadsheet_safety import SpreadsheetSafeWriter
 
@@ -11,15 +13,18 @@ from . import config
 from .emotion_models import EmotionModelBundle, EmotionModels, load_debug_fallback_emotion_models
 from .full_stack import export_batch_to_analysis_audio_outputs
 from .pipeline import ProgressCallback, SingleVideoResult, emit_progress, run_single_video
+from .source_context import copy_run_sidecars, load_source_context
 
 
 STITCHED_VIDEO_NAME = "stitched_imotions.mp4"
+CATALOG_INTERNAL_DIRECTORIES = frozenset({"_clean_speaker_beta_cache", "_downloads"})
 
 
 @dataclass(frozen=True)
 class VideoJob:
     input_video: Path
     relative_output_dir: Path
+    source_context: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -31,14 +36,25 @@ class BatchResult:
     failed_count: int
 
 
-def discover_videos(input_path: Path) -> list[VideoJob]:
+def discover_videos(
+    input_path: Path,
+    *,
+    selected_source_ids: Sequence[str] | None = None,
+) -> list[VideoJob]:
     """Find the videos this stage should analyse, preserving folder structure."""
 
     input_path = input_path.expanduser().resolve()
     if input_path.is_file():
         if input_path.suffix.lower() != ".mp4":
             raise ValueError(f"Input file is not an MP4: {input_path}")
-        return [VideoJob(input_video=input_path, relative_output_dir=Path(input_path.stem))]
+        jobs = [
+            VideoJob(
+                input_video=input_path,
+                relative_output_dir=Path(input_path.stem),
+                source_context=load_source_context(input_path),
+            )
+        ]
+        return _filter_source_ids(jobs, selected_source_ids)
 
     if not input_path.exists() or not input_path.is_dir():
         raise NotADirectoryError(f"Input folder does not exist: {input_path}")
@@ -47,11 +63,21 @@ def discover_videos(input_path: Path) -> list[VideoJob]:
     seen_inputs: set[Path] = set()
     canonical_parents: set[Path] = set()
     for path in sorted(input_path.rglob(STITCHED_VIDEO_NAME), key=lambda item: str(item).casefold()):
-        jobs.append(VideoJob(input_video=path, relative_output_dir=path.parent.relative_to(input_path)))
+        if is_catalog_internal(path, input_path):
+            continue
+        jobs.append(
+            VideoJob(
+                input_video=path,
+                relative_output_dir=path.parent.relative_to(input_path),
+                source_context=load_source_context(path, boundary=input_path),
+            )
+        )
         seen_inputs.add(path.resolve())
         canonical_parents.add(path.parent.resolve())
 
     for path in sorted(input_path.rglob("*.mp4"), key=lambda item: str(item).casefold()):
+        if is_catalog_internal(path, input_path):
+            continue
         if path.resolve() in seen_inputs:
             continue
         if path.parent.resolve() in canonical_parents:
@@ -61,8 +87,35 @@ def discover_videos(input_path: Path) -> list[VideoJob]:
         if is_generated_intermediate(path):
             continue
         relative_path = path.relative_to(input_path)
-        jobs.append(VideoJob(input_video=path, relative_output_dir=relative_path.with_suffix("")))
-    return jobs
+        jobs.append(
+            VideoJob(
+                input_video=path,
+                relative_output_dir=relative_path.with_suffix(""),
+                source_context=load_source_context(path, boundary=input_path),
+            )
+        )
+    return _filter_source_ids(jobs, selected_source_ids)
+
+
+def _filter_source_ids(
+    jobs: list[VideoJob],
+    selected_source_ids: Sequence[str] | None,
+) -> list[VideoJob]:
+    if selected_source_ids is None:
+        return jobs
+    requested = [str(source_id) for source_id in selected_source_ids]
+    if len(set(requested)) != len(requested):
+        raise ValueError("Selected audio SourceIDs must be unique")
+    available = {
+        str(job.source_context.get("source_id") or "")
+        for job in jobs
+        if job.source_context.get("source_id")
+    }
+    unknown = sorted(set(requested) - available)
+    if unknown:
+        raise ValueError(f"Unknown audio SourceID selection: {', '.join(unknown)}")
+    selected = set(requested)
+    return [job for job in jobs if str(job.source_context.get("source_id") or "") in selected]
 
 
 def is_generated_intermediate(path: Path) -> bool:
@@ -78,6 +131,54 @@ def is_generated_intermediate(path: Path) -> bool:
     )
 
 
+def is_catalog_internal(path: Path, input_root: Path) -> bool:
+    """Return whether a media path belongs to procurement's private cache."""
+
+    relative = path.relative_to(input_root)
+    return any(part.casefold() in CATALOG_INTERNAL_DIRECTORIES for part in relative.parts[:-1])
+
+
+def validate_source_context_coverage(input_path: Path, jobs: Sequence[VideoJob]) -> None:
+    """Require every non-cache catalog context to own exactly one discovered video."""
+
+    if not input_path.is_dir():
+        return
+    context_paths = {
+        path
+        for path in input_path.rglob("source_context.json")
+        if not is_catalog_internal(path, input_path)
+    }
+    used_paths: list[Path] = []
+    for job in jobs:
+        if not job.source_context:
+            continue
+        context_path = _nearest_source_context_path(job.input_video, input_path)
+        if context_path is None:
+            raise ValueError(f"Catalog audio input has no source context: {job.input_video}")
+        used_paths.append(context_path)
+    if len(used_paths) != len(set(used_paths)):
+        raise ValueError("One audio source context is shared by multiple discovered videos.")
+    orphaned = sorted(context_paths - set(used_paths), key=lambda path: str(path).casefold())
+    if orphaned:
+        raise ValueError(f"Orphan audio source context has no discovered video: {orphaned[0]}")
+
+
+def _nearest_source_context_path(video: Path, boundary: Path) -> Path | None:
+    directory = video.parent
+    while directory == boundary or boundary in directory.parents:
+        candidate = directory / "source_context.json"
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return candidate
+        if directory == boundary:
+            break
+        directory = directory.parent
+    return None
+
+
 def run_batch(
     input_path: Path,
     output_root: Path,
@@ -90,6 +191,8 @@ def run_batch(
     device: str = "auto",
     keep_temp_audio: bool = False,
     debug: bool = False,
+    selected_source_ids: Sequence[str] | None = None,
+    expected_catalog_sha256: str = "",
     progress: ProgressCallback | None = None,
 ) -> BatchResult:
     """Run OpenSMILE audio analysis over a procurement downloads folder."""
@@ -101,13 +204,29 @@ def run_batch(
     emit_progress(progress, f"Input folder: {input_path}")
     emit_progress(progress, f"Output folder: {output_root}")
     emit_progress(progress, "Scanning for analysis .mp4 files.")
-    jobs = discover_videos(input_path)
+    all_jobs = discover_videos(input_path)
+    validate_source_context_coverage(input_path, all_jobs)
+    jobs = _filter_source_ids(all_jobs, selected_source_ids)
     if not jobs:
         raise ValueError(f"No analysis .mp4 files found under {input_path}")
     emit_progress(progress, f"Found {len(jobs)} video(s) to analyse.")
     long_path_warnings = path_length_warnings(input_path, output_root, jobs)
     for warning in long_path_warnings:
         emit_progress(progress, warning)
+    sidecars_copied = copy_run_sidecars(
+        input_path,
+        output_root,
+        expected_source_ids={
+            str(job.source_context.get("source_id") or "")
+            for job in all_jobs
+            if job.source_context.get("source_id")
+        },
+        source_bindings=[(job.input_video, job.source_context) for job in all_jobs],
+        expected_catalog_sha256=expected_catalog_sha256,
+    )
+    if any(job.source_context for job in all_jobs) and not sidecars_copied:
+        raise ValueError("Catalog audio source contexts require an immutable top-level source sidecar pair.")
+    output_root.mkdir(parents=True, exist_ok=True)
     emit_progress(progress, "Loading shared emotion model bundle.")
     emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
     if getattr(emotion_models, "skipped", False):
@@ -128,7 +247,6 @@ def run_batch(
                 f"Emotion analysis was requested, but the {', '.join(unavailable)} model layer(s) are unavailable."
                 f"{suffix}"
             )
-    output_root.mkdir(parents=True, exist_ok=True)
     debug_fallback_models = None
     if debug and not skip_emotion_models:
         emit_progress(progress, "Debug mode: loading fallback categorical model once for batch.")
@@ -174,6 +292,7 @@ def run_batch(
                 keep_temp_audio=keep_temp_audio,
                 debug=debug,
                 debug_fallback_emotion_models=debug_fallback_models,
+                source_context=job.source_context,
                 progress=indented_progress(progress),
             )
             processed += 1
@@ -239,9 +358,15 @@ def model_label(emotion_models: EmotionModels, model_type: str) -> str:
 
 
 def success_row(input_root: Path, job: VideoJob, result: SingleVideoResult, emotion_models: EmotionModels) -> dict[str, object]:
+    source_metadata = job.source_context.get("user_metadata")
+    if not isinstance(source_metadata, dict):
+        source_metadata = {}
     return {
         "status": "ok",
-        "speaker": first_part(job.relative_output_dir),
+        "speaker": str(job.source_context.get("speaker") or "") if job.source_context else first_part(job.relative_output_dir),
+        "source_id": str(job.source_context.get("source_id") or ""),
+        "source_speaker": str(job.source_context.get("speaker") or ""),
+        "source_metadata": json.dumps(source_metadata, ensure_ascii=False, sort_keys=True),
         "video_folder": str(job.relative_output_dir),
         "input_video": str(job.input_video),
         "relative_input_video": str(job.input_video.relative_to(input_root)) if input_root.is_dir() else job.input_video.name,
@@ -257,9 +382,15 @@ def success_row(input_root: Path, job: VideoJob, result: SingleVideoResult, emot
 
 
 def failure_row(input_root: Path, job: VideoJob, output_dir: Path, exc: Exception, emotion_models: EmotionModels) -> dict[str, object]:
+    source_metadata = job.source_context.get("user_metadata")
+    if not isinstance(source_metadata, dict):
+        source_metadata = {}
     return {
         "status": "failed",
-        "speaker": first_part(job.relative_output_dir),
+        "speaker": str(job.source_context.get("speaker") or "") if job.source_context else first_part(job.relative_output_dir),
+        "source_id": str(job.source_context.get("source_id") or ""),
+        "source_speaker": str(job.source_context.get("speaker") or ""),
+        "source_metadata": json.dumps(source_metadata, ensure_ascii=False, sort_keys=True),
         "video_folder": str(job.relative_output_dir),
         "input_video": str(job.input_video),
         "relative_input_video": str(job.input_video.relative_to(input_root)) if input_root.is_dir() else job.input_video.name,
@@ -278,6 +409,9 @@ def write_manifest_csv(path: Path, rows: list[dict[str, object]]) -> Path:
     fields = [
         "status",
         "speaker",
+        "source_id",
+        "source_speaker",
+        "source_metadata",
         "video_folder",
         "input_video",
         "relative_input_video",

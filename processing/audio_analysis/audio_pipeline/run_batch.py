@@ -18,6 +18,17 @@ def main() -> None:
         help="Root output folder for audio analysis. Defaults to the project output folder.",
     )
     parser.add_argument("--stop-on-error", action="store_true", help="Stop at the first failed video.")
+    parser.add_argument(
+        "--source-id",
+        action="append",
+        default=None,
+        help="Analyse only this catalog SourceID. Repeat for multiple sources.",
+    )
+    parser.add_argument(
+        "--catalog-sha256",
+        default="",
+        help="Expected SHA-256 from the selected batch folder's source manifest.",
+    )
     add_common_options(parser)
     args = parser.parse_args()
     try:
@@ -32,6 +43,8 @@ def main() -> None:
             device=args.device,
             keep_temp_audio=args.keep_temp_audio,
             debug=args.debug,
+            selected_source_ids=args.source_id,
+            expected_catalog_sha256=args.catalog_sha256,
             progress=print_progress,
         )
     except (FileNotFoundError, NotADirectoryError, RuntimeError, subprocess.CalledProcessError, ValueError, OSError) as exc:

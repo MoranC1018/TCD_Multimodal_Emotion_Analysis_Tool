@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .cli import add_common_options, default_single_output_dir, print_error, print_progress
 from .pipeline import run_single_video
+from .source_context import load_source_context
 
 
 def main() -> None:
@@ -30,6 +31,7 @@ def main() -> None:
             device=args.device,
             keep_temp_audio=args.keep_temp_audio,
             debug=args.debug,
+            source_context=load_source_context(args.input_video),
             progress=print_progress,
         )
     except (FileNotFoundError, RuntimeError, subprocess.CalledProcessError, ValueError, OSError) as exc:

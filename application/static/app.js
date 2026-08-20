@@ -85,6 +85,13 @@ const manualBackButton = document.querySelector("#manualBackButton");
 const backToReviewButton = document.querySelector("#backToReviewButton");
 const stopButton = document.querySelector("#stopButton");
 const sortSelect = document.querySelector("#sortSelect");
+const catalogMetadataControls = document.querySelector("#catalogMetadataControls");
+const catalogFilterField = document.querySelector("#catalogFilterField");
+const catalogFilterText = document.querySelector("#catalogFilterText");
+const catalogSortField = document.querySelector("#catalogSortField");
+const catalogSortDirection = document.querySelector("#catalogSortDirection");
+const selectVisibleSourcesButton = document.querySelector("#selectVisibleSourcesButton");
+const clearVisibleSourcesButton = document.querySelector("#clearVisibleSourcesButton");
 const statusLabel = document.querySelector("#statusLabel");
 const scanSummary = document.querySelector("#scanSummary");
 const scanTabList = document.querySelector("#scanTabList");
@@ -158,6 +165,15 @@ const audioEmotionsToggle = document.querySelector("#audioEmotionsToggle");
 const audioKeepTempToggle = document.querySelector("#audioKeepTempToggle");
 const audioDebugToggle = document.querySelector("#audioDebugToggle");
 const audioStopOnErrorToggle = document.querySelector("#audioStopOnErrorToggle");
+const audioCatalogSelection = document.querySelector("#audioCatalogSelection");
+const audioCatalogSelectionSummary = document.querySelector("#audioCatalogSelectionSummary");
+const audioCatalogFilterField = document.querySelector("#audioCatalogFilterField");
+const audioCatalogFilterText = document.querySelector("#audioCatalogFilterText");
+const audioCatalogSortField = document.querySelector("#audioCatalogSortField");
+const audioCatalogSortDirection = document.querySelector("#audioCatalogSortDirection");
+const audioSelectVisibleSourcesButton = document.querySelector("#audioSelectVisibleSourcesButton");
+const audioClearVisibleSourcesButton = document.querySelector("#audioClearVisibleSourcesButton");
+const audioCatalogSourceList = document.querySelector("#audioCatalogSourceList");
 const audioProgressBar = document.querySelector("#audioProgressBar");
 const audioProgressLabel = document.querySelector("#audioProgressLabel");
 const audioNextTitle = document.querySelector("#audioNextTitle");
@@ -532,6 +548,73 @@ function analysisFailureMessage(progress) {
 }
 // ANALYSIS_UI_LOGIC_END
 
+// CATALOG_UI_LOGIC_START
+function isCatalogScan(scan) {
+  return Boolean(scan && scan.source_kind === "catalog" && Array.isArray(scan.sources));
+}
+
+function catalogSources(scan) {
+  return isCatalogScan(scan) ? scan.sources.slice() : [];
+}
+
+function catalogMetadataFields(scan) {
+  const fields = [];
+  const seen = new Set();
+  const add = (field) => {
+    const label = String(field || "").trim();
+    if (label && !seen.has(label)) {
+      seen.add(label);
+      fields.push(label);
+    }
+  };
+  (Array.isArray(scan?.metadata_headers) ? scan.metadata_headers : []).forEach(add);
+  catalogSources(scan).forEach((source) => {
+    Object.keys(source.metadata && typeof source.metadata === "object" ? source.metadata : {}).forEach(add);
+  });
+  return fields;
+}
+
+function visibleCatalogSources(sources, options = {}) {
+  const filterField = String(options.filterField || "");
+  const filterText = String(options.filterText || "").trim().toLocaleLowerCase();
+  const sortField = String(options.sortField || "");
+  const sortDirection = options.sortDirection === "desc" ? -1 : 1;
+  const indexed = (Array.isArray(sources) ? sources : []).map((source, index) => ({ source, index }));
+  const visible = filterText
+    ? indexed.filter(({ source }) => {
+        const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
+        const values = filterField ? [metadata[filterField]] : Object.values(metadata);
+        return values.some((value) => String(value || "").toLocaleLowerCase().includes(filterText));
+      })
+    : indexed;
+  if (sortField) {
+    visible.sort((left, right) => {
+      const leftValue = String(left.source.metadata?.[sortField] || "");
+      const rightValue = String(right.source.metadata?.[sortField] || "");
+      const compared = leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" });
+      return compared ? compared * sortDirection : left.index - right.index;
+    });
+  }
+  return visible.map(({ source }) => source);
+}
+
+function setVisibleCatalogSelection(selectedSourceIds, visibleSources, selected) {
+  const next = new Set(selectedSourceIds || []);
+  (visibleSources || []).forEach((source) => {
+    const sourceId = String(source.source_id || source.id || "");
+    if (!sourceId) {
+      return;
+    }
+    if (selected) {
+      next.add(sourceId);
+    } else {
+      next.delete(sourceId);
+    }
+  });
+  return next;
+}
+// CATALOG_UI_LOGIC_END
+
 // Single source of truth for UI-only state. Backend state is still fetched from
 // /api/state, but selections like the active speaker and segment list live here.
 // The legacy "manual" mode value and DOM ids remain for saved-manifest compatibility;
@@ -539,6 +622,8 @@ function analysisFailureMessage(progress) {
 const state = {
   module: "home",
   scan: null,
+  audioCatalog: null,
+  audioCatalogLoadToken: 0,
   mode: "",
   audioMode: "batch",
   analysisSpeakers: [],
@@ -572,6 +657,8 @@ const state = {
   pendingAudioOutput: "",
   activeSpeaker: "",
   selectedSpeakers: new Set(),
+  selectedSourceIds: new Set(),
+  audioSelectedSourceIds: new Set(),
   selectedVideoId: "",
   selectedVideo: null,
   segmentsByVideo: new Map(),
@@ -1294,6 +1381,9 @@ function getAllVideos() {
   if (!state.scan) {
     return [];
   }
+  if (isCatalogScan(state.scan)) {
+    return catalogSources(state.scan);
+  }
   return state.scan.groups.flatMap((group) => group.videos.map((video) => ({ ...video, speaker: group.speaker })));
 }
 
@@ -1301,17 +1391,50 @@ function getSelectedSpeakers() {
   if (!state.scan) {
     return [];
   }
+  if (isCatalogScan(state.scan)) {
+    return Array.from(new Set(getSelectedVideos().map((video) => video.speaker)));
+  }
   return state.scan.groups
     .map((group) => group.speaker)
     .filter((speaker) => state.selectedSpeakers.has(speaker));
 }
 
 function getSelectedVideos() {
+  if (isCatalogScan(state.scan)) {
+    return getAllVideos().filter((video) => state.selectedSourceIds.has(String(video.source_id || video.id || "")));
+  }
   const selected = state.selectedSpeakers;
   return getAllVideos().filter((video) => selected.has(video.speaker));
 }
 
+function getSelectedSourceIds() {
+  return isCatalogScan(state.scan) ? Array.from(state.selectedSourceIds) : [];
+}
+
+function getVisibleCatalogVideos() {
+  if (!isCatalogScan(state.scan)) {
+    return [];
+  }
+  const active = catalogSources(state.scan).filter((video) => video.speaker === state.activeSpeaker);
+  return visibleCatalogSources(active, {
+    filterField: catalogFilterField.value,
+    filterText: catalogFilterText.value,
+    sortField: catalogSortField.value,
+    sortDirection: catalogSortDirection.value,
+  });
+}
+
 function setAllSpeakersSelected(selected) {
+  if (isCatalogScan(state.scan)) {
+    state.selectedSourceIds = setVisibleCatalogSelection(
+      state.selectedSourceIds,
+      getVisibleCatalogVideos(),
+      selected,
+    );
+    renderReview();
+    updateMode();
+    return;
+  }
   state.selectedSpeakers.clear();
   if (selected && state.scan) {
     state.scan.groups.forEach((group) => state.selectedSpeakers.add(group.speaker));
@@ -1328,6 +1451,9 @@ function getActiveGroup() {
 }
 
 function sortVideos(videos) {
+  if (isCatalogScan(state.scan)) {
+    return videos;
+  }
   const sorted = [...videos];
   if (sortSelect.value === "date-desc") {
     sorted.sort((a, b) => parseDateSort(b.upload_date) - parseDateSort(a.upload_date));
@@ -1350,6 +1476,27 @@ function initials(value) {
     .join("");
 }
 
+function configureCatalogMetadataControls() {
+  const catalog = isCatalogScan(state.scan);
+  catalogMetadataControls.classList.toggle("hidden", !catalog);
+  sortSelect.closest("label")?.classList.toggle("hidden", catalog);
+  toggleAllSpeakersButton.classList.toggle("hidden", catalog);
+  if (!catalog) {
+    return;
+  }
+  const fields = catalogMetadataFields(state.scan);
+  const previousFilter = catalogFilterField.value;
+  const previousSort = catalogSortField.value;
+  catalogFilterField.replaceChildren(new Option("All metadata", ""));
+  catalogSortField.replaceChildren(new Option("Catalog order", ""));
+  fields.forEach((field) => {
+    catalogFilterField.appendChild(new Option(field, field));
+    catalogSortField.appendChild(new Option(field, field));
+  });
+  catalogFilterField.value = fields.includes(previousFilter) ? previousFilter : "";
+  catalogSortField.value = fields.includes(previousSort) ? previousSort : "";
+}
+
 function renderScanTabs() {
   scanTabList.innerHTML = "";
   if (!state.scan) {
@@ -1363,14 +1510,28 @@ function renderScanTabs() {
     const tab = document.createElement("div");
     tab.className = "scan-tab";
     tab.classList.toggle("active", group.speaker === state.activeSpeaker);
-    tab.classList.toggle("excluded", !state.selectedSpeakers.has(group.speaker));
+    const groupSourceIds = group.videos.map((video) => String(video.source_id || video.id || "")).filter(Boolean);
+    const selectedInGroup = isCatalogScan(state.scan)
+      ? groupSourceIds.filter((sourceId) => state.selectedSourceIds.has(sourceId)).length
+      : 0;
+    const groupSelected = isCatalogScan(state.scan)
+      ? groupSourceIds.length > 0 && selectedInGroup === groupSourceIds.length
+      : state.selectedSpeakers.has(group.speaker);
+    tab.classList.toggle("excluded", !groupSelected && selectedInGroup === 0);
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = state.selectedSpeakers.has(group.speaker);
+    checkbox.checked = groupSelected;
+    checkbox.indeterminate = isCatalogScan(state.scan) && selectedInGroup > 0 && !groupSelected;
     checkbox.setAttribute("aria-label", `Include ${group.speaker} in this run`);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) {
+      if (isCatalogScan(state.scan)) {
+        state.selectedSourceIds = setVisibleCatalogSelection(
+          state.selectedSourceIds,
+          group.videos,
+          checkbox.checked,
+        );
+      } else if (checkbox.checked) {
         state.selectedSpeakers.add(group.speaker);
       } else {
         state.selectedSpeakers.delete(group.speaker);
@@ -1393,6 +1554,7 @@ function renderScanTabs() {
 }
 
 function renderReview() {
+  configureCatalogMetadataControls();
   renderScanTabs();
   videoGroups.innerHTML = "";
   if (!state.scan) {
@@ -1421,7 +1583,15 @@ function renderReview() {
     return;
   }
   speakerTitle.textContent = group.speaker;
-  videoGroups.appendChild(renderSpeakerGroup(group, sortVideos(group.videos), false));
+  const visibleVideos = isCatalogScan(state.scan) ? getVisibleCatalogVideos() : sortVideos(group.videos);
+  if (isCatalogScan(state.scan) && !visibleVideos.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No sources in this speaker group match the metadata filter.";
+    videoGroups.appendChild(empty);
+  } else {
+    videoGroups.appendChild(renderSpeakerGroup(group, visibleVideos, false));
+  }
   renderManualList();
 }
 
@@ -1442,7 +1612,27 @@ function renderSpeakerGroup(group, videos, manualList) {
 function renderVideoRow(video, manualList) {
   const row = document.createElement("article");
   row.className = "video-row";
+  const catalogRow = isCatalogScan(state.scan);
+  row.classList.toggle("catalog-row", catalogRow && !manualList);
   row.classList.toggle("selected", video.id === state.selectedVideoId);
+  if (catalogRow && !manualList) {
+    const sourceId = String(video.source_id || video.id || "");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "catalog-source-checkbox";
+    checkbox.checked = state.selectedSourceIds.has(sourceId);
+    checkbox.setAttribute("aria-label", `Include ${sourceId} in this run`);
+    checkbox.addEventListener("change", () => {
+      state.selectedSourceIds = setVisibleCatalogSelection(
+        state.selectedSourceIds,
+        [video],
+        checkbox.checked,
+      );
+      renderReview();
+      updateMode();
+    });
+    row.appendChild(checkbox);
+  }
   row.append(renderThumbnail(video));
 
   const main = document.createElement("div");
@@ -1456,6 +1646,16 @@ function renderVideoRow(video, manualList) {
     createMetaSpan(normaliseUploadDate(video.upload_date)),
     createLicensePill(video.license || "Unknown"),
   );
+  if (video.youtube_language) {
+    meta.append(createMetaSpan(`YouTube language: ${video.youtube_language}`));
+  }
+  if (catalogRow && video.metadata && typeof video.metadata === "object") {
+    Object.entries(video.metadata).forEach(([label, value]) => {
+      if (String(value || "").trim()) {
+        meta.append(createMetaSpan(`${label}: ${value}`));
+      }
+    });
+  }
   main.appendChild(meta);
 
   const side = document.createElement("div");
@@ -1464,7 +1664,13 @@ function renderVideoRow(video, manualList) {
     side.textContent = plural(getSegments(video.id).length, "segment");
   } else {
     side.className = "speaker-sub";
-    side.textContent = video.youtube_url ? "YouTube link" : video.source_kind === "docx" ? "YouTube source" : "Local file";
+    side.textContent = catalogRow
+      ? String(video.source_id || video.id || "Source")
+      : video.youtube_url
+        ? "YouTube link"
+        : video.source_kind === "docx"
+          ? "YouTube source"
+          : "Local file";
   }
   row.append(main, side);
   return row;
@@ -1633,6 +1839,11 @@ function invalidateProcurementScan() {
   state.scan = null;
   state.activeSpeaker = "";
   state.selectedSpeakers.clear();
+  state.selectedSourceIds.clear();
+  catalogFilterField.value = "";
+  catalogFilterText.value = "";
+  catalogSortField.value = "";
+  catalogSortDirection.value = "asc";
   state.selectedVideo = null;
   state.selectedVideoId = "";
   state.selectedSegmentId = null;
@@ -1656,6 +1867,11 @@ async function scan() {
     state.scan = result;
     state.activeSpeaker = result.groups[0] ? result.groups[0].speaker : "";
     state.selectedSpeakers = new Set(result.groups.map((group) => group.speaker));
+    state.selectedSourceIds = new Set(
+      isCatalogScan(result)
+        ? catalogSources(result).map((video) => String(video.source_id || video.id || "")).filter(Boolean)
+        : [],
+    );
     state.selectedVideo = null;
     state.selectedVideoId = "";
     state.selectedSegmentId = null;
@@ -1772,6 +1988,8 @@ async function runProcurement(segmentManifest) {
               : requiredNumber(samplePercentInput, "Sample percentage", 0.01, 100) / 100,
         segmentManifest: manifest,
         selectedSpeakers: getSelectedSpeakers(),
+        selectedSourceIds: getSelectedSourceIds(),
+        catalogSha256: isCatalogScan(state.scan) ? String(state.scan.catalog_sha256 || "") : "",
         videoCount: betaRunVideoCount(mode),
         betaOutputMode,
         betaMinCleanSeconds: isCleanSpeakerBeta
@@ -1856,6 +2074,132 @@ function getSelectedAudioMode() {
   return checked ? checked.value : "batch";
 }
 
+function getVisibleAudioCatalogSources() {
+  return visibleCatalogSources(catalogSources(state.audioCatalog), {
+    filterField: audioCatalogFilterField.value,
+    filterText: audioCatalogFilterText.value,
+    sortField: audioCatalogSortField.value,
+    sortDirection: audioCatalogSortDirection.value,
+  });
+}
+
+function getAudioSelectedSourceIds() {
+  if (!isCatalogScan(state.audioCatalog) || audioImportToggle.checked || getSelectedAudioMode() !== "batch") {
+    return [];
+  }
+  return catalogSources(state.audioCatalog)
+    .map((source) => String(source.source_id || source.id || ""))
+    .filter((sourceId) => state.audioSelectedSourceIds.has(sourceId));
+}
+
+function configureAudioCatalogMetadataControls() {
+  const fields = catalogMetadataFields(state.audioCatalog);
+  const previousFilter = audioCatalogFilterField.value;
+  const previousSort = audioCatalogSortField.value;
+  audioCatalogFilterField.replaceChildren(new Option("All metadata", ""));
+  audioCatalogSortField.replaceChildren(new Option("Catalog order", ""));
+  fields.forEach((field) => {
+    audioCatalogFilterField.appendChild(new Option(field, field));
+    audioCatalogSortField.appendChild(new Option(field, field));
+  });
+  audioCatalogFilterField.value = fields.includes(previousFilter) ? previousFilter : "";
+  audioCatalogSortField.value = fields.includes(previousSort) ? previousSort : "";
+}
+
+function clearAudioCatalogSelection() {
+  state.audioCatalogLoadToken += 1;
+  state.audioCatalog = null;
+  state.audioSelectedSourceIds.clear();
+  renderAudioCatalogSelection();
+}
+
+async function loadAudioCatalogSelection() {
+  const sourcePath = audioSourcePathInput.value.trim();
+  if (!sourcePath || audioImportToggle.checked || getSelectedAudioMode() !== "batch") {
+    clearAudioCatalogSelection();
+    return null;
+  }
+  const previousCatalog = state.audioCatalog;
+  const previousSelection = new Set(state.audioSelectedSourceIds);
+  const requestToken = ++state.audioCatalogLoadToken;
+  state.audioCatalog = null;
+  state.audioSelectedSourceIds.clear();
+  renderAudioCatalogSelection();
+  const payload = await api("/api/audio-catalog", {
+    method: "POST",
+    body: { sourcePath },
+  });
+  if (requestToken !== state.audioCatalogLoadToken || audioSourcePathInput.value.trim() !== sourcePath) {
+    return null;
+  }
+  if (!payload.catalog) {
+    renderAudioCatalogSelection();
+    return payload;
+  }
+  const sameManifest = isCatalogScan(previousCatalog)
+    && String(previousCatalog.source_path || "") === String(payload.source_path || "")
+    && String(previousCatalog.catalog_sha256 || "") === String(payload.catalog_sha256 || "");
+  state.audioCatalog = payload;
+  const availableIds = catalogSources(payload).map((source) => String(source.source_id || source.id || ""));
+  state.audioSelectedSourceIds = new Set(
+    sameManifest ? availableIds.filter((sourceId) => previousSelection.has(sourceId)) : availableIds,
+  );
+  renderAudioCatalogSelection();
+  return payload;
+}
+
+function renderAudioCatalogSelection() {
+  const active = isCatalogScan(state.audioCatalog) && !audioImportToggle.checked && getSelectedAudioMode() === "batch";
+  audioCatalogSelection.classList.toggle("hidden", !active);
+  if (!active) {
+    audioCatalogSourceList.replaceChildren();
+    return;
+  }
+  configureAudioCatalogMetadataControls();
+  const sources = catalogSources(state.audioCatalog);
+  const visible = getVisibleAudioCatalogSources();
+  const selectedCount = sources.filter((source) =>
+    state.audioSelectedSourceIds.has(String(source.source_id || source.id || "")),
+  ).length;
+  audioCatalogSelectionSummary.textContent = `${plural(selectedCount, "source")} selected; ${plural(visible.length, "source")} visible.`;
+  audioCatalogSourceList.replaceChildren();
+  if (!visible.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No catalog sources match this metadata filter.";
+    audioCatalogSourceList.appendChild(empty);
+    return;
+  }
+  visible.forEach((source) => {
+    const sourceId = String(source.source_id || source.id || "");
+    const label = document.createElement("label");
+    label.className = "audio-catalog-source-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.audioSelectedSourceIds.has(sourceId);
+    checkbox.setAttribute("aria-label", `Analyse ${sourceId}`);
+    checkbox.addEventListener("change", () => {
+      state.audioSelectedSourceIds = setVisibleCatalogSelection(
+        state.audioSelectedSourceIds,
+        [source],
+        checkbox.checked,
+      );
+      renderAudioCatalogSelection();
+    });
+    const description = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = `${sourceId} — ${source.title || source.link || "Untitled source"}`;
+    const details = document.createElement("small");
+    const metadata = Object.entries(source.metadata || {})
+      .filter(([_field, value]) => String(value || "").trim())
+      .map(([field, value]) => `${field}: ${value}`);
+    details.textContent = [source.speaker || "Pooled (no speaker)", ...metadata].join(" · ");
+    description.append(title, details);
+    label.append(checkbox, description);
+    audioCatalogSourceList.appendChild(label);
+  });
+}
+
 function updateAudioMode() {
   state.audioMode = getSelectedAudioMode();
   const importing = audioImportToggle.checked;
@@ -1878,6 +2222,7 @@ function updateAudioMode() {
     : "Paste downloads folder or MP4 path";
   browseAudioFolderButton.textContent = importing ? "Select processed audio folder" : "Select input folder";
   runAudioButton.textContent = importing ? "Use imported audio outputs" : "Run audio processing";
+  renderAudioCatalogSelection();
 }
 
 function getAnalysisSourceMethod(controls) {
@@ -2405,6 +2750,16 @@ async function runAudioProcessing() {
   state.pendingAudioOutput = "";
   setStatus("Starting audio");
   try {
+    if (getSelectedAudioMode() === "batch") {
+      await loadAudioCatalogSelection();
+      if (audioSourcePathInput.value.trim() !== sourcePath) {
+        throw new Error("Audio source changed while its catalog manifest was loading. Review it again.");
+      }
+    }
+    const selectedSourceIds = getAudioSelectedSourceIds();
+    if (isCatalogScan(state.audioCatalog) && !selectedSourceIds.length) {
+      throw new Error("Select at least one catalog source for audio processing.");
+    }
     const response = await api("/api/run-audio", {
       method: "POST",
       body: {
@@ -2419,6 +2774,10 @@ async function runAudioProcessing() {
         keepTempAudio: audioKeepTempToggle.checked,
         debug: audioDebugToggle.checked,
         stopOnError: audioStopOnErrorToggle.checked,
+        selectedSourceIds: getAudioSelectedSourceIds(),
+        catalogSha256: selectedSourceIds.length && isCatalogScan(state.audioCatalog)
+          ? String(state.audioCatalog.catalog_sha256 || "")
+          : "",
       },
     });
     state.activeRunIds.audio = Number(response.runId || 0) || null;
@@ -2552,12 +2911,15 @@ function createSegmentManifest() {
     const segments = getSegments(video.id);
     segments.forEach((segment, index) => {
       selectedSegments.push({
+        source_id: video.source_id || video.id || null,
         video_id: video.video_id || null,
         video_title: video.title || null,
         speaker: video.speaker,
         source_path: video.source_path,
         source_kind: video.source_kind,
         youtube_url: video.youtube_url || null,
+        metadata: { ...(video.metadata || {}) },
+        youtube_language: video.youtube_language || "",
         segment_index: index + 1,
         start_seconds: segment.start,
         end_seconds: segment.end,
@@ -3220,10 +3582,45 @@ chooseSourceFolderButton.addEventListener("click", () =>
 chooseSourceFileButton.addEventListener("click", () =>
   chooseProcurementSource("source-file").catch((error) => setStatus(error.message)),
 );
-audioModeInputs.forEach((input) => input.addEventListener("change", updateAudioMode));
+audioModeInputs.forEach((input) => input.addEventListener("change", () => {
+  updateAudioMode();
+  loadAudioCatalogSelection().catch((error) => setStatus(error.message));
+}));
 audioImportToggle.addEventListener("change", updateAudioMode);
-browseAudioFolderButton.addEventListener("click", () => browseInto("folder", audioSourcePathInput).catch((error) => setStatus(error.message)));
-browseAudioVideoButton.addEventListener("click", () => browseInto("video", audioSourcePathInput).catch((error) => setStatus(error.message)));
+audioSourcePathInput.addEventListener("input", clearAudioCatalogSelection);
+audioSourcePathInput.addEventListener("change", () => {
+  loadAudioCatalogSelection().catch((error) => setStatus(error.message));
+});
+audioCatalogFilterField.addEventListener("change", renderAudioCatalogSelection);
+audioCatalogFilterText.addEventListener("input", renderAudioCatalogSelection);
+audioCatalogSortField.addEventListener("change", renderAudioCatalogSelection);
+audioCatalogSortDirection.addEventListener("change", renderAudioCatalogSelection);
+audioSelectVisibleSourcesButton.addEventListener("click", () => {
+  state.audioSelectedSourceIds = setVisibleCatalogSelection(
+    state.audioSelectedSourceIds,
+    getVisibleAudioCatalogSources(),
+    true,
+  );
+  renderAudioCatalogSelection();
+});
+audioClearVisibleSourcesButton.addEventListener("click", () => {
+  state.audioSelectedSourceIds = setVisibleCatalogSelection(
+    state.audioSelectedSourceIds,
+    getVisibleAudioCatalogSources(),
+    false,
+  );
+  renderAudioCatalogSelection();
+});
+browseAudioFolderButton.addEventListener("click", () => {
+  clearAudioCatalogSelection();
+  browseInto("folder", audioSourcePathInput)
+    .then((selectedPath) => selectedPath && loadAudioCatalogSelection())
+    .catch((error) => setStatus(error.message));
+});
+browseAudioVideoButton.addEventListener("click", () => {
+  clearAudioCatalogSelection();
+  browseInto("video", audioSourcePathInput).catch((error) => setStatus(error.message));
+});
 browseAudioOutputButton.addEventListener("click", () => browseInto("output", audioOutputRootInput).catch((error) => setStatus(error.message)));
 runAudioButton.addEventListener("click", runAudioProcessing);
 stopAudioButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
@@ -3277,6 +3674,28 @@ manualBackButton.addEventListener("click", () => showScreen("review"));
 backToReviewButton.addEventListener("click", () => showScreen("review"));
 stopButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
 sortSelect.addEventListener("change", renderReview);
+catalogFilterField.addEventListener("change", renderReview);
+catalogFilterText.addEventListener("input", renderReview);
+catalogSortField.addEventListener("change", renderReview);
+catalogSortDirection.addEventListener("change", renderReview);
+selectVisibleSourcesButton.addEventListener("click", () => {
+  state.selectedSourceIds = setVisibleCatalogSelection(
+    state.selectedSourceIds,
+    getVisibleCatalogVideos(),
+    true,
+  );
+  renderReview();
+  updateMode();
+});
+clearVisibleSourcesButton.addEventListener("click", () => {
+  state.selectedSourceIds = setVisibleCatalogSelection(
+    state.selectedSourceIds,
+    getVisibleCatalogVideos(),
+    false,
+  );
+  renderReview();
+  updateMode();
+});
 modeInputs.forEach((input) => input.addEventListener("change", updateMode));
 betaOutputModeInputs.forEach((input) => input.addEventListener("change", updateBetaOutputMode));
 toggleAllSpeakersButton.addEventListener("click", () => {

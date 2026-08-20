@@ -22,6 +22,27 @@ class CliOptionsTests(unittest.TestCase):
 
         self.assertEqual(args.command, "doctor")
 
+    def test_batch_accepts_repeated_source_ids_but_single_does_not(self):
+        parser = build_parser()
+
+        batch_args = parser.parse_args(
+            [
+                "batch",
+                "downloads",
+                "--catalog-sha256",
+                "a" * 64,
+                "--source-id",
+                "source-0002",
+                "--source-id",
+                "source-0001",
+            ]
+        )
+
+        self.assertEqual(batch_args.source_id, ["source-0002", "source-0001"])
+        self.assertEqual(batch_args.catalog_sha256, "a" * 64)
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["single", "clip.mp4", "--source-id", "source-0001"])
+
 
 if __name__ == "__main__":
     unittest.main()

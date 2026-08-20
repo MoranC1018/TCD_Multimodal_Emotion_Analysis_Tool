@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -17,6 +17,7 @@ from procurement.procurement_beta.pipeline import PlannedSegment, ProcurementBet
 from procurement.procurement_beta.resources import wait_for_resource_headroom
 from procurement.procurement_beta.review import write_review_html
 from procurement.video_sampling.naming import make_video_output_folder_name
+from procurement.video_sampling.full_video_download import make_filename_safe
 from procurement.external_tools import credential_free_media_environment, resolve_media_binary
 from procurement.input_limits import (
     MAX_CLEAN_SPEAKER_JSON_BYTES,
@@ -45,6 +46,9 @@ class VideoWorkItem:
     youtube_url: str
     video_id: str
     duration_seconds: float
+    source_id: str = ""
+    source_metadata: dict[str, str] = field(default_factory=dict)
+    youtube_language: str = ""
 
 
 @dataclass(frozen=True)
@@ -588,13 +592,17 @@ def file_cache_identity(path: object) -> dict[str, object]:
 
 
 def output_directory_for_item(run_root: Path, item: VideoWorkItem) -> Path:
-    speaker_dir = safe_name(item.speaker or "Unknown Speaker")
-    identifier = item.video_id
+    root = run_root.expanduser().resolve()
+    parent = root / safe_name(item.speaker) if item.speaker else root
+    identifier = item.source_id or item.video_id
     if not identifier:
         path_hash = hashlib.sha256(str(item.source_path.expanduser().resolve()).encode("utf-8")).hexdigest()[:10]
         identifier = f"{item.source_path.stem}-{path_hash}"
     folder_name = make_video_output_folder_name(item.title or item.source_path.stem, identifier)
-    return run_root / speaker_dir / folder_name
+    candidate = (parent / folder_name).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise ValueError("Clean speaker output mapping escapes the selected run root.")
+    return candidate
 
 
 def write_detection_outputs(output_dir: Path, stem: str, result: DetectionResult) -> None:
@@ -639,6 +647,7 @@ def write_run_manifest(
         "status": status,
         "message": message,
         "input": {
+            "source_id": item.source_id,
             "speaker": item.speaker,
             "title": item.title,
             "source_path": str(item.source_path),
@@ -646,6 +655,8 @@ def write_run_manifest(
             "youtube_url": item.youtube_url,
             "video_id": item.video_id,
             "duration_seconds": item.duration_seconds,
+            "source_metadata": item.source_metadata,
+            "youtube_language": item.youtube_language,
         },
         "options": asdict(options),
         "model_revisions": dict(MODEL_REVISIONS),
@@ -950,6 +961,17 @@ def concat_file_line(path: Path) -> str:
 
 
 def safe_name(value: str) -> str:
-    cleaned = "".join(char if char.isalnum() or char in " ._-" else "_" for char in value).strip()
-    return cleaned.replace(" ", "_") or "untitled"
+    without_controls = "".join("_" if ord(char) < 32 else char for char in str(value or ""))
+    cleaned = make_filename_safe(without_controls, max_length=80)
+    stem = cleaned.split(".", 1)[0].casefold()
+    if stem in {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{number}" for number in range(1, 10)),
+        *(f"lpt{number}" for number in range(1, 10)),
+    }:
+        cleaned = f"_{cleaned}"
+    return cleaned
 

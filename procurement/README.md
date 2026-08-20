@@ -30,7 +30,7 @@ The field accepts:
 
 - a YouTube watch, share, Shorts, or embed URL;
 - a folder tree containing MP4, MOV, MKV, WebM, or AVI files;
-- a DOCX file containing YouTube links in table rows;
+- a CSV or DOCX catalog with a required `Link` column;
 - one MP4, MOV, MKV, WebM, or AVI file.
 
 Wrapping quotes copied with a Windows path are removed safely. Folder trees are
@@ -47,6 +47,64 @@ YouTube metadata resolution is layered:
 
 The Settings screen reports whether the YouTube API key and Hugging Face token
 are configured without exposing either secret to the browser.
+
+## Reusable Source Catalogs
+
+CSV and DOCX catalogs share one row model. Header matching Unicode-normalizes,
+trims, case-folds, and removes spaces, underscores, and hyphens. `Link` is the
+only required header; `Speaker` is optional. Normalized variants of `Upload
+Date`, `Engagement`, `Date Accessed`, and `Length` are ignored, while every
+other nonblank label/value is researcher metadata. Values keep their original
+Unicode content apart from outer whitespace trimming.
+
+In a DOCX, tables without a normalized `Link` header are treated as unrelated
+notes or appendices and skipped. Rows from all Link-bearing tables retain their
+document order; a document with no Link-bearing table is rejected.
+
+Relative local paths resolve from the catalog's directory. Local and YouTube
+rows retain their mixed order, and repeated links remain separate stable
+SourceIDs. The UI exposes arbitrary metadata filters and sorting, but these are
+visibility-only. Selection changes only through explicit source/speaker
+checkboxes or **Select visible**/**Clear visible** controls.
+Audio Processing reads the metadata fields from the sealed manifest in the
+chosen batch folder for a second visibility-only filter/sort pass. It submits
+only explicitly selected SourceIDs and the matching catalog digest; changing to
+an unrelated or legacy folder clears the catalog controls.
+
+Each run writes these immutable files before processing its selected rows:
+
+```text
+<run-root>/
+  source_manifest.json
+  source_metadata.csv
+```
+
+The JSON preserves exact user metadata and records the catalog SHA-256,
+selection, mode/options, the SHA-256 of the exact temporary local-media snapshot
+processed (or the YouTube ID/URL), API-reported YouTube language, and output
+mapping. Clean-speaker processing verifies those sealed snapshot bytes
+immediately before use, so a later change to the original local file cannot
+change the run. `source_metadata.csv` neutralizes
+spreadsheet formulas and uses a collision-free mapping for arbitrary headers;
+the JSON records that export mapping. Researcher `Language` remains separate
+from `YouTubeLanguage`, whose API precedence is `defaultAudioLanguage`, then
+`defaultLanguage`, then blank.
+
+Only `Speaker` controls speaker folders. Blank speakers are pooled directly at
+the run root; metadata never creates folders. Each source output also receives
+`source_context.json`, which carries SourceID and metadata into permitted audio
+processing adapters. Local contexts also carry the sealed media identity; audio
+processing rejects missing, orphaned, duplicate, or mismatched contexts before
+model loading. A successful catalog clean-speaker run keeps its reusable private
+cache and atomically publishes `stitched_imotions.mp4` beside that source
+context, where audio discovery can bind it to the same manifest row.
+
+The reusable coordinator CLI is:
+
+```powershell
+python -m procurement.catalog_runner sources.csv --run-root output\run `
+  --catalog-sha256 <sha256> --source-id source-0001
+```
 
 ## Procurement Modes
 
@@ -92,7 +150,7 @@ unavailable. A successful process with `no_clean_segments` therefore means the
 confidence rules rejected the media; it is not equivalent to a validated clean
 video.
 
-## Command-Line DOCX Pipeline
+## Legacy Command-Line DOCX Pipeline
 
 Run:
 

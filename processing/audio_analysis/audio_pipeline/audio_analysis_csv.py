@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,11 @@ AUDIO_ANALYSIS_METADATA_FIELDS = [
     "SpeakerName",
     "VideoTitle",
     "YoutubeID",
+    "SourceID",
+    "SourceSpeaker",
+    "SourceMetadata",
+    "UserLanguage",
+    "YouTubeLanguage",
     "ModelCategoricalName",
     "ModelCategoricalVersion",
     "ModelDimensionalName",
@@ -93,14 +99,29 @@ def build_audio_analysis_metadata(
     opensmile_feature_set: str,
     window_seconds: float,
     stride_seconds: float,
+    source_context: dict[str, object] | None = None,
 ) -> dict[str, str]:
     context = parse_video_context(input_video)
+    provenance = source_context or {}
+    user_metadata = provenance.get("user_metadata")
+    if not isinstance(user_metadata, dict):
+        user_metadata = {}
+    system_metadata = provenance.get("system_metadata")
+    if not isinstance(system_metadata, dict):
+        system_metadata = {}
+    source_speaker = str(provenance.get("speaker") or "")
+    source_speaker_display = str(provenance.get("speaker_display") or source_speaker)
     return {
         "FormatVersion": "2",
         "SourceFile": str(context.source_file),
-        "SpeakerName": context.speaker_name,
+        "SpeakerName": source_speaker_display if provenance else context.speaker_name,
         "VideoTitle": context.video_title,
         "YoutubeID": context.youtube_id,
+        "SourceID": str(provenance.get("source_id") or ""),
+        "SourceSpeaker": source_speaker,
+        "SourceMetadata": json.dumps(user_metadata, ensure_ascii=False, sort_keys=True),
+        "UserLanguage": str(user_metadata.get("Language") or ""),
+        "YouTubeLanguage": str(system_metadata.get("youtube_language") or ""),
         "ModelCategoricalName": emotion_models.categorical_model_name,
         "ModelCategoricalVersion": emotion_models.categorical_model_version,
         "ModelDimensionalName": emotion_models.dimensional_model_name,

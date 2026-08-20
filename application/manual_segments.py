@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -112,8 +113,8 @@ def process_local_segments(source: Path, run_folder: Path, payload: dict[str, ob
         return {"processed": 0, "recorded_only": 0, "failed": 1}
 
     gap_seconds = max(0.0, float(payload.get("gap_seconds") or 0))
-    grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
-    youtube_grouped: dict[str, list[dict[str, object]]] = defaultdict(list)
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    youtube_grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     recorded_only = 0
     invalid_sources = 0
     manifest_source = str(payload.get("source_path") or source).strip()
@@ -129,14 +130,16 @@ def process_local_segments(source: Path, run_folder: Path, payload: dict[str, ob
             print(f"ERROR: Invalid Focus source identity: {exc}")
             continue
         source_path = Path(str(item.get("source_path") or "")).expanduser()
+        source_id = str(item.get("source_id") or "").strip()
+        source_key = source_id if re.fullmatch(r"source-\d{4,6}", source_id) else ""
         if identity.kind in {"file", "folder"} and source_path.exists() and source_path.is_file() and source_is_allowed(source, source_path):
-            grouped[str(source_path.resolve())].append(item)
+            grouped[(source_key, str(source_path.resolve()))].append(item)
         elif identity.kind == "docx" and identity.reference == os.path.normcase(str(manifest_source_path.resolve())):
-            youtube_grouped[f"https://www.youtube.com/watch?v={identity.youtube_id}"].append(item)
+            youtube_grouped[(source_key, f"https://www.youtube.com/watch?v={identity.youtube_id}")].append(item)
         elif identity.kind == "youtube":
             manifest_video_id = backend.run_docx_extractions.get_youtube_video_id(manifest_source)
             if manifest_video_id and manifest_video_id == identity.youtube_id:
-                youtube_grouped[f"https://www.youtube.com/watch?v={identity.youtube_id}"].append(item)
+                youtube_grouped[(source_key, f"https://www.youtube.com/watch?v={identity.youtube_id}")].append(item)
             else:
                 invalid_sources += 1
                 print("ERROR: A Focus YouTube selection does not match the scanned source.")
@@ -146,18 +149,31 @@ def process_local_segments(source: Path, run_folder: Path, payload: dict[str, ob
 
     processed = 0
     failed = invalid_sources
-    for source_path_text, segments in grouped.items():
+    for (source_id, source_path_text), segments in grouped.items():
         source_video = Path(source_path_text)
         try:
-            process_one_video(source, run_folder, source_video, segments, gap_seconds)
+            process_one_video(
+                source,
+                run_folder,
+                source_video,
+                segments,
+                gap_seconds,
+                target_directory=(run_folder / source_id) if source_id else None,
+            )
             processed += 1
         except Exception as exc:
             failed += 1
             print(f"ERROR processing {source_video}: {exc}")
 
-    for youtube_url, segments in youtube_grouped.items():
+    for (source_id, youtube_url), segments in youtube_grouped.items():
         try:
-            process_one_youtube_video(run_folder, youtube_url, segments, gap_seconds)
+            process_one_youtube_video(
+                run_folder,
+                youtube_url,
+                segments,
+                gap_seconds,
+                target_directory=(run_folder / source_id) if source_id else None,
+            )
             processed += 1
         except Exception as exc:
             failed += 1
@@ -172,8 +188,10 @@ def process_one_video(
     source_video: Path,
     segments: list[dict[str, object]],
     gap_seconds: float,
+    *,
+    target_directory: Path | None = None,
 ) -> None:
-    target_dir = run_folder / target_relative_stem(source_root, source_video)
+    target_dir = target_directory or (run_folder / target_relative_stem(source_root, source_video))
     target_dir.mkdir(parents=True, exist_ok=True)
     if not source_is_allowed(source_root, source_video):
         raise ValueError(f"Focus source is outside the scanned input: {source_video}")
@@ -227,11 +245,13 @@ def process_one_youtube_video(
     youtube_url: str,
     segments: list[dict[str, object]],
     gap_seconds: float,
+    *,
+    target_directory: Path | None = None,
 ) -> None:
     video_id = str(segments[0].get("video_id") or "youtube_video")
     speaker = safe_name(str(segments[0].get("speaker") or "Unknown Speaker"))
     title = safe_name(str(segments[0].get("video_title") or video_id))
-    target_dir = run_folder / speaker / make_video_output_folder_name(title, video_id)
+    target_dir = target_directory or (run_folder / speaker / make_video_output_folder_name(title, video_id))
     target_dir.mkdir(parents=True, exist_ok=True)
 
     segment_files: list[Path] = []

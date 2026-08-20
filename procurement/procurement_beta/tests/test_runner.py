@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -566,6 +567,66 @@ def test_same_named_local_sources_without_video_ids_do_not_collide(tmp_path: Pat
         tmp_path / "run",
         second,
     )
+
+
+def test_output_directory_keeps_pooled_source_at_run_root_and_source_id_collision_free(
+    tmp_path: Path,
+) -> None:
+    pooled = VideoWorkItem(
+        "",
+        "Interview",
+        tmp_path / "source.mp4",
+        "",
+        "abcdefghijk",
+        10,
+        source_id="source-0007",
+    )
+    named = VideoWorkItem(
+        "Speaker A",
+        "Interview",
+        tmp_path / "source.mp4",
+        "",
+        "abcdefghijk",
+        10,
+        source_id="source-0008",
+    )
+
+    pooled_output = output_directory_for_item(tmp_path / "run", pooled)
+    named_output = output_directory_for_item(tmp_path / "run", named)
+
+    assert pooled_output.parent == tmp_path / "run"
+    assert "Unknown" not in str(pooled_output)
+    assert named_output.parent == tmp_path / "run" / "Speaker_A"
+    assert pooled_output != named_output
+
+
+@pytest.mark.parametrize("speaker", ["..", "../outside", r"C:\\outside", "CON", "name. ", "bad\x01name"])
+def test_output_directory_sanitizes_hostile_speaker_segments_within_run_root(
+    tmp_path: Path,
+    speaker: str,
+) -> None:
+    item = VideoWorkItem(speaker, "Interview", tmp_path / "source.mp4", "", "abcdefghijk", 10)
+
+    output = output_directory_for_item(tmp_path / "run", item)
+
+    assert (tmp_path / "run").resolve() in output.parents
+    assert output != (tmp_path / "outside").resolve()
+    assert output.parent.name.casefold() not in {"con", "prn", "aux", "nul", ".."}
+
+
+def test_output_directory_rejects_preexisting_speaker_symlink_escape(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    outside = tmp_path / "outside"
+    run_root.mkdir()
+    outside.mkdir()
+    try:
+        os.symlink(outside, run_root / "Speaker_A", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    item = VideoWorkItem("Speaker A", "Interview", tmp_path / "source.mp4", "", "abcdefghijk", 10)
+
+    with pytest.raises(ValueError, match="escapes"):
+        output_directory_for_item(run_root, item)
 
 def test_find_cached_result_rejects_needs_review_status(tmp_path: Path) -> None:
     item = VideoWorkItem("Speaker One", "A long interview", tmp_path / "source.mp4", "", "abc123", 100)

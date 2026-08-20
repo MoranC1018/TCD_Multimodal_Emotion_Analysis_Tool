@@ -45,12 +45,40 @@ The source resolver accepts:
 
 - one direct YouTube URL;
 - a recursive local folder containing MP4, MOV, MKV, WebM, or AVI;
-- a DOCX table containing YouTube links;
+- a CSV or DOCX catalog containing a required `Link` column;
 - one local video in a supported container.
 
-For folder input, the relative subfolder structure is retained. For DOCX input,
-table rows provide source URLs and available speaker/metadata fields. For a
-direct URL, the canonical YouTube video identifier is retained as provenance.
+For folder input, the relative subfolder structure is retained. CSV and DOCX
+catalogs use the same ordered row model: stable SourceIDs distinguish repeated
+links, relative local links resolve from the catalog directory, optional
+`Speaker` alone controls grouping, and every other nonignored nonblank field is
+user metadata. Blank speakers are pooled without inventing a speaker identity.
+DOCX tables without a normalized `Link` header are skipped as unrelated
+document content; valid Link-bearing tables retain their document order.
+For a direct URL, the canonical YouTube video identifier is retained as
+provenance.
+
+Catalog selection is explicit and independent of metadata filters or sorting.
+Before processing, the run seals `source_manifest.json` and
+`source_metadata.csv`, recording the exact catalog digest, selection, options,
+source identity, user metadata, and output mapping. The JSON retains raw
+metadata; the CSV is spreadsheet-safe. Researcher-supplied `Language` is not
+overwritten by YouTube metadata. The separate YouTube language field uses API
+`defaultAudioLanguage`, then `defaultLanguage`, else blank.
+The audio batch screen reopens the sealed manifest in the chosen input folder,
+can apply its metadata visibility/sort controls, and binds the selected
+SourceIDs plus catalog digest back to that folder. Pooled audio reports retain
+a blank raw source-speaker field but use `Pooled (no speaker)` as the
+analysis-facing display label.
+
+Selected local media is streamed once into a temporary snapshot. The SHA-256
+and byte count recorded in the manifest and per-source context describe that
+snapshot—the bytes actually supplied to Procurement—not a later reopening of a
+mutable original path. Clean-speaker processing revalidates that snapshot's
+digest and byte count immediately before use. Its successful catalog result is
+atomically copied from the private reusable cache to `stitched_imotions.mp4`
+beside the source context, so downstream audio discovery retains the same
+SourceID and manifest binding while private cache files remain excluded.
 
 ### YouTube Metadata
 
@@ -134,6 +162,14 @@ audio_analysis.csv
 opensmile_features.csv
 audio_analysis_manifest.json
 ```
+
+When catalog provenance is present, every audio input must bind one-to-one to
+a selected manifest row through its immutable `source_context.json`. SourceID,
+raw Speaker, user metadata, researcher Language, and YouTube language are
+carried into audio metadata and manifests. The top catalog JSON/CSV sidecars
+are propagated byte-identically into audio and full-stack output roots so later
+analysis can audit source selection without reconstructing it from folder
+names.
 
 `audio_analysis.csv` contains one row per configured analysis window. Window
 duration and stride are explicit run parameters. Overlapping windows are not
@@ -296,8 +332,8 @@ For each reported experiment, retain:
 
 1. Repository commit and branch.
 2. Python version, operating system, CPU/GPU, and installed dependency versions.
-3. Source URL/path, YouTube identifier, title, upload date, licence metadata,
-   and collection date.
+3. SourceID, catalog SHA-256, source URL/canonical local identity, title,
+   user metadata, YouTube-reported language, and collection date.
 4. Procurement mode and every non-default setting.
 5. Selected interval and extraction manifests.
 6. Audio window/stride, OpenSMILE feature set/version, model names, model

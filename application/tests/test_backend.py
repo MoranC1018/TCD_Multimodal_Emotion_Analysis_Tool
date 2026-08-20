@@ -74,6 +74,246 @@ class ProcurementUiBackendTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "metadata JSON exceeds"):
                 backend.read_nearby_metadata(video)
 
+    def test_catalog_scan_preserves_source_order_metadata_pooled_label_and_youtube_language(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            local_video = root / "local.mp4"
+            local_video.write_bytes(b"synthetic video")
+            source = root / "sources.csv"
+            with source.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Link", "Speaker", "Country", "Language", "Upload Date"])
+                writer.writerows(
+                    [
+                        ["local.mp4", "", "Ireland", "Irish", "ignored"],
+                        ["https://youtu.be/abcdefghijk", "Speaker A", "Canada", "French", "ignored"],
+                        ["https://youtu.be/abcdefghijk", "Speaker A", "Japan", "", "ignored"],
+                    ]
+                )
+
+            with (
+                patch.object(backend, "load_youtube_api_key", return_value="key"),
+                patch.object(
+                    backend,
+                    "fetch_youtube_api_metadata",
+                    return_value={
+                        "abcdefghijk": {
+                            "title": "API title",
+                            "duration_seconds": 42,
+                            "youtube_language": "fr-CA",
+                        }
+                    },
+                ),
+            ):
+                result = backend.scan_input_source(source, duration_reader=lambda _path: 12.0)
+
+        self.assertEqual(result.source_kind, "catalog")
+        self.assertEqual(result.catalog_format, "csv")
+        self.assertRegex(result.catalog_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(result.metadata_headers, ["Country", "Language"])
+        self.assertEqual([item.id for item in result.sources], ["source-0001", "source-0002", "source-0003"])
+        self.assertEqual([item.source_kind for item in result.sources], ["file", "youtube", "youtube"])
+        self.assertEqual(result.sources[0].speaker, "Pooled (no speaker)")
+        self.assertEqual(result.sources[0].metadata, {"Country": "Ireland", "Language": "Irish"})
+        self.assertEqual(result.sources[1].metadata["Language"], "French")
+        self.assertEqual(result.sources[1].youtube_language, "fr-CA")
+        self.assertEqual(result.sources[1].source_id, "source-0002")
+        self.assertEqual(result.sources[2].source_id, "source-0003")
+
+    def test_youtube_language_uses_audio_then_default_then_blank(self) -> None:
+        item = backend.VideoItem(
+            id="source-0001",
+            title="https://youtu.be/abcdefghijk",
+            speaker="Pooled (no speaker)",
+            source_path="https://youtu.be/abcdefghijk",
+            source_kind="youtube",
+            youtube_url="https://www.youtube.com/watch?v=abcdefghijk",
+            video_id="abcdefghijk",
+        )
+        cases = [
+            ({"defaultAudioLanguage": "ga", "defaultLanguage": "en"}, "ga"),
+            ({"defaultAudioLanguage": "", "defaultLanguage": "en"}, "en"),
+            ({}, ""),
+        ]
+        for metadata, expected in cases:
+            with self.subTest(metadata=metadata):
+                updated = backend.apply_youtube_metadata([item], {"abcdefghijk": metadata})
+                self.assertEqual(updated[0].youtube_language, expected)
+
+    def test_catalog_command_for_every_mode_binds_digest_and_selected_source_ids(self) -> None:
+        for mode in ("standard", "full", "manual", "clean-speaker-beta"):
+            request = backend.RunRequest(
+                mode=mode,
+                source_path=Path(r"C:\input\sources.csv"),
+                output_root=Path(r"C:\output\run"),
+                selected_ids=["source-0003", "source-0001"],
+                catalog_sha256="a" * 64,
+                segment_manifest=Path(r"C:\segments\selection.json") if mode == "manual" else None,
+                segment_manifest_sha256="b" * 64 if mode == "manual" else "",
+                segment_expected_source=r"C:\input\sources.csv" if mode == "manual" else "",
+            )
+
+            command = backend.build_run_command(
+                request,
+                repo_root=Path(r"C:\repo"),
+                python_executable=Path(r"C:\Python312\python.exe"),
+            )
+
+            with self.subTest(mode=mode):
+                self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "procurement.catalog_runner"])
+                self.assertEqual(command[command.index("--catalog-sha256") + 1], "a" * 64)
+                self.assertEqual(command[command.index("--mode") + 1], mode)
+                source_ids = [command[index + 1] for index, value in enumerate(command) if value == "--source-id"]
+                self.assertEqual(source_ids, ["source-0003", "source-0001"])
+                run_root = Path(command[command.index("--run-root") + 1])
+                self.assertEqual(run_root.parent, Path(r"C:\output\run"))
+                self.assertNotEqual(run_root, Path(r"C:\output\run"))
+
+    def test_long_catalog_stem_preserves_unique_suffix_for_every_fresh_run(self) -> None:
+        source = Path(r"C:\input") / (("very-long-catalog-name-" * 12) + ".csv")
+        request = backend.RunRequest(
+            mode="standard",
+            source_path=source,
+            output_root=Path(r"C:\output"),
+            selected_ids=["source-0001"],
+            catalog_sha256="a" * 64,
+        )
+
+        first = backend.build_run_command(request, repo_root=Path(r"C:\repo"))
+        second = backend.build_run_command(request, repo_root=Path(r"C:\repo"))
+        first_root = Path(first[first.index("--run-root") + 1])
+        second_root = Path(second[second.index("--run-root") + 1])
+
+        self.assertEqual(first_root.parent, Path(r"C:\output"))
+        self.assertLessEqual(len(first_root.name), 120)
+        self.assertNotEqual(first_root, second_root)
+        self.assertIn("_catalog_standard_", first_root.name)
+
+    def test_local_docx_cannot_downgrade_to_legacy_run_without_catalog_authorization(self) -> None:
+        with self.assertRaisesRegex(ValueError, "launcher-validated catalog SHA"):
+            backend.build_run_command(
+                backend.RunRequest(
+                    mode="standard",
+                    source_path=Path(r"C:\input\sources.docx"),
+                    output_root=Path(r"C:\output"),
+                    selected_speakers=["Speaker A"],
+                ),
+                repo_root=Path(r"C:\repo"),
+            )
+
+    def test_catalog_command_preserves_mode_specific_options(self) -> None:
+        request = backend.RunRequest(
+            mode="clean-speaker-beta",
+            source_path=Path(r"C:\input\sources.csv"),
+            output_root=Path(r"C:\output"),
+            selected_ids=["source-0002"],
+            catalog_sha256="a" * 64,
+            percentage=0.25,
+            max_segment_seconds=45,
+            beta_output_mode="percentage",
+            beta_min_clean_seconds=12.0,
+            beta_gap_seconds=2.5,
+            beta_identity_stills=18,
+            beta_scan_fps=1.5,
+            beta_validation_fps=2.5,
+            beta_face_confidence=0.72,
+            beta_speaker_confidence=0.68,
+            beta_worker_count=3,
+            beta_device="cpu",
+            beta_keep_debug=True,
+            beta_resource_guard_percent=12.0,
+            beta_resource_poll_seconds=3.0,
+            beta_resource_guard_timeout_seconds=120.0,
+            beta_parallel_detector_streams=True,
+            beta_reference_audio=Path(r"C:\profiles\speaker.wav"),
+            beta_only_video_ids=["abcdefghijk"],
+            beta_random_one=True,
+            beta_random_seed="repeatable",
+            beta_isolated_video_processes=True,
+            beta_skip_first_videos=12,
+            beta_skip_completed_outputs=True,
+            beta_video_cooldown_seconds=45.0,
+            beta_max_download_height=480,
+            beta_max_affinity_cores=2,
+            beta_native_threads=1,
+            beta_cpu_throttle_high_percent=96.0,
+            beta_cpu_throttle_low_percent=91.0,
+            beta_ram_throttle_high_percent=97.0,
+            beta_ram_throttle_low_percent=92.0,
+        )
+
+        command = backend.build_run_command(
+            request,
+            repo_root=Path(r"C:\repo"),
+            python_executable=Path(r"C:\Python312\python.exe"),
+        )
+
+        expected_pairs = {
+            "--percentage": "0.25",
+            "--max-segment-seconds": "45",
+            "--output-mode": "percentage",
+            "--min-clean-seconds": "12.0",
+            "--gap-seconds": "2.5",
+            "--identity-stills": "18",
+            "--scan-fps": "1.5",
+            "--validation-fps": "2.5",
+            "--face-confidence": "0.72",
+            "--speaker-confidence": "0.68",
+            "--workers": "3",
+            "--device": "cpu",
+            "--resource-guard-percent": "12.0",
+            "--resource-poll-seconds": "3.0",
+            "--resource-guard-timeout-seconds": "120.0",
+            "--reference-audio": str(Path(r"C:\profiles\speaker.wav").resolve()),
+            "--only-video-id": "abcdefghijk",
+            "--random-seed": "repeatable",
+            "--skip-first-videos": "12",
+            "--video-cooldown-seconds": "45.0",
+            "--max-download-height": "480",
+            "--max-affinity-cores": "2",
+            "--native-threads": "1",
+            "--cpu-throttle-high-percent": "96.0",
+            "--cpu-throttle-low-percent": "91.0",
+            "--ram-throttle-high-percent": "97.0",
+            "--ram-throttle-low-percent": "92.0",
+        }
+        for option, expected in expected_pairs.items():
+            with self.subTest(option=option):
+                self.assertEqual(command[command.index(option) + 1], expected)
+        for flag in (
+            "--keep-debug",
+            "--parallel-detectors",
+            "--random-one",
+            "--isolated-video-processes",
+            "--skip-completed-outputs",
+        ):
+            self.assertIn(flag, command)
+
+    def test_manual_catalog_command_preserves_validated_focus_manifest_binding(self) -> None:
+        request = backend.RunRequest(
+            mode="manual",
+            source_path=Path(r"C:\input\sources.docx"),
+            output_root=Path(r"C:\output"),
+            selected_ids=["source-0001"],
+            catalog_sha256="a" * 64,
+            segment_manifest=Path(r"C:\segments\selection.json"),
+            segment_manifest_sha256="b" * 64,
+            segment_expected_source=r"C:\input\sources.docx",
+        )
+
+        command = backend.build_run_command(
+            request,
+            repo_root=Path(r"C:\repo"),
+            python_executable=Path(r"C:\Python312\python.exe"),
+        )
+
+        self.assertEqual(command[command.index("--manifest-sha256") + 1], "b" * 64)
+        self.assertEqual(command[command.index("--expected-source") + 1], r"C:\input\sources.docx")
+        self.assertEqual(
+            command[command.index("--segments-json") + 1],
+            str(Path(r"C:\segments\selection.json").resolve()),
+        )
+
     def test_analysis_speaker_discovery_reads_imported_reports_without_writing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -466,13 +706,14 @@ class ProcurementUiBackendTests(unittest.TestCase):
 
             result = backend.scan_input_source(docx_path)
 
-        self.assertEqual(result.source_kind, "docx")
+        self.assertEqual(result.source_kind, "catalog")
         self.assertEqual(result.groups[0].speaker, "Speaker B")
         video = result.groups[0].videos[0]
         self.assertEqual(video.video_id, "abcdefghijk")
-        self.assertEqual(video.duration_seconds, 436)
-        self.assertEqual(video.upload_date, "2022-04-12")
-        self.assertEqual(video.license, "Creative Commons")
+        self.assertIsNone(video.duration_seconds)
+        self.assertEqual(video.metadata["Date Uploaded"], "2022-04-12")
+        self.assertEqual(video.metadata["License"], "Creative Commons")
+        self.assertNotIn("Length", video.metadata)
 
     def test_docx_scan_accepts_quoted_pasted_windows_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -487,7 +728,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
 
             result = backend.scan_input_source(f'"{docx_path}"', enrich_youtube=False)
 
-        self.assertEqual(result.source_kind, "docx")
+        self.assertEqual(result.source_kind, "catalog")
         self.assertEqual(result.source_path, str(docx_path.resolve()))
         self.assertEqual(result.groups[0].videos[0].video_id, "abcdefghijk")
 
@@ -555,7 +796,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
             table.rows[1].cells[1].text = "Speaker"
             document.save(source)
 
-            with self.assertRaisesRegex(ValueError, "No YouTube links"):
+            with self.assertRaisesRegex(FileNotFoundError, "Catalog local source"):
                 backend.scan_input_source(source, enrich_youtube=False)
 
     def test_run_request_rejects_percentage_outside_zero_to_one(self) -> None:
@@ -674,7 +915,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
         self.assertEqual(command[command.index("-avoid_negative_ts") + 1], "make_zero")
 
-    def test_build_standard_docx_command_uses_normal_sampler_without_api_key(self) -> None:
+    def test_build_standard_docx_catalog_command_uses_source_ids_and_digest(self) -> None:
         repo_root = Path(r"C:\repo")
         command = backend.build_run_command(
             backend.RunRequest(
@@ -683,25 +924,21 @@ class ProcurementUiBackendTests(unittest.TestCase):
                 output_root=Path(r"C:\output"),
                 percentage=0.25,
                 max_segment_seconds=45,
-                selected_speakers=["Speaker B", "Speaker E"],
+                selected_ids=["source-0002", "source-0005"],
+                catalog_sha256="a" * 64,
             ),
             repo_root=repo_root,
             python_executable=Path(r"C:\Python312\python.exe"),
         )
 
-        self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "procurement.video_sampling.run_docx_extractions"])
+        self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "procurement.catalog_runner"])
         self.assertIn(r"C:\input\videos.docx", command)
-        self.assertIn("--speaker-output-root", command)
-        self.assertIn(r"C:\output", command)
-        self.assertIn("--output", command)
-        self.assertIn(r"C:\output\videos_with_extraction_links.docx", command)
-        self.assertIn("--extractor-arg=--percentage", command)
-        self.assertIn("--extractor-arg=0.25", command)
-        self.assertIn("--extractor-arg=--segment-length", command)
-        self.assertIn("--extractor-arg=45", command)
-        self.assertEqual(command.count("--speaker"), 2)
-        self.assertIn("Speaker B", command)
-        self.assertIn("Speaker E", command)
+        self.assertEqual(command[command.index("--percentage") + 1], "0.25")
+        self.assertEqual(command[command.index("--max-segment-seconds") + 1], "45")
+        self.assertEqual(
+            [command[index + 1] for index, value in enumerate(command) if value == "--source-id"],
+            ["source-0002", "source-0005"],
+        )
 
     def test_prepare_docx_source_for_run_uses_local_cache_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -747,23 +984,23 @@ class ProcurementUiBackendTests(unittest.TestCase):
 
         self.assertEqual(settings["youtubeCookiesBrowser"], "")
 
-    def test_build_full_docx_command_uses_license_aware_pipeline(self) -> None:
+    def test_build_full_docx_catalog_command_preserves_full_mode(self) -> None:
         command = backend.build_run_command(
             backend.RunRequest(
                 mode="full",
                 source_path=Path(r"C:\input\videos.docx"),
                 output_root=Path(r"C:\output"),
-                selected_speakers=["Speaker B"],
+                selected_ids=["source-0001"],
+                catalog_sha256="a" * 64,
             ),
             repo_root=Path(r"C:\repo"),
             python_executable=Path(r"C:\Python312\python.exe"),
         )
 
-        self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "procurement.run_pipeline"])
+        self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "procurement.catalog_runner"])
         self.assertIn(r"C:\input\videos.docx", command)
-        self.assertIn("--manual-review-strategy", command)
-        self.assertIn("full-video", command)
-        self.assertEqual(command[command.index("--speaker") + 1], "Speaker B")
+        self.assertEqual(command[command.index("--mode") + 1], "full")
+        self.assertEqual(command[command.index("--source-id") + 1], "source-0001")
 
     def test_build_local_standard_command_forwards_selected_speaker_groups(self) -> None:
         command = backend.build_run_command(
@@ -942,6 +1179,8 @@ class ProcurementUiBackendTests(unittest.TestCase):
                 keep_temp_audio=True,
                 debug=True,
                 stop_on_error=True,
+                selected_source_ids=("source-0003", "source-0001"),
+                catalog_sha256="a" * 64,
             ),
             repo_root=Path(r"C:\repo"),
             python_executable=Path(r"C:\Python312\python.exe"),
@@ -955,6 +1194,11 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertIn("--debug", command)
         self.assertIn("--stop-on-error", command)
         self.assertIn("compare16", command)
+        self.assertEqual(
+            [command[index + 1] for index, value in enumerate(command) if value == "--source-id"],
+            ["source-0003", "source-0001"],
+        )
+        self.assertEqual(command[command.index("--catalog-sha256") + 1], "a" * 64)
 
     def test_audio_single_command_keeps_emotions_enabled_by_default(self) -> None:
         command = backend.build_audio_command(
@@ -997,6 +1241,40 @@ class ProcurementUiBackendTests(unittest.TestCase):
             with self.subTest(request=request):
                 with self.assertRaises(ValueError):
                     backend.build_audio_command(request, repo_root=Path(r"C:\repo"))
+
+    def test_audio_command_rejects_invalid_duplicate_or_single_mode_source_ids(self) -> None:
+        invalid_requests = (
+            backend.AudioRunRequest(
+                mode="batch",
+                source_path=Path(r"C:\downloads"),
+                output_root=Path(r"C:\audio-out"),
+                selected_source_ids=("not-a-source-id",),
+            ),
+            backend.AudioRunRequest(
+                mode="batch",
+                source_path=Path(r"C:\downloads"),
+                output_root=Path(r"C:\audio-out"),
+                selected_source_ids=("source-0001", "source-0001"),
+            ),
+            backend.AudioRunRequest(
+                mode="single",
+                source_path=Path(r"C:\video.mp4"),
+                output_root=Path(r"C:\audio-out"),
+                selected_source_ids=("source-0001",),
+                catalog_sha256="a" * 64,
+            ),
+            backend.AudioRunRequest(
+                mode="batch",
+                source_path=Path(r"C:\downloads"),
+                output_root=Path(r"C:\audio-out"),
+                selected_source_ids=("source-0001",),
+                catalog_sha256="wrong",
+            ),
+        )
+
+        for request in invalid_requests:
+            with self.subTest(request=request), self.assertRaises(ValueError):
+                backend.build_audio_command(request, repo_root=Path(r"C:\repo"))
 
     def test_eula_file_defaults_to_false_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

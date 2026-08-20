@@ -9,6 +9,7 @@ from .batch import run_batch
 from .doctor import run_doctor
 from .full_stack import find_project_root
 from .pipeline import run_single_video
+from .source_context import load_source_context
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root output folder for audio analysis. Defaults to the project output folder.",
     )
     batch.add_argument("--stop-on-error", action="store_true", help="Stop at the first failed video.")
+    batch.add_argument(
+        "--source-id",
+        action="append",
+        default=None,
+        help="Analyse only this catalog SourceID. Repeat for multiple sources.",
+    )
+    batch.add_argument(
+        "--catalog-sha256",
+        default="",
+        help="Expected SHA-256 from the selected batch folder's source manifest.",
+    )
     add_common_options(batch)
 
     subcommands.add_parser("doctor", help="Check Python dependencies, model libraries, and external tools.")
@@ -147,6 +159,7 @@ def main() -> None:
                 device=args.device,
                 keep_temp_audio=args.keep_temp_audio,
                 debug=args.debug,
+                source_context=load_source_context(args.input_video),
                 progress=print_progress,
             )
             print_progress(f"Video analysed: {args.input_video}")
@@ -168,6 +181,8 @@ def main() -> None:
                 device=args.device,
                 keep_temp_audio=args.keep_temp_audio,
                 debug=args.debug,
+                selected_source_ids=args.source_id,
+                expected_catalog_sha256=args.catalog_sha256,
                 progress=print_progress,
             )
             print_progress(f"Input folder: {input_folder.resolve()}")

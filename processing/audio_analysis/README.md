@@ -12,11 +12,13 @@ system.
 
 ## Input
 
-For batch runs, point the script at the procurement `downloads` folder, for
-example:
+For catalog batch runs, point the script at the catalog run root containing
+`source_manifest.json` and `source_metadata.csv`. Legacy procurement
+`downloads` folders remain valid when they do not claim catalog provenance.
+For example:
 
 ```text
-C:\research\multimodal-emotion-analysis\procurement\output\<run>\downloads
+C:\research\multimodal-emotion-analysis\procurement\output\<catalog-run>
 ```
 
 The expected structure is:
@@ -89,6 +91,20 @@ It is kept for audit and later statistical work.
 `audio_analysis_manifest.json` records per-video provenance. The batch-level
 `audio_analysis_manifest.csv` and `run_log.txt` record processed files,
 output paths, model names, window settings, and any errors.
+
+For catalog inputs, the processor verifies that every discovered MP4 maps
+exactly once to a selected manifest SourceID and that its speaker, source,
+metadata, catalog digest, local-media identity, and output location match
+`source_context.json`. Procurement cache/download directories are excluded from
+discovery.
+Missing, duplicate, unknown, or mismatched contexts fail before model loading.
+The top-level `source_manifest.json` and `source_metadata.csv` are copied
+byte-for-byte to the audio run and full-stack export; conflicting reused output
+roots are rejected rather than overwritten. Per-video CSV/JSON outputs include
+`SourceID`, raw `SourceSpeaker`, exact `SourceMetadata`, researcher
+`UserLanguage`, and separate API-derived `YouTubeLanguage`. A pooled source
+keeps a blank raw `SourceSpeaker` value while the analysis-facing `SpeakerName`
+uses the explicit display label `Pooled (no speaker)`.
 
 ## Setup
 
@@ -169,6 +185,17 @@ https://doi.org/10.1145/1873951.1874246. See the root
 python processing\audio_analysis\run_audio_analysis.py batch "path\to\downloads"
 ```
 
+Repeat `--source-id` to analyze only authorized catalog sources and provide the
+digest shown in that same run's `source_manifest.json`. The digest is checked
+before model loading or output writes, and output order remains
+catalog/discovery order:
+
+```powershell
+python processing\audio_analysis\run_audio_analysis.py batch "path\to\catalog-run" `
+  --catalog-sha256 <sha256> `
+  --source-id source-0001 --source-id source-0003
+```
+
 Use `--output "path\to\audio_output"` only when you want a different output
 folder.
 
@@ -214,6 +241,8 @@ python -m processing.audio_analysis.audio_pipeline.run_single "path\to\stitched_
 --skip-emotion-models
 --keep-temp-audio
 --debug
+--catalog-sha256 <sha256>  # binds selected SourceIDs to this batch folder
+--source-id source-0001  # batch commands only; repeat as needed
 ```
 
 Use `egemaps` for the standard OpenSMILE feature set. `compare16` is available

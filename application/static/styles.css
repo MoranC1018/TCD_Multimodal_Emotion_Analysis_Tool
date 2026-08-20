@@ -553,6 +553,38 @@ textarea {
   align-items: start;
 }
 
+.audio-catalog-panel {
+  grid-column: 1 / -1;
+}
+
+.audio-catalog-source-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.audio-catalog-source-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.audio-catalog-source-row span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.audio-catalog-source-row small {
+  color: var(--muted);
+}
+
 .audio-options-panel h3,
 .analysis-options-panel h3,
 .advanced-options {
@@ -1000,6 +1032,48 @@ textarea {
   align-items: center;
   gap: 8px;
   white-space: nowrap;
+}
+
+.catalog-metadata-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.catalog-metadata-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.catalog-metadata-controls input,
+.catalog-metadata-controls select {
+  width: 100%;
+  min-width: 0;
+}
+
+.catalog-selection-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.catalog-source-checkbox {
+  width: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
+.video-row.catalog-row {
+  grid-template-columns: 24px 132px minmax(0, 1fr) auto;
 }
 
 .speaker-title-large {

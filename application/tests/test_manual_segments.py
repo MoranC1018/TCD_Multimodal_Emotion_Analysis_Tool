@@ -218,6 +218,33 @@ class ManualSegmentsTests(unittest.TestCase):
                         process_youtube.assert_not_called()
                         self.assertEqual(result, {"processed": 0, "recorded_only": 0, "failed": 1})
 
+    def test_focus_processor_groups_repeated_catalog_links_by_source_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "clip.mp4"
+            source.write_bytes(b"video placeholder")
+            payload = {
+                "source_path": str(source),
+                "selected_segments": [
+                    {
+                        "source_id": source_id,
+                        "source_path": str(source),
+                        "source_kind": "file",
+                        "start_seconds": 0,
+                        "end_seconds": 10,
+                    }
+                    for source_id in ("source-0001", "source-0002")
+                ],
+            }
+
+            with patch.object(manual_segments, "process_one_video") as process_local:
+                result = manual_segments.process_local_segments(source, root / "output", payload)
+
+        self.assertEqual(process_local.call_count, 2)
+        targets = [call.kwargs["target_directory"] for call in process_local.call_args_list]
+        self.assertEqual([target.name for target in targets], ["source-0001", "source-0002"])
+        self.assertEqual(result, {"processed": 2, "recorded_only": 0, "failed": 0})
+
     def test_build_youtube_segment_command_downloads_only_time_range(self) -> None:
         command = manual_segments.build_youtube_segment_command(
             youtube_url="https://www.youtube.com/watch?v=abcdefghijk",

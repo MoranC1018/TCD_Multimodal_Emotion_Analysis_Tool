@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 import queue
 import random
+import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -60,12 +64,27 @@ from procurement.input_limits import (
 DOWNLOAD_CACHE_LOCK = threading.Lock()
 YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS = 3600
 ISOLATED_CHILD_TIMEOUT_SECONDS = 12 * 60 * 60
+MAX_CATALOG_CONTEXT_BYTES = 256 * 1024 * 1024
+MAX_CATALOG_CONTEXT_ITEMS = 50_000
+SOURCE_ID_PATTERN = re.compile(r"source-\d{4,6}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Experimental clean speaker segment procurement.")
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument(
+        "--source-context",
+        type=Path,
+        default=None,
+        help="Immutable source_context.json supplied by the catalog coordinator.",
+    )
+    parser.add_argument(
+        "--source-id",
+        action="append",
+        default=[],
+        help="Catalog SourceID to process. May be repeated.",
+    )
     parser.add_argument("--output-mode", choices=["clean", "percentage"], default="clean")
     parser.add_argument("--percentage", type=float, default=0.10)
     parser.add_argument("--min-clean-seconds", type=float, default=10.0)
@@ -177,19 +196,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.single_video_json is not None:
         return run_single_video_child(args)
     output_root = args.output_root.expanduser().resolve()
+    if args.source_context is not None and args.source_context.expanduser().resolve().parent != output_root:
+        raise ValueError("Catalog source context must be stored at the selected output root.")
     ensure_output_outside_source(args.source, output_root)
     run_root = output_root / f"clean_speaker_beta_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     cache_root = cache_root_from_output_root(output_root)
     run_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)
 
-    source, videos = videos_from_source_input(args.source, logger=lambda message: print(f"Scan: {message}", flush=True))
+    if args.source_context is not None:
+        catalog_video = catalog_video_from_context(
+            args.source,
+            args.source_context,
+            selected_source_ids=args.source_id,
+        )
+        source, videos = str(args.source), [catalog_video]
+    else:
+        source, videos = videos_from_source_input(
+            args.source,
+            logger=lambda message: print(f"Scan: {message}", flush=True),
+        )
     scanned_count = len(videos)
     videos = deduplicate_videos(
         select_videos(
             videos,
             only_video_ids=args.only_video_id,
             selected_speakers=args.speaker,
+            selected_source_ids=args.source_id,
         )
     )
     ensure_unique_output_destinations(videos, cache_root)
@@ -252,6 +285,12 @@ def main(argv: list[str] | None = None) -> int:
     # instead of paying the network and face-analysis cost again.
 
     unusable = count_unusable_results(results)
+    published_output = publish_catalog_media(
+        args=args,
+        results=results,
+        output_root=output_root,
+        cache_root=cache_root,
+    )
     summary = {
         "source": str(source),
         "output_root": str(run_root),
@@ -260,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         "processed": len(results),
         "failed": failures,
         "unusable": unusable,
+        "published_output": str(published_output) if published_output is not None else "",
         "results": [
             {
                 "status": result.status,
@@ -469,6 +509,12 @@ def run_isolated_parent(
         gc.collect()
 
     unusable = count_unusable_results(results)
+    published_output = publish_catalog_media(
+        args=args,
+        results=results,
+        output_root=output_root,
+        cache_root=cache_root,
+    )
     summary = {
         "source": str(source),
         "scanned": scanned_count,
@@ -479,6 +525,7 @@ def run_isolated_parent(
         "failed": failures,
         "skipped_completed": skipped_completed,
         "unusable": unusable,
+        "published_output": str(published_output) if published_output is not None else "",
         "results": [result_to_payload(result) for result in results],
     }
     (run_root / "clean_speaker_beta_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -726,11 +773,21 @@ def terminate_child_tree(process: subprocess.Popen[str]) -> None:
 
 
 def video_item_from_json(path: Path) -> backend.VideoItem:
-    payload = read_json(path)
+    if path.is_symlink():
+        raise ValueError(f"Isolated video control must not be a symlink: {path}")
+    payload = read_control_json(
+        path,
+        label="isolated catalog video control",
+        max_bytes=MAX_CATALOG_CONTEXT_BYTES,
+        max_items=MAX_CATALOG_CONTEXT_ITEMS,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Isolated video control must be a JSON object.")
+    speaker = str(payload["speaker"]) if "speaker" in payload else "Unknown Speaker"
     return backend.VideoItem(
         id=str(payload.get("id") or ""),
         title=str(payload.get("title") or ""),
-        speaker=str(payload.get("speaker") or "Unknown Speaker"),
+        speaker=speaker,
         source_path=str(payload.get("source_path") or ""),
         source_kind=str(payload.get("source_kind") or "folder"),
         youtube_url=str(payload.get("youtube_url") or ""),
@@ -740,6 +797,12 @@ def video_item_from_json(path: Path) -> backend.VideoItem:
         license=str(payload.get("license") or "Unknown"),
         relative_path=str(payload.get("relative_path") or ""),
         thumbnail_url=str(payload.get("thumbnail_url") or ""),
+        source_id=str(payload.get("source_id") or ""),
+        metadata={
+            str(key): str(value)
+            for key, value in (payload.get("metadata") or {}).items()
+        } if isinstance(payload.get("metadata"), dict) else {},
+        youtube_language=str(payload.get("youtube_language") or ""),
     )
 
 
@@ -788,11 +851,97 @@ def count_unusable_results(results: list[VideoRunResult]) -> int:
     return sum(1 for result in results if result.status not in usable_statuses)
 
 
+def publish_catalog_media(
+    *,
+    args: argparse.Namespace,
+    results: list[VideoRunResult],
+    output_root: Path,
+    cache_root: Path,
+) -> Path | None:
+    """Publish the one usable catalog result beside its source context."""
+
+    if args.source_context is None:
+        return None
+    usable = [result for result in results if result.status in {"ok", "cached"}]
+    if not usable:
+        return None
+    if len(usable) != 1:
+        raise ValueError("A catalog source context must bind to exactly one clean speaker output.")
+
+    result = usable[0]
+    source = Path(result.output_video).expanduser()
+    try:
+        source_details = source.lstat()
+        resolved_source = source.resolve(strict=True)
+        resolved_cache = cache_root.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("Clean speaker catalog output is unavailable for publication.") from exc
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
+    attributes = int(getattr(source_details, "st_file_attributes", 0) or 0)
+    if stat.S_ISLNK(source_details.st_mode) or (reparse_flag and attributes & reparse_flag):
+        raise ValueError("Clean speaker catalog output must not be a symlink or reparse point.")
+    if (
+        not stat.S_ISREG(source_details.st_mode)
+        or resolved_source.name != "stitched_imotions.mp4"
+        or resolved_source == resolved_cache
+        or resolved_cache not in resolved_source.parents
+    ):
+        raise ValueError("Clean speaker catalog output is not a canonical cache artifact.")
+    target = output_root / "stitched_imotions.mp4"
+    _copy_regular_file_atomically(
+        resolved_source,
+        source_details=source_details,
+        target=target,
+    )
+    return target
+
+
+def _copy_regular_file_atomically(
+    source: Path,
+    *,
+    source_details: os.stat_result,
+    target: Path,
+) -> None:
+    """Copy one stable regular file, then replace the public path atomically."""
+
+    temporary = target.parent / f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    try:
+        copied = 0
+        with source.open("rb") as source_handle, temporary.open("xb") as target_handle:
+            opened = os.fstat(source_handle.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _file_identity(source_details) != _file_identity(opened)
+                or source_details.st_size != opened.st_size
+            ):
+                raise ValueError("Clean speaker catalog output changed while it was opened.")
+            for block in iter(lambda: source_handle.read(1024 * 1024), b""):
+                target_handle.write(block)
+                copied += len(block)
+            target_handle.flush()
+            os.fsync(target_handle.fileno())
+            after = os.fstat(source_handle.fileno())
+        if (
+            _open_snapshot(after) != _open_snapshot(opened)
+            or copied != opened.st_size
+        ):
+            raise ValueError("Clean speaker catalog output changed while it was copied.")
+        if not video_file_is_usable(temporary):
+            raise ValueError("Clean speaker catalog output is not usable for publication.")
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def select_videos(
     videos: list[backend.VideoItem],
     *,
     only_video_ids: list[str] | None = None,
     selected_speakers: list[str] | None = None,
+    selected_source_ids: list[str] | None = None,
 ) -> list[backend.VideoItem]:
     """Return videos matching explicit ids and speaker groups in source order."""
 
@@ -803,6 +952,16 @@ def select_videos(
         if run_docx_extractions.speaker_match_key(value)
     }
     selected = list(videos)
+    requested_source_ids = [str(value or "").strip() for value in selected_source_ids or []]
+    if len(requested_source_ids) != len(set(requested_source_ids)):
+        raise ValueError("Selected catalog SourceIDs must be unique.")
+    if requested_source_ids:
+        available_source_ids = {video.source_id for video in videos if video.source_id}
+        unknown = sorted(set(requested_source_ids) - available_source_ids)
+        if unknown:
+            raise ValueError(f"Unknown catalog SourceID selection: {', '.join(unknown)}")
+        requested_set = set(requested_source_ids)
+        selected = [video for video in selected if video.source_id in requested_set]
     if requested_ids:
         selected = [
             video
@@ -884,6 +1043,150 @@ def videos_from_source_input(
     return str(source_path), videos
 
 
+def catalog_video_from_context(
+    source_input: str | Path,
+    context_path: Path,
+    *,
+    selected_source_ids: list[str] | None = None,
+) -> backend.VideoItem:
+    """Build one beta input from the coordinator's bounded immutable context."""
+
+    path = context_path.expanduser()
+    if path.is_symlink():
+        raise ValueError(f"Catalog source context must not be a symlink: {path}")
+    payload = read_control_json(
+        path,
+        label="catalog source context",
+        max_bytes=MAX_CATALOG_CONTEXT_BYTES,
+        max_items=MAX_CATALOG_CONTEXT_ITEMS,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Catalog source context must be a JSON object.")
+    source_id = str(payload.get("source_id") or "")
+    if not SOURCE_ID_PATTERN.fullmatch(source_id):
+        raise ValueError("Catalog source context has an invalid SourceID.")
+    requested = [str(value or "").strip() for value in selected_source_ids or []]
+    if len(requested) != len(set(requested)):
+        raise ValueError("Selected catalog SourceIDs must be unique.")
+    if requested != [source_id]:
+        raise ValueError("Catalog source context does not match the selected SourceID.")
+    resolved_link = str(payload.get("resolved_link") or "").strip()
+    if not resolved_link:
+        raise ValueError("Catalog source context does not match the selected source.")
+    speaker = payload.get("speaker", "")
+    if not isinstance(speaker, str):
+        raise ValueError("Catalog source context Speaker must be text.")
+    metadata = payload.get("user_metadata", {})
+    if not isinstance(metadata, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in metadata.items()
+    ):
+        raise ValueError("Catalog source context metadata must contain text labels and values.")
+    system = payload.get("system_metadata", {})
+    if not isinstance(system, dict):
+        raise ValueError("Catalog source context system metadata must be an object.")
+    source_kind = str(payload.get("source_kind") or "")
+    youtube_id = run_docx_extractions.get_youtube_video_id(resolved_link) if source_kind == "youtube" else ""
+    if source_kind not in {"local", "youtube"} or (source_kind == "youtube" and not youtube_id):
+        raise ValueError("Catalog source context has an unsupported source kind.")
+    if source_kind == "local":
+        processing_source = _validated_local_catalog_snapshot(source_input, payload, resolved_link)
+    else:
+        if not backend.source_references_match(source_input, resolved_link):
+            raise ValueError("Catalog source context does not match the selected source.")
+        processing_source = resolved_link
+    duration_value = system.get("duration_seconds")
+    duration = float(duration_value) if isinstance(duration_value, (int, float)) else None
+    return backend.VideoItem(
+        id=source_id,
+        title=str(system.get("title") or (Path(resolved_link).stem if source_kind == "local" else youtube_id)),
+        speaker=speaker,
+        source_path=str(processing_source),
+        source_kind="file" if source_kind == "local" else "youtube",
+        youtube_url=resolved_link if source_kind == "youtube" else "",
+        video_id=youtube_id,
+        duration_seconds=duration,
+        source_id=source_id,
+        metadata=dict(metadata),
+        youtube_language=str(system.get("youtube_language") or ""),
+    )
+
+
+def _validated_local_catalog_snapshot(
+    source_input: str | Path,
+    context: dict[str, object],
+    original_link: str,
+) -> Path:
+    """Verify and return the coordinator-owned bytes passed to the beta child."""
+
+    identity = context.get("local_identity")
+    if not isinstance(identity, dict):
+        raise ValueError("Catalog source context has no immutable local media identity.")
+    canonical_path = identity.get("canonical_path")
+    expected_digest = identity.get("sha256")
+    expected_size = identity.get("size_bytes")
+    if (
+        not isinstance(canonical_path, str)
+        or not canonical_path.strip()
+        or not backend.source_references_match(canonical_path, original_link)
+        or not isinstance(expected_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        or not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size < 0
+    ):
+        raise ValueError("Catalog source context has an invalid immutable local media identity.")
+
+    supplied = Path(source_input).expanduser()
+    try:
+        before = supplied.lstat()
+    except OSError as exc:
+        raise ValueError("Catalog local media snapshot is unavailable.") from exc
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
+    attributes = int(getattr(before, "st_file_attributes", 0) or 0)
+    if stat.S_ISLNK(before.st_mode) or (reparse_flag and attributes & reparse_flag):
+        raise ValueError("Catalog local media snapshot must not be a symlink or reparse point.")
+    if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+        raise ValueError("Catalog local media snapshot does not match its immutable local media identity.")
+
+    snapshot = supplied.resolve(strict=True)
+    digest = hashlib.sha256()
+    size = 0
+    with snapshot.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(before) != _file_identity(opened):
+            raise ValueError("Catalog local media snapshot changed while it was opened.")
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+        after = os.fstat(handle.fileno())
+    try:
+        current = snapshot.lstat()
+    except OSError as exc:
+        raise ValueError("Catalog local media snapshot changed while it was read.") from exc
+    if (
+        _open_snapshot(after) != _open_snapshot(opened)
+        or _file_identity(current) != _file_identity(opened)
+        or size != expected_size
+        or digest.hexdigest() != expected_digest
+    ):
+        raise ValueError("Catalog local media snapshot does not match its immutable local media identity.")
+    return snapshot
+
+
+def _file_identity(details: os.stat_result) -> tuple[int, int]:
+    return int(details.st_dev), int(details.st_ino)
+
+
+def _open_snapshot(details: os.stat_result) -> tuple[tuple[int, int], int, int, int]:
+    return (
+        _file_identity(details),
+        int(details.st_size),
+        int(details.st_mtime_ns),
+        int(details.st_ctime_ns),
+    )
+
+
 def prepare_work_item(video: backend.VideoItem, temp_root: Path, *, max_download_height: int = 720) -> VideoWorkItem:
     source_path = Path(video.source_path).expanduser()
     if video.source_kind in {"folder", "file"} and source_path.exists() and source_path.is_file():
@@ -901,6 +1204,9 @@ def prepare_work_item(video: backend.VideoItem, temp_root: Path, *, max_download
         youtube_url=video.youtube_url,
         video_id=video.video_id,
         duration_seconds=duration,
+        source_id=video.source_id,
+        source_metadata=dict(video.metadata),
+        youtube_language=video.youtube_language,
     )
 
 
@@ -985,6 +1291,9 @@ def ensure_unique_output_destinations(videos: list[backend.VideoItem], cache_roo
             youtube_url=video.youtube_url,
             video_id=video.video_id,
             duration_seconds=float(video.duration_seconds or 0),
+            source_id=video.source_id,
+            source_metadata=dict(video.metadata),
+            youtube_language=video.youtube_language,
         )
         destination = output_directory_for_item(cache_root, item)
         previous = destinations.get(destination)

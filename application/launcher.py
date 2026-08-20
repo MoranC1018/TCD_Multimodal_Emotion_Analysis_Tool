@@ -117,7 +117,9 @@ class NativeWindowApi:
             selection = self._window.create_file_dialog(
                 dialog_type=10,
                 file_types=(
-                    "Supported sources (*.docx;*.mp4;*.mov;*.mkv;*.webm;*.avi)",
+                    "Supported sources (*.csv;*.docx;*.mp4;*.mov;*.mkv;*.webm;*.avi)",
+                    "Catalog files (*.csv;*.docx)",
+                    "CSV files (*.csv)",
                     "DOCX files (*.docx)",
                     "Video files (*.mp4;*.mov;*.mkv;*.webm;*.avi)",
                 ),
@@ -156,6 +158,10 @@ class LauncherState:
         self.allowed_video_ids: set[str] = set()
         self.allowed_focus_identities: set[backend.FocusSourceIdentity] = set()
         self.allowed_durations: dict[backend.FocusSourceIdentity, float] = {}
+        self.allowed_catalog_path = ""
+        self.allowed_catalog_sha256 = ""
+        self.allowed_catalog_source_ids: set[str] = set()
+        self.allowed_catalog_records: dict[str, backend.VideoItem] = {}
         self.next_run_id = 0
         self.active_run_id = 0
         self.cancelled_run_ids: set[int] = set()
@@ -375,10 +381,97 @@ class LauncherState:
             self.allowed_focus_identities = identities
             self.allowed_durations = durations
 
+    def set_allowed_catalog_scan(self, result: backend.ScanResult) -> None:
+        """Remember the exact catalog snapshot whose SourceIDs the server issued."""
+
+        with self.lock:
+            if result.source_kind != "catalog":
+                self.allowed_catalog_path = ""
+                self.allowed_catalog_sha256 = ""
+                self.allowed_catalog_source_ids = set()
+                self.allowed_catalog_records = {}
+                return
+            self.allowed_catalog_path = os.path.normcase(str(Path(result.source_path).expanduser().resolve()))
+            self.allowed_catalog_sha256 = str(result.catalog_sha256).casefold()
+            self.allowed_catalog_source_ids = {str(item.source_id or item.id) for item in result.sources}
+            self.allowed_catalog_records = {
+                str(item.source_id or item.id): item
+                for item in result.sources
+            }
+
+    def clear_allowed_catalog_scan(self) -> None:
+        """Drop stale SourceID authorization before attempting a new scan."""
+
+        with self.lock:
+            self.allowed_catalog_path = ""
+            self.allowed_catalog_sha256 = ""
+            self.allowed_catalog_source_ids = set()
+            self.allowed_catalog_records = {}
+
+    def validate_catalog_selection(
+        self,
+        catalog_path: Path,
+        catalog_sha256: str,
+        selected_source_ids: Iterable[str],
+    ) -> None:
+        """Authorize selected IDs only against the latest exact server scan."""
+
+        resolved = os.path.normcase(str(catalog_path.expanduser().resolve()))
+        selected = [str(source_id) for source_id in selected_source_ids]
+        with self.lock:
+            if resolved != self.allowed_catalog_path or str(catalog_sha256).casefold() != self.allowed_catalog_sha256:
+                raise ValueError("Catalog selection does not match the latest server scan; scan it again.")
+            if not selected or len(selected) != len(set(selected)):
+                raise ValueError("Choose one or more unique catalog source IDs.")
+            unknown = [source_id for source_id in selected if source_id not in self.allowed_catalog_source_ids]
+            if unknown:
+                raise ValueError(f"Catalog selection contains unknown source IDs: {', '.join(unknown)}")
+
+    def validate_audio_catalog_selection(
+        self,
+        source_path: Path,
+        catalog_sha256: str,
+        selected_source_ids: Iterable[str],
+    ) -> backend.ScanResult:
+        """Bind audio SourceIDs to the sealed manifest under the chosen batch root."""
+
+        selected = [str(source_id) for source_id in selected_source_ids]
+        catalog_run = backend.scan_audio_catalog_run(source_path)
+        if catalog_run is None:
+            raise ValueError("The chosen audio source has no sealed catalog manifest.")
+        if str(catalog_sha256).casefold() != catalog_run.catalog_sha256:
+            raise ValueError("Audio catalog selection does not match the chosen audio source manifest.")
+        if not selected or len(selected) != len(set(selected)):
+            raise ValueError("Choose one or more unique catalog source IDs for audio processing.")
+        available = {str(item.source_id or item.id) for item in catalog_run.sources}
+        unknown = [source_id for source_id in selected if source_id not in available]
+        if unknown:
+            raise ValueError(f"Audio catalog selection contains unknown source IDs: {', '.join(unknown)}")
+        return catalog_run
+
     def is_allowed_media_path(self, path: Path) -> bool:
         resolved = os.path.normcase(str(path.expanduser().resolve()))
         with self.lock:
             return resolved in self.allowed_media_paths
+
+    def catalog_record_for_segment(
+        self,
+        segment: Mapping[str, object],
+        identity: backend.FocusSourceIdentity,
+    ) -> backend.VideoItem | None:
+        """Return the server-scanned catalog record bound to a Focus SourceID."""
+
+        source_id = str(segment.get("source_id") or "")
+        with self.lock:
+            catalog_active = bool(self.allowed_catalog_path)
+            record = self.allowed_catalog_records.get(source_id)
+        if not catalog_active:
+            return None
+        if record is None:
+            raise ValueError(f"Focus segment has an unknown catalog SourceID: {source_id or '<blank>'}")
+        if backend.focus_source_identity(record) != identity:
+            raise ValueError(f"Focus segment identity does not match catalog SourceID {source_id}.")
+        return record
 
     def allowed_duration_for_segment(self, segment: dict[str, object]) -> float | None:
         try:
@@ -538,6 +631,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.handle_run(payload)
             elif parsed.path == "/api/run-audio":
                 self.handle_run_audio(payload)
+            elif parsed.path == "/api/audio-catalog":
+                self.handle_audio_catalog(payload)
             elif parsed.path == "/api/run-analysis":
                 self.handle_run_analysis(payload)
             elif parsed.path == "/api/run-analysis-workflow":
@@ -633,11 +728,13 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 "Enter a YouTube URL, local folder, DOCX list, or supported video file.",
             )
             return
+        APP_STATE.clear_allowed_catalog_scan()
         APP_STATE.log(f"Scanning source: {raw_path}")
         result = backend.scan_input_source(raw_path, logger=lambda message: APP_STATE.log(f"Scan: {message}"))
         APP_STATE.set_allowed_media_items(
             video for group in result.groups for video in group.videos
         )
+        APP_STATE.set_allowed_catalog_scan(result)
         video_count = sum(len(group.videos) for group in result.groups)
         APP_STATE.log(f"Scan complete: {plural(video_count, 'video')} across {plural(len(result.groups), 'speaker group')}.")
         self.send_json(backend.scan_result_to_json(result))
@@ -650,9 +747,22 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.BAD_REQUEST, "Choose a source before running procurement.")
             return
         selected_speakers = payload_text_list(payload.get("selectedSpeakers"))
-        if not selected_speakers:
-            raise ValueError("Select at least one speaker before running procurement.")
-        source_path = backend.prepare_source_for_run(raw_source_path, REPO_ROOT, logger=APP_STATE.log)
+        selected_source_ids = payload_text_list(payload.get("selectedSourceIds"))
+        catalog_sha256 = str(payload.get("catalogSha256") or "").strip().casefold()
+        cleaned_source = backend.clean_user_supplied_path(raw_source_path)
+        direct_youtube_source = bool(backend.run_docx_extractions.get_youtube_video_id(cleaned_source))
+        catalog_source: Path | None = None
+        if not direct_youtube_source:
+            candidate = Path(cleaned_source).expanduser().resolve()
+            if candidate.suffix.casefold() in {".csv", ".docx"}:
+                catalog_source = candidate
+        if catalog_source is not None:
+            APP_STATE.validate_catalog_selection(catalog_source, catalog_sha256, selected_source_ids)
+            source_path = catalog_source
+        else:
+            if not selected_speakers:
+                raise ValueError("Select at least one speaker before running procurement.")
+            source_path = backend.prepare_source_for_run(raw_source_path, REPO_ROOT, logger=APP_STATE.log)
 
         output_root = Path(
             backend.clean_user_supplied_path(str(payload.get("outputRoot") or backend.default_output_root(REPO_ROOT)))
@@ -679,6 +789,9 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             segment_manifest_sha256=segment_handoff.sha256 if segment_handoff else "",
             segment_expected_source=segment_handoff.expected_source if segment_handoff else "",
             selected_speakers=selected_speakers,
+            selected_ids=selected_source_ids,
+            catalog_sha256=catalog_sha256,
+            internal_youtube_source=direct_youtube_source,
             max_segment_seconds=payload_int(payload, "maxSegmentSeconds", 30),
             percentage=payload_float(payload, "percentage", 0.10),
             beta_output_mode=str(payload.get("betaOutputMode") or "clean"),
@@ -738,12 +851,20 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             backend.clean_user_supplied_path(str(payload.get("outputRoot") or backend.default_audio_output_root(REPO_ROOT)))
         ).expanduser()
         mode = str(payload.get("mode") or "batch")
+        selected_source_ids = payload_text_list(payload.get("selectedSourceIds"))
+        catalog_sha256 = str(payload.get("catalogSha256") or "").strip().casefold()
         validate_processing_paths(
             source_path,
             output_root,
             label="Audio",
             source_kind="file" if mode == "single" else "file-or-folder",
         )
+        if selected_source_ids:
+            APP_STATE.validate_audio_catalog_selection(source_path, catalog_sha256, selected_source_ids)
+        elif catalog_sha256:
+            raise ValueError("Choose one or more catalog sources for audio processing.")
+        elif mode.casefold() == "batch" and source_path.is_dir() and backend.scan_audio_catalog_run(source_path) is not None:
+            raise ValueError("Choose one or more catalog sources for audio processing.")
         request = backend.AudioRunRequest(
             mode=mode,
             source_path=source_path,
@@ -756,6 +877,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             keep_temp_audio=payload_bool(payload, "keepTempAudio", False),
             debug=payload_bool(payload, "debug", False),
             stop_on_error=payload_bool(payload, "stopOnError", False),
+            selected_source_ids=tuple(selected_source_ids),
+            catalog_sha256=catalog_sha256,
         )
         command = backend.build_audio_command(request, repo_root=REPO_ROOT)
         APP_STATE.log(f"Starting audio {mode} processing from {source_path.expanduser().resolve()}.")
@@ -765,6 +888,21 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.CONFLICT, "A processing run is already active.")
             return
         self.send_json({"started": True, "runId": run_id, "command": command})
+
+    def handle_audio_catalog(self, payload: dict[str, object]) -> None:
+        """Return catalog metadata sealed into the selected audio batch folder."""
+
+        raw_source_path = required_payload_text(payload, "sourcePath")
+        if raw_source_path is None:
+            raise ValueError("Choose an audio source folder first.")
+        source_path = validate_existing_path(Path(raw_source_path), kind="folder")
+        result = backend.scan_audio_catalog_run(source_path)
+        if result is None:
+            self.send_json({"catalog": False, "source_path": str(source_path)})
+            return
+        response = backend.scan_result_to_json(result)
+        response["catalog"] = True
+        self.send_json(response)
 
     def handle_run_analysis(self, payload: dict[str, object]) -> None:
         """Start the existing post-processing analysis scripts from the UI."""
@@ -1110,11 +1248,30 @@ def validate_segment_manifest(
                 raise ValueError(
                     f"Focus segment {index} ends at {end:.3f}s, after the video duration of {duration:.3f}s."
                 )
-        intervals = grouped.setdefault((identity.kind, f"{identity.reference}:{identity.youtube_id}"), [])
+        catalog_record = APP_STATE.catalog_record_for_segment(raw_segment, identity)
+        if catalog_record is not None:
+            overlap_key = ("source-id", catalog_record.source_id or catalog_record.id)
+        else:
+            overlap_key = (identity.kind, f"{identity.reference}:{identity.youtube_id}")
+        intervals = grouped.setdefault(overlap_key, [])
         if any(start < old_end and end > old_start for old_start, old_end in intervals):
             raise ValueError(f"Focus segment {index} overlaps another selection from the same video.")
         intervals.append((start, end))
         item = dict(raw_segment)
+        if catalog_record is not None:
+            item["source_id"] = catalog_record.source_id or catalog_record.id
+            item["metadata"] = dict(catalog_record.metadata)
+            item["youtube_language"] = catalog_record.youtube_language
+        else:
+            metadata = item.get("metadata", {})
+            if not isinstance(metadata, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in metadata.items()
+            ):
+                raise ValueError(f"Focus segment {index} metadata must contain text labels and values.")
+            youtube_language = item.get("youtube_language", "")
+            if not isinstance(youtube_language, str):
+                raise ValueError(f"Focus segment {index} YouTube language must be text.")
         item["start_seconds"] = round(start, 3)
         item["end_seconds"] = round(end, 3)
         item["length_seconds"] = round(end - start, 3)
@@ -1621,6 +1778,18 @@ def child_process_environment(
         huggingface_token = backend.load_huggingface_token()
         if huggingface_token:
             env["HF_TOKEN"] = huggingface_token
+    elif module == "procurement.catalog_runner":
+        api_key = backend.load_youtube_api_key()
+        if api_key:
+            env["YOUTUBE_API_KEY"] = api_key
+        try:
+            catalog_mode = command[command.index("--mode") + 1].strip().casefold()
+        except (ValueError, IndexError):
+            catalog_mode = "standard"
+        if catalog_mode == "clean-speaker-beta":
+            huggingface_token = backend.load_huggingface_token()
+            if huggingface_token:
+                env["HF_TOKEN"] = huggingface_token
     return env
 
 

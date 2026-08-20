@@ -51,7 +51,7 @@ private vulnerability-reporting process are in [CITATION.cff](CITATION.cff),
 
 | Stage | Available in the application | Current boundary |
 | --- | --- | --- |
-| Procurement | YouTube URL, DOCX list, local video, or recursive folder input | Online metadata depends on YouTube availability and API quota |
+| Procurement | YouTube URL, CSV/DOCX catalog, local video, or recursive folder input | Online metadata depends on YouTube availability and API quota |
 | Standard sampling | Configurable random percentage and maximum clip length | Sampling is random and non-overlapping |
 | Full video | Keeps or downloads the complete source | Requires enough output storage |
 | Focus | Interactive timeline and exact segment selection | MP4 and WebM are the most reliable local preview formats |
@@ -210,7 +210,7 @@ use.
 
 1. Open **Settings**, configure credentials, and keep resource limits enabled.
 2. Open **Procurement**.
-3. Select a YouTube URL, one local video, a recursive folder, or a DOCX list.
+3. Select a YouTube URL, one local video, a recursive folder, or a CSV/DOCX catalog.
 4. Review speaker grouping, title, duration, upload date, thumbnail, and
    licence.
 5. Untick speaker groups that are outside the study.
@@ -234,16 +234,42 @@ supported or marked as an imported folder.
 | --- | --- | --- |
 | YouTube | Watch, share, Shorts, or embed URL | One scanned video |
 | Folder tree | Recursive MP4, MOV, MKV, WebM, or AVI files | Subfolder structure is retained and used for speaker groups |
-| DOCX | YouTube links inside Word table cells or hyperlinks | Speaker/table labels are retained where available |
+| CSV/DOCX catalog | A required `Link` column, optional `Speaker`, and arbitrary study metadata | Rows retain catalog order and stable `source-0001` identifiers |
 | Local video | One MP4, MOV, MKV, WebM, or AVI | Parent folder supplies the initial group |
 
 Leaving the source field blank and selecting **Search** opens an in-app choice
 between a modern folder picker and a modern DOCX/video file picker.
 
-There is no application-level maximum local video byte size. Local media stays
-on disk and is referenced by path. Practical limits are free output storage,
-filesystem format, codec support, duration, resolution, model memory, and
-network availability. FAT32 has a 4 GiB single-file limit; NTFS is recommended.
+There is no application-level maximum local video byte size. The original local
+media stays in place; a selected catalog row is processed from a temporary
+byte-for-byte snapshot whose SHA-256 is sealed into the run manifest and
+revalidated immediately before clean-speaker processing. Successful catalog
+clean-speaker media is atomically published beside its source context for audio
+discovery, while the reusable processing cache remains private. Practical
+limits are free output storage, filesystem format, codec support, duration,
+resolution, model memory, and network availability. FAT32 has a 4 GiB
+single-file limit; NTFS is recommended.
+
+Catalog headers are matched after Unicode normalization, trimming,
+case-folding, and removal of spaces, underscores, and hyphens. `Upload Date`,
+`Engagement`, `Date Accessed`, and `Length` columns are ignored; every other
+nonblank metadata value is retained. Relative local links resolve from the
+catalog directory, YouTube and local rows may be mixed, and repeated links
+remain distinct SourceIDs. Filtering and sorting the review table do not alter
+selection: only the row/speaker checkboxes and **Select visible** or **Clear
+visible** do so. The Audio Processing screen reopens the sealed manifest from
+the chosen batch folder, then offers its own metadata filter, sort, and explicit
+visible-selection controls. The selected SourceIDs and catalog digest are bound
+back to that same folder when the audio command starts.
+
+Every catalog run creates a fresh child run directory. Before media processing
+it seals `source_manifest.json` and spreadsheet-safe `source_metadata.csv` at
+that run root. These record the catalog digest, row identity, explicit
+selection, procurement options, user metadata, YouTube-reported language, and
+source-to-output mapping. For a local row, the same sealed file identity is
+carried into `source_context.json` and verified by audio processing. A named `Speaker` creates a speaker folder; a blank
+speaker is shown as **Pooled (no speaker)** and stays directly under the run
+root. Metadata fields never create directories.
 
 ### Procurement Modes
 
@@ -445,6 +471,15 @@ Run the DOCX Procurement pipeline:
 
 ```powershell
 python -m procurement.run_pipeline "C:\path\to\input.docx"
+```
+
+Run a reusable CSV/DOCX catalog from the command line after recording its
+SHA-256 and chosen SourceIDs:
+
+```powershell
+python -m procurement.catalog_runner "C:\path\to\sources.csv" `
+  --run-root "C:\path\to\run" --catalog-sha256 <sha256> `
+  --source-id source-0001 --source-id source-0003
 ```
 
 Useful Procurement options:

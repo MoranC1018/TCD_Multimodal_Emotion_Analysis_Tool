@@ -343,7 +343,6 @@ class BrowserDependencyResolutionTests(unittest.TestCase):
                     self.assertEqual(discovered["channel"], "msedge")
                     self.assertEqual(discovered["executablePath"], str(edge))
                     self.assertFalse(discovered["explicitExecutable"])
-
     def test_strict_browser_mode_accepts_common_truthy_values(self) -> None:
         for value in ("1", "true", "YES", "on"):
             with self.subTest(value=value):
@@ -410,6 +409,24 @@ class BrowserDependencyResolutionTests(unittest.TestCase):
                     resolve_node_for_harness(probe, "Analysis logic harness")
 
 
+class CatalogUiLogicTests(unittest.TestCase):
+    def test_catalog_filter_sort_and_visible_selection_logic(self) -> None:
+        node_command = resolve_node_for_harness(self, "Catalog logic harness")
+        completed = subprocess.run(
+            [
+                node_command,
+                "-e",
+                (UI_ROOT / "tests" / "catalog_ui_logic_harness.js").read_text(encoding="utf-8"),
+                str(UI_ROOT / "static" / "app.js"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+
 class ReleaseUiContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -422,9 +439,46 @@ class ReleaseUiContractTests(unittest.TestCase):
     def test_procurement_has_one_universal_search_control(self) -> None:
         self.assertEqual(self.html.count('id="scanButton"'), 1)
         self.assertNotIn('id="browseFolderButton"', self.html)
+
+    def test_catalog_ui_exposes_metadata_visibility_and_explicit_source_selection(self) -> None:
+        for control_id in (
+            "catalogFilterField",
+            "catalogFilterText",
+            "catalogSortField",
+            "catalogSortDirection",
+            "selectVisibleSourcesButton",
+            "clearVisibleSourcesButton",
+        ):
+            self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn("CSV or DOCX catalog", self.html)
+        self.assertIn("selectedSourceIds: getSelectedSourceIds()", self.javascript)
+        self.assertIn("catalogSha256:", self.javascript)
+        self.assertIn("source_id: video.source_id", self.javascript)
+        self.assertIn("metadata: { ...(video.metadata || {}) }", self.javascript)
+        self.assertIn('youtube_language: video.youtube_language || ""', self.javascript)
         self.assertNotIn('id="browseDocxButton"', self.html)
         self.assertNotIn('id="browseVideoButton"', self.html)
         self.assertIn('placeholder="Paste a YouTube URL or local path"', self.html)
+
+    def test_audio_ui_reuses_catalog_metadata_filter_and_selected_source_ids(self) -> None:
+        for control_id in (
+            "audioCatalogSelection",
+            "audioCatalogFilterField",
+            "audioCatalogFilterText",
+            "audioCatalogSortField",
+            "audioCatalogSortDirection",
+            "audioSelectVisibleSourcesButton",
+            "audioClearVisibleSourcesButton",
+            "audioCatalogSourceList",
+        ):
+            self.assertIn(f'id="{control_id}"', self.html)
+        self.assertIn("function renderAudioCatalogSelection()", self.javascript)
+        self.assertIn("selectedSourceIds: getAudioSelectedSourceIds()", self.javascript)
+        self.assertIn('api("/api/audio-catalog"', self.javascript)
+        self.assertIn("catalogSources(state.audioCatalog)", self.javascript)
+        self.assertIn("state.audioSelectedSourceIds", self.javascript)
+        self.assertIn('catalogSha256: selectedSourceIds.length && isCatalogScan(state.audioCatalog)', self.javascript)
+        self.assertIn('audioSourcePathInput.addEventListener("input", clearAudioCatalogSelection)', self.javascript)
 
     def test_stage_tiles_use_research_workflow_wording(self) -> None:
         for expected in (
@@ -449,7 +503,7 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertNotIn('setStatus("Enter a YouTube URL, local folder, DOCX list, or video file.");', self.javascript)
 
     def test_supported_formats_are_explicit_and_docx_wording_is_consistent(self) -> None:
-        for expected in ("YouTube URL", "Folder tree", "DOCX list", "Local video"):
+        for expected in ("YouTube URL", "Folder tree", "CSV or DOCX catalog", "Local video"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.html)
         for extension in (".mp4", ".mov", ".mkv", ".webm", ".avi"):

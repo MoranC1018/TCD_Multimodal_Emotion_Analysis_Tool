@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import unittest
 import tempfile
@@ -20,6 +21,57 @@ NEUTRAL_SPEAKERS = tuple(
     _Speaker(f"speaker_{letter.casefold()}", f"Speaker {letter}", f"Speaker {letter}", "Group", column, (f"speaker {letter.casefold()}",))
     for letter, column in zip("ABCDE", "DEFGH")
 )
+
+
+def write_catalog_audio_run(
+    run_root: Path,
+    *,
+    catalog_sha256: str,
+    title: str,
+    source_id: str = "source-0001",
+    additional_source_ids: tuple[str, ...] = (),
+) -> None:
+    """Create the sealed pair reopened by the audio selection endpoint."""
+
+    run_root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "format_version": 1,
+        "catalog": {
+            "path": str(run_root / "sources.csv"),
+            "format": "csv",
+            "sha256": catalog_sha256,
+            "metadata_headers": ["Country"],
+        },
+        "sources": [
+            {
+                "source_id": current_source_id,
+                "link": "https://www.youtube.com/watch?v=abcdefghijk",
+                "resolved_link": "https://www.youtube.com/watch?v=abcdefghijk",
+                "source_kind": "youtube",
+                "speaker": "",
+                "speaker_display": "Pooled (no speaker)",
+                "selected": True,
+                "system_metadata": {
+                    "title": title,
+                    "duration_seconds": 10,
+                    "youtube_language": "en",
+                },
+                "user_metadata": {"Country": title},
+                "output_mapping": {"video_directory": str(run_root / f"{current_source_id}_{title}")},
+                "youtube": {
+                    "video_id": "abcdefghijk",
+                    "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                },
+            }
+            for current_source_id in (source_id, *additional_source_ids)
+        ],
+    }
+    (run_root / "source_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (run_root / "source_metadata.csv").write_text(
+        "SourceID,Selected,Country\n"
+        + "".join(f"{current_source_id},true,{title}\n" for current_source_id in (source_id, *additional_source_ids)),
+        encoding="utf-8",
+    )
 
 
 def neutral_resolve_speaker(value: str):
@@ -178,6 +230,153 @@ class LauncherProgressTests(unittest.TestCase):
 
         self.assertEqual(progress["current"], 12)
         self.assertEqual(progress["label"], "12 audio videos processed")
+
+    def test_audio_handler_authorizes_catalog_selection_and_repeats_source_id_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            catalog_path = root / "sources.csv"
+            catalog_path.write_text("Link\n", encoding="utf-8")
+            source = root / "procurement-run"
+            write_catalog_audio_run(
+                source,
+                catalog_sha256="a" * 64,
+                title="Run A",
+                additional_source_ids=("source-0002",),
+            )
+            output = root / "audio-output"
+            items = [
+                backend.VideoItem(
+                    id=source_id,
+                    source_id=source_id,
+                    title=source_id,
+                    speaker="",
+                    source_path=f"https://www.youtube.com/watch?v={video_id}",
+                    source_kind="youtube",
+                    youtube_url=f"https://www.youtube.com/watch?v={video_id}",
+                    video_id=video_id,
+                )
+                for source_id, video_id in (
+                    ("source-0001", "abcdefghijk"),
+                    ("source-0002", "lmnopqrstuv"),
+                )
+            ]
+            state = launcher.LauncherState()
+            state.set_allowed_catalog_scan(
+                backend.ScanResult(
+                    source_path=str(catalog_path),
+                    source_kind="catalog",
+                    groups=[],
+                    sources=items,
+                    catalog_sha256="a" * 64,
+                    catalog_format="csv",
+                )
+            )
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+
+            with (
+                patch.object(launcher, "APP_STATE", state),
+                patch.object(launcher, "REPO_ROOT", root / "repo"),
+                patch.object(launcher, "start_process", return_value=41),
+            ):
+                handler.handle_run_audio(
+                    {
+                        "mode": "batch",
+                        "sourcePath": str(source),
+                        "outputRoot": str(output),
+                        "selectedSourceIds": ["source-0002", "source-0001"],
+                        "catalogSha256": "a" * 64,
+                    }
+                )
+
+            command = responses[0]["command"]
+            self.assertEqual(
+                [command[index + 1] for index, value in enumerate(command) if value == "--source-id"],
+                ["source-0002", "source-0001"],
+            )
+            self.assertEqual(command[command.index("--catalog-sha256") + 1], "a" * 64)
+
+            with (
+                patch.object(launcher, "APP_STATE", state),
+                patch.object(launcher, "start_process", side_effect=AssertionError("unknown IDs must be rejected")),
+                self.assertRaisesRegex(ValueError, "unknown source IDs"),
+            ):
+                handler.handle_run_audio(
+                    {
+                        "mode": "batch",
+                        "sourcePath": str(source),
+                        "outputRoot": str(output),
+                        "selectedSourceIds": ["source-9999"],
+                        "catalogSha256": "a" * 64,
+                    }
+                )
+
+    def test_audio_selection_is_bound_to_chosen_run_when_source_ids_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_a = root / "run-a"
+            run_b = root / "run-b"
+            output = root / "audio-output"
+            write_catalog_audio_run(run_a, catalog_sha256="a" * 64, title="Run A")
+            write_catalog_audio_run(run_b, catalog_sha256="b" * 64, title="Run B")
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+
+            with (
+                patch.object(launcher, "REPO_ROOT", root / "repo"),
+                patch.object(launcher, "start_process", side_effect=AssertionError("mismatched run must not start")),
+                self.assertRaisesRegex(ValueError, "chosen audio source"),
+            ):
+                handler.handle_run_audio(
+                    {
+                        "mode": "batch",
+                        "sourcePath": str(run_b),
+                        "outputRoot": str(output),
+                        "selectedSourceIds": ["source-0001"],
+                        "catalogSha256": "a" * 64,
+                    }
+                )
+
+            with (
+                patch.object(launcher, "REPO_ROOT", root / "repo"),
+                patch.object(launcher, "start_process", return_value=57),
+            ):
+                handler.handle_run_audio(
+                    {
+                        "mode": "batch",
+                        "sourcePath": str(run_b),
+                        "outputRoot": str(output),
+                        "selectedSourceIds": ["source-0001"],
+                        "catalogSha256": "b" * 64,
+                    }
+                )
+
+            command = responses[-1]["command"]
+            self.assertEqual(command[command.index("--catalog-sha256") + 1], "b" * 64)
+
+    def test_audio_catalog_endpoint_reopens_existing_run_and_ignores_legacy_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_root = root / "existing-run"
+            legacy_root = root / "legacy"
+            write_catalog_audio_run(run_root, catalog_sha256="c" * 64, title="Reopened")
+            legacy_root.mkdir()
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+
+            handler.handle_audio_catalog({"sourcePath": str(run_root)})
+            handler.handle_audio_catalog({"sourcePath": str(legacy_root)})
+
+            reopened, legacy = responses
+            self.assertTrue(reopened["catalog"])
+            self.assertEqual(reopened["catalog_sha256"], "c" * 64)
+            self.assertEqual(reopened["sources"][0]["source_id"], "source-0001")
+            self.assertEqual(reopened["sources"][0]["title"], "Reopened")
+            self.assertEqual(Path(reopened["source_path"]), run_root.resolve())
+            self.assertEqual(legacy, {"catalog": False, "source_path": str(legacy_root.resolve())})
 
     def test_progress_reads_clean_speaker_beta_summary_lines(self) -> None:
         progress = launcher.parse_progress_line("Clean speaker beta complete: 7 processed, 2 failed.")
@@ -655,7 +854,7 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(observed["source"], prepared_source.resolve())
         self.assertEqual(observed["manifest_source"], raw_source)
 
-    def test_external_docx_focus_command_accepts_launcher_cache_source(self) -> None:
+    def test_external_docx_focus_command_uses_catalog_digest_and_source_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             repo_root = root / "repo"
@@ -672,11 +871,12 @@ class LauncherProgressTests(unittest.TestCase):
             table.rows[1].cells[2].text = "00:01:00"
             document.save(raw_source)
             item = backend.VideoItem(
-                id="docx:abcdefghijk:0:1",
+                id="source-0001",
+                source_id="source-0001",
                 title="Speech",
                 speaker="Speaker A",
-                source_path=str(raw_source),
-                source_kind="docx",
+                source_path="https://www.youtube.com/watch?v=abcdefghijk",
+                source_kind="youtube",
                 youtube_url="https://www.youtube.com/watch?v=abcdefghijk",
                 video_id="abcdefghijk",
                 duration_seconds=60,
@@ -686,14 +886,17 @@ class LauncherProgressTests(unittest.TestCase):
                 "outputRoot": str(output_root),
                 "mode": "manual",
                 "selectedSpeakers": ["Speaker A"],
+                "selectedSourceIds": ["source-0001"],
+                "catalogSha256": "a" * 64,
                 "videoCount": 1,
                 "segmentManifest": {
                     "source_path": str(raw_source),
                     "selected_segments": [
                         {
+                            "source_id": "source-0001",
                             "speaker": "Speaker A",
-                            "source_kind": "docx",
-                            "source_path": str(raw_source),
+                            "source_kind": "youtube",
+                            "source_path": "https://www.youtube.com/watch?v=abcdefghijk",
                             "youtube_url": "https://www.youtube.com/watch?v=abcdefghijk",
                             "video_id": "abcdefghijk",
                             "start_seconds": 0,
@@ -704,6 +907,16 @@ class LauncherProgressTests(unittest.TestCase):
             }
             state = launcher.LauncherState()
             state.set_allowed_media_items([item])
+            state.set_allowed_catalog_scan(
+                backend.ScanResult(
+                    source_path=str(raw_source),
+                    source_kind="catalog",
+                    groups=[],
+                    sources=[item],
+                    catalog_sha256="a" * 64,
+                    catalog_format="docx",
+                )
+            )
             handler = object.__new__(launcher.VideoStackUiHandler)
             responses: list[dict[str, object]] = []
             handler.send_json = responses.append
@@ -717,24 +930,10 @@ class LauncherProgressTests(unittest.TestCase):
 
             command = responses[0]["command"]
             self.assertIsInstance(command, list)
-            prepared_source = Path(command[command.index("--source") + 1])
-            self.assertNotEqual(prepared_source.resolve(), raw_source.resolve())
-            observed: dict[str, object] = {}
-
-            def process(source: Path, _run_folder: Path, manifest: dict[str, object]) -> dict[str, int]:
-                observed["source"] = source
-                observed["manifest_source"] = manifest.get("source_path")
-                return {"processed": 1, "recorded_only": 0, "failed": 0}
-
-            with (
-                patch.object(sys, "argv", [str(command[2]), *command[3:]]),
-                patch.object(manual_segments, "process_local_segments", side_effect=process),
-            ):
-                result = manual_segments.main()
-
-        self.assertEqual(result, 0)
-        self.assertEqual(observed["source"], prepared_source.resolve())
-        self.assertEqual(observed["manifest_source"], str(raw_source))
+            self.assertEqual(command[:3], [sys.executable, "-m", "procurement.catalog_runner"])
+            self.assertEqual(Path(command[3]).resolve(), raw_source.resolve())
+            self.assertEqual(command[command.index("--catalog-sha256") + 1], "a" * 64)
+            self.assertEqual(command[command.index("--source-id") + 1], "source-0001")
 
     def test_native_window_api_destroys_bound_window(self) -> None:
         window = Mock()
@@ -774,7 +973,9 @@ class LauncherProgressTests(unittest.TestCase):
         window.create_file_dialog.assert_called_once_with(
             dialog_type=10,
             file_types=(
-                "Supported sources (*.docx;*.mp4;*.mov;*.mkv;*.webm;*.avi)",
+                "Supported sources (*.csv;*.docx;*.mp4;*.mov;*.mkv;*.webm;*.avi)",
+                "Catalog files (*.csv;*.docx)",
+                "CSV files (*.csv)",
                 "DOCX files (*.docx)",
                 "Video files (*.mp4;*.mov;*.mkv;*.webm;*.avi)",
             ),
@@ -834,6 +1035,14 @@ class LauncherProgressTests(unittest.TestCase):
                 ["python", "-m", "procurement.procurement_beta.cli"],
                 base_environment=inherited,
             )
+            catalog_standard = launcher.child_process_environment(
+                ["python", "-m", "procurement.catalog_runner", "sources.csv", "--mode", "standard"],
+                base_environment=inherited,
+            )
+            catalog_clean = launcher.child_process_environment(
+                ["python", "-m", "procurement.catalog_runner", "sources.csv", "--mode", "clean-speaker-beta"],
+                base_environment=inherited,
+            )
 
         self.assertNotIn("YOUTUBE_API_KEY", manual)
         self.assertNotIn("HF_TOKEN", manual)
@@ -841,6 +1050,10 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertNotIn("HF_TOKEN", pipeline)
         self.assertEqual(clean_speaker["HF_TOKEN"], "stored-hf")
         self.assertNotIn("YOUTUBE_API_KEY", clean_speaker)
+        self.assertEqual(catalog_standard["YOUTUBE_API_KEY"], "stored-youtube")
+        self.assertNotIn("HF_TOKEN", catalog_standard)
+        self.assertEqual(catalog_clean["YOUTUBE_API_KEY"], "stored-youtube")
+        self.assertEqual(catalog_clean["HF_TOKEN"], "stored-hf")
 
     def test_stop_requested_while_starting_terminates_child_on_attach(self) -> None:
         state = launcher.LauncherState()
@@ -1024,6 +1237,216 @@ class LauncherProgressTests(unittest.TestCase):
             )
 
         self.assertTrue(accepted)
+
+    def test_catalog_selection_is_authorized_against_the_exact_server_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog_path = Path(temp_dir) / "sources.csv"
+            catalog_path.write_text("Link\nlocal.mp4\n", encoding="utf-8")
+            items = [
+                backend.VideoItem(
+                    id=f"source-{index:04d}",
+                    source_id=f"source-{index:04d}",
+                    title=f"Source {index}",
+                    speaker="Pooled (no speaker)",
+                    source_path=str(Path(temp_dir) / f"local-{index}.mp4"),
+                    source_kind="file",
+                )
+                for index in (1, 2)
+            ]
+            result = backend.ScanResult(
+                source_path=str(catalog_path),
+                source_kind="catalog",
+                groups=[],
+                sources=items,
+                catalog_sha256="a" * 64,
+                catalog_format="csv",
+            )
+            state = launcher.LauncherState()
+            state.set_allowed_catalog_scan(result)
+
+            state.validate_catalog_selection(
+                catalog_path,
+                "a" * 64,
+                ["source-0002", "source-0001"],
+            )
+            invalid = (
+                (catalog_path, "b" * 64, ["source-0001"]),
+                (Path(temp_dir) / "other.csv", "a" * 64, ["source-0001"]),
+                (catalog_path, "a" * 64, ["source-9999"]),
+                (catalog_path, "a" * 64, ["source-0001", "source-0001"]),
+                (catalog_path, "a" * 64, []),
+            )
+            for path, digest, source_ids in invalid:
+                with self.subTest(path=path, digest=digest, source_ids=source_ids), self.assertRaises(ValueError):
+                    state.validate_catalog_selection(path, digest, source_ids)
+
+    def test_focus_catalog_record_binds_repeated_link_source_id_metadata_and_language(self) -> None:
+        youtube = "https://www.youtube.com/watch?v=abcdefghijk"
+        items = [
+            backend.VideoItem(
+                id=f"source-{index:04d}",
+                source_id=f"source-{index:04d}",
+                title="Speech",
+                speaker="Pooled (no speaker)",
+                source_path=youtube,
+                source_kind="youtube",
+                youtube_url=youtube,
+                video_id="abcdefghijk",
+                duration_seconds=30,
+                metadata={"Country": country},
+                youtube_language=language,
+            )
+            for index, country, language in ((1, "Ireland", "ga"), (2, "Canada", "fr"))
+        ]
+        state = launcher.LauncherState()
+        state.set_allowed_media_items(items)
+        state.set_allowed_catalog_scan(
+            backend.ScanResult(
+                source_path=str(Path("sources.csv").resolve()),
+                source_kind="catalog",
+                groups=[],
+                sources=items,
+                catalog_sha256="a" * 64,
+            )
+        )
+        manifest = {
+            "gap_seconds": 0,
+            "selected_segments": [
+                {
+                    "source_id": "source-0002",
+                    "source_kind": "youtube",
+                    "source_path": youtube,
+                    "youtube_url": youtube,
+                    "video_id": "abcdefghijk",
+                    "speaker": "Pooled (no speaker)",
+                    "metadata": {"Country": "spoofed"},
+                    "youtube_language": "spoofed",
+                    "start_seconds": 1,
+                    "end_seconds": 5,
+                }
+            ],
+        }
+
+        with patch.object(launcher, "APP_STATE", state):
+            normalized = launcher.validate_segment_manifest(manifest, require_scanned_source=True)
+
+        self.assertEqual(normalized[0]["source_id"], "source-0002")
+        self.assertEqual(normalized[0]["metadata"], {"Country": "Canada"})
+        self.assertEqual(normalized[0]["youtube_language"], "fr")
+
+    def test_focus_overlap_is_scoped_by_source_id_for_repeated_catalog_links(self) -> None:
+        youtube = "https://www.youtube.com/watch?v=abcdefghijk"
+        items = [
+            backend.VideoItem(
+                id=f"source-{index:04d}",
+                source_id=f"source-{index:04d}",
+                title="Repeated catalog link",
+                speaker="Pooled (no speaker)",
+                source_path=youtube,
+                source_kind="youtube",
+                youtube_url=youtube,
+                video_id="abcdefghijk",
+                duration_seconds=30,
+            )
+            for index in (1, 2)
+        ]
+        state = launcher.LauncherState()
+        state.set_allowed_media_items(items)
+        state.set_allowed_catalog_scan(
+            backend.ScanResult(
+                source_path=str(Path("sources.csv").resolve()),
+                source_kind="catalog",
+                groups=[],
+                sources=items,
+                catalog_sha256="a" * 64,
+            )
+        )
+        segments = [
+            {
+                "source_id": item.source_id,
+                "source_kind": "youtube",
+                "source_path": youtube,
+                "youtube_url": youtube,
+                "video_id": "abcdefghijk",
+                "speaker": item.speaker,
+                "start_seconds": 1,
+                "end_seconds": 5,
+            }
+            for item in items
+        ]
+
+        with patch.object(launcher, "APP_STATE", state):
+            normalized = launcher.validate_segment_manifest(
+                {"gap_seconds": 0, "selected_segments": segments},
+                require_scanned_source=True,
+            )
+
+        self.assertEqual([item["source_id"] for item in normalized], ["source-0001", "source-0002"])
+
+    def test_failed_scan_clears_stale_catalog_authorization(self) -> None:
+        state = launcher.LauncherState()
+        state.set_allowed_catalog_scan(
+            backend.ScanResult(
+                source_path=str(Path("sources.csv").resolve()),
+                source_kind="catalog",
+                groups=[],
+                catalog_sha256="a" * 64,
+            )
+        )
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        handler.send_json = Mock()
+
+        with (
+            patch.object(launcher, "APP_STATE", state),
+            patch.object(backend, "scan_input_source", side_effect=ValueError("synthetic scan failure")),
+            self.assertRaisesRegex(ValueError, "synthetic scan failure"),
+        ):
+            handler.handle_scan({"path": "bad-source"})
+
+        with self.assertRaisesRegex(ValueError, "latest server scan"):
+            state.validate_catalog_selection(Path("sources.csv"), "a" * 64, ["source-0001"])
+
+    def test_local_docx_run_cannot_omit_catalog_fields_and_downgrade_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog_path = Path(temp_dir) / "sources.docx"
+            catalog_path.write_bytes(b"catalog placeholder")
+            item = backend.VideoItem(
+                id="source-0001",
+                source_id="source-0001",
+                title="Speech",
+                speaker="Speaker A",
+                source_path="https://www.youtube.com/watch?v=abcdefghijk",
+                source_kind="youtube",
+                youtube_url="https://www.youtube.com/watch?v=abcdefghijk",
+                video_id="abcdefghijk",
+            )
+            state = launcher.LauncherState()
+            state.set_allowed_catalog_scan(
+                backend.ScanResult(
+                    source_path=str(catalog_path),
+                    source_kind="catalog",
+                    groups=[],
+                    sources=[item],
+                    catalog_sha256="a" * 64,
+                    catalog_format="docx",
+                )
+            )
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            handler.send_json = Mock()
+
+            with (
+                patch.object(launcher, "APP_STATE", state),
+                patch.object(launcher, "start_process", side_effect=AssertionError("must not launch")),
+                self.assertRaisesRegex(ValueError, "latest server scan"),
+            ):
+                handler.handle_run(
+                    {
+                        "sourcePath": str(catalog_path),
+                        "outputRoot": str(Path(temp_dir) / "output"),
+                        "mode": "standard",
+                        "selectedSpeakers": ["Speaker A"],
+                    }
+                )
 
 
 if __name__ == "__main__":
