@@ -1,39 +1,53 @@
-# Parse Text Output
+# RockSteady CSV Output
 
-This folder holds the raw CSV export from RockSteady, which feeds into the
-postprocessing split and analyse steps.
+This directory is retained only for older, pre-manifest RockSteady exports.
+The current Text pipeline does not overwrite or trust these files for resume.
 
-## What goes here
+## Current contract
 
-After running RockSteady on the `.txt` files in `prepare_input/rocksteady_input/`,
-export the results in **Percentage** mode and save the file here:
-
-```
-processing/text_analysis/parse_output/output_percentage.csv
-```
-
-This file is gitignored (generated output). Do not commit it.
-
-## Next step
-
-Once `output_percentage.csv` is in place, run the postprocessing pipeline:
-
-```bash
-# Split combined export into one CSV per speaker:
-python -m postprocessing.text split \
-    --input processing/text_analysis/parse_output/output_percentage.csv \
-    --reference processing/text_analysis/prepare_input/rocksteady_input \
-    --output-dir postprocessing/text_output/MY_RUN
-
-# Generate histograms, chi-squared, and Spearman reports:
-python -m postprocessing.text analyse postprocessing/text_output/MY_RUN
+```text
+processing/text_analysis/output/current/rocksteady/
+  all/<Country>/<Speaker>/<Video>.csv   # canonical General Language categories
+  core/<Country>/<Speaker>/<Video>.csv  # derived 6-category view
+  core/derived_view_manifest.json
 ```
 
-Reports are written to `postprocessing/output/MY_RUN/`.
+The default pipeline runs RockSteady exactly once against
+`output/current/prepared_segments/` with General Language English and dynamically exports
+all 45 categories in that dictionary. It writes the canonical CSV under
+`rocksteady/all/`, then derives `rocksteady/core/` by copying identity fields
+and these categories:
 
-## Why Percentage mode?
+```text
+Active, Negativ, Passive, Positiv, Strong, Weak
+```
 
-RockSteady offers three output modes: Total, Percentage, and Z-Score.
-**Percentage** is used because values are already in 0–100 range, directly
-comparable across speeches of different lengths, and require no further
-transformation before histogram binning.
+Because `selected` is derived rather than independently analysed, shared counts
+come from the same RockSteady result.
+
+A researcher can opt into any additional licensed dictionary and categories;
+custom categories are dynamic rather than privileged by the native pipeline.
+
+Run the complete workflow or resume at RockSteady:
+
+```powershell
+python -m processing.text_analysis Videos
+python -m processing.text_analysis Videos --from-stage rocksteady
+```
+
+RockSteady uses **Total** counts. Segment text is often short, so storing raw
+counts avoids misleading input-level percentages; postprocessing derives
+proportions with the matched Whisper word counts.
+
+Final reports are written to:
+
+```text
+analysis/output/text/text_output/selected/
+analysis/output/text/text_output/extra/
+analysis/output/text/text_output/multimodal/
+```
+
+Each contains segment-level data, video and speaker summaries, descriptor
+statistics, alignment audits and SVG graphs. See
+[`../README.md`](../README.md) and
+[`../NAMING_CONVENTION.md`](../NAMING_CONVENTION.md).

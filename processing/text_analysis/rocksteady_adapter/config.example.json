@@ -1,0 +1,17 @@
+{
+  "rocksteady_home": "external/RockSteady",
+  "dictionaries": {
+    "combination": "merge",
+    "items": [
+      {
+        "source": "embedded",
+        "path": "affectDictionaries/General Language (En)(2011-07-05).dict.xml"
+      }
+    ]
+  },
+  "minimum_heap": "256m",
+  "maximum_heap": "2g",
+  "timeout_seconds": 3600,
+  "analyser": "simple",
+  "value_type": "total"
+}

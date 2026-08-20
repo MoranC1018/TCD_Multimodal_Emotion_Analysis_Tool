@@ -1,0 +1,21 @@
+{
+  "input_path": "Videos",
+  "whisper_root": "processing/text_analysis/output/current/transcripts",
+  "selected_whisper_root": "processing/text_analysis/output/current/selected_transcripts",
+  "prepared_root": "processing/text_analysis/output/current/prepared_segments",
+  "selected_csv_root": "processing/text_analysis/output/current/rocksteady/core",
+  "extra_csv_root": "processing/text_analysis/output/current/rocksteady/all",
+  "postprocessing_root": "analysis/output/text/text_output",
+  "whisper_model": "small",
+  "whisper_device": "auto",
+  "threads": 4,
+  "dictionaries": [
+    "embedded:affectDictionaries/General Language (En)(2011-07-05).dict.xml"
+  ],
+  "categories": [],
+  "dictionary_combination": "merge",
+  "overwrite_rocksteady": false,
+  "write_graphs": true,
+  "default_language_variant": "eng",
+  "language_policy": {}
+}

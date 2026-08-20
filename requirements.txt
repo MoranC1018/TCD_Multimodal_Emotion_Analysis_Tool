@@ -1,17 +1,17 @@
 # Multimodal Emotion Analysis Tool - Python dependencies
 #
-# For CUDA, install a matching PyTorch/Torchaudio build first, for example:
-#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-#
-# Then install everything else:
-#   pip install -r requirements.txt
+# The supported Windows installer is scripts/setup.ps1. It selects a matched
+# CPU or CUDA PyTorch family and installs the shared FFmpeg runtime required by
+# TorchCodec. Direct dependencies are pinned to the versions exercised by the
+# repository test/readiness suite; the exact Torch pins are repeated here so a
+# later plain pip install cannot silently replace one family member.
 
 # --- License check ---
 # The current audit scripts use urllib from the standard library; requests is
 # kept for the older main pipeline code and future API helpers.
-requests>=2.31.0
-python-docx>=1.1.0
-psutil>=5.9.0
+requests==2.34.2
+python-docx==1.2.0
+psutil==7.2.2
 
 # --- Native Windows desktop shell ---
 # Uses the installed Microsoft Edge WebView2 runtime without showing browser
@@ -19,29 +19,40 @@ psutil>=5.9.0
 pywebview==6.2.1
 
 # --- Clip downloader ---
-yt-dlp>=2024.1.0
-# ffmpeg and ffprobe must be installed separately and added to PATH.
+yt-dlp==2026.6.9
+# setup.ps1 installs the supported shared FFmpeg build on Windows.
 
-# --- iMotions analysis ---
-openpyxl>=3.1.0
+# --- iMotions postprocessing ---
+openpyxl==3.1.5
 
 # --- Audio analysis ---
-torch
-torchaudio
+# One tested ML stack is shared by Audio, Whisper, PyAnnote and Py-Feat.
+# These compiled packages must remain a matched release family.
+torch==2.11.0
+torchaudio==2.11.0
+torchvision==0.26.0
+torchcodec==0.13.0
 transformers==4.46.3
-numpy
-soundfile
-librosa
+numpy==2.4.6
+soundfile==0.14.0
+librosa==0.11.0
 
 # --- Whisper transcription ---
-openai-whisper>=20231117
+openai-whisper==20250625
 # For CUDA systems, keep torch and torchaudio on the same PyTorch index/build.
+
+# --- Native facial analysis ---
+py-feat==2.1.1
+pandas==3.0.3
+pyarrow==25.0.0
 
 # --- Procurement beta clean speaker detection ---
 # Used by procurement.procurement_beta when available. The beta CLI falls back
 # with warnings if these model packages are not installed yet.
-opencv-python>=4.9.0
-mediapipe>=0.10.0
-pyannote.audio>=3.1.0
-speechbrain>=1.0.0
-huggingface_hub>=0.23.0
+# Clean Speaker currently uses OpenCV YuNet/SFace and PyAnnote. MediaPipe was
+# only listed for a future head-pose feature and is intentionally not installed:
+# its NumPy<2 constraint conflicts with the current OpenCV/PyAnnote stack.
+opencv-python==5.0.0.93
+pyannote.audio==4.0.7
+speechbrain==1.1.0
+huggingface_hub==0.36.2

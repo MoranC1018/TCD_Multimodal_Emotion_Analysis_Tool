@@ -5,6 +5,16 @@
 # --- RockSteady (commercial confidential — NEVER commit) ---
 external/
 
+# RockSteady adapter local runtime/configuration and generated artifacts
+processing/text_analysis/rocksteady_adapter/config.local.json
+processing/text_analysis/rocksteady_adapter/*.jar
+processing/text_analysis/rocksteady_adapter/manifests/
+
+# Text pipeline derived views (reproducible generated output)
+processing/text_analysis/parse_output/Extra/
+processing/text_analysis/parse_output/selected/
+processing/text_analysis/prepare_input/rocksteady_selected/
+
 # --- Internal team documents (not for repo) ---
 Information/
 Meeting/
@@ -41,6 +51,7 @@ Videos/
 *.part
 
 # --- Pipeline outputs (generated, keep empty placeholders only) ---
+outputs/
 output/*
 !output/.gitkeep
 **/output/*
@@ -55,6 +66,8 @@ download_log.csv
 youtube_metadata_cache.json
 
 # --- Temporary / scratch files ---
+.venv/
+.venv-*/
 tmp/
 temp/
 tempdebugging/

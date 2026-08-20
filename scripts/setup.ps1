@@ -1,0 +1,661 @@
+<#
+.SYNOPSIS
+Installs and validates the single supported Windows environment.
+
+.DESCRIPTION
+The default setup makes Face processing ready and also validates Text when the
+licensed RockSteady JAR is present. The script is safe to rerun: it reuses a
+valid Python 3.12 environment and installs FFmpeg only when the exact supported
+8.1.2 full-shared runtime is absent.
+
+.PARAMETER TorchRuntime
+Use auto (default), cpu, or the matched CUDA 12.8 PyTorch package family.
+Auto selects CUDA when a compatible NVIDIA GPU/driver is available and CPU
+otherwise.
+
+.PARAMETER TextMode
+Auto leaves an honest Face-only installation when the licensed JAR is absent;
+Require treats that as an error; Skip explicitly omits JDK/Text setup.
+
+.PARAMETER SkipSharedFfmpeg
+Do not install FFmpeg. The exact-runtime validation and Face smoke still run.
+
+.PARAMETER SkipPythonInstall
+Do not install Python when 3.12 is absent; fail with an explicit prerequisite.
+
+.PARAMETER SkipJdkInstall
+Do not install a JDK when Text needs one; fail unless java and javac already work.
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cu128 -TextMode Require
+#>
+[CmdletBinding()]
+param(
+    [ValidateSet("auto", "cpu", "cu128")]
+    [string]$TorchRuntime = "auto",
+
+    # Auto validates Text when the licensed JAR is present and otherwise leaves
+    # an honest Face-only installation. Require makes a missing JAR fatal;
+    # Skip explicitly opts out of the JDK and Text readiness checks.
+    [ValidateSet("Auto", "Require", "Skip")]
+    [string]$TextMode = "Auto",
+
+    # This skips installation, not validation. Face readiness still fails if a
+    # complete FFmpeg 8.1.2 shared runtime cannot be found.
+    [switch]$SkipSharedFfmpeg,
+
+    # Useful on managed machines where software installation is performed by
+    # IT. The corresponding runtime checks are never silently skipped.
+    [switch]$SkipPythonInstall,
+    [switch]$SkipJdkInstall
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$environmentPath = Join-Path $projectRoot ".venv"
+$pythonPath = Join-Path $environmentPath "Scripts\python.exe"
+$requirementsPath = Join-Path $projectRoot "requirements.txt"
+$rockSteadyJarName = "rocksteady-desktop-application-0.4#2018-05-16.jar"
+$rockSteadyJar = Join-Path $projectRoot "external\RockSteady\$rockSteadyJarName"
+$ffmpegVersion = "8.1.2"
+$ffmpegPackageId = "Gyan.FFmpeg.Shared"
+$jdkPackageId = "EclipseAdoptium.Temurin.21.JDK"
+$pythonPackageId = "Python.Python.3.12"
+$minimumCu128WindowsDriver = [version]"528.33"
+$minimumCu128ComputeCapability = [version]"7.5"
+
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [Parameter(Mandatory = $true)]
+        [string]$FailureMessage
+    )
+
+    try {
+        # Out-Host prevents command output from accidentally becoming a
+        # function return value when a caller is resolving a path.
+        & $Executable @Arguments | Out-Host
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        throw "$FailureMessage $($_.Exception.Message)"
+    }
+    if ($exitCode -ne 0) {
+        throw "$FailureMessage (exit code $exitCode)."
+    }
+}
+
+function Invoke-NativeProbe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Executable,
+        [string[]]$Arguments = @()
+    )
+
+    # Windows PowerShell turns redirected native stderr into ErrorRecords. With
+    # the script-wide Stop preference, ordinary probes such as `java -version`
+    # would otherwise terminate setup even when the process exits successfully.
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $Executable @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Output = @($output | ForEach-Object { [string]$_ })
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            ExitCode = -1
+            Output = @([string]$_.Exception.Message)
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
+function Get-WinGetPath {
+    $command = Get-Command "winget.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        throw (
+            "WinGet is required for automatic prerequisite installation. " +
+            "Install Microsoft's App Installer, or rerun with the relevant " +
+            "-Skip*Install option after your administrator installs the prerequisite."
+        )
+    }
+    return $command.Source
+}
+
+function Resolve-TorchRuntime {
+    param([Parameter(Mandatory = $true)][string]$RequestedRuntime)
+
+    if ($RequestedRuntime -ne "auto") {
+        return $RequestedRuntime
+    }
+
+    $nvidiaSmi = Get-Command "nvidia-smi.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $nvidiaSmi) {
+        Write-Host "No NVIDIA GPU runtime was detected; selecting CPU PyTorch."
+        return "cpu"
+    }
+    $probe = Invoke-NativeProbe -Executable $nvidiaSmi.Source -Arguments @(
+        "--query-gpu=driver_version,compute_cap",
+        "--format=csv,noheader"
+    )
+    if ($probe.ExitCode -ne 0) {
+        Write-Warning "NVIDIA telemetry did not report a usable GPU/driver; selecting CPU PyTorch."
+        return "cpu"
+    }
+    foreach ($line in $probe.Output) {
+        $fields = @([string]$line -split ",")
+        if ($fields.Count -lt 2) {
+            continue
+        }
+        $driverMatch = [regex]::Match($fields[0], "\d+(?:\.\d+)+")
+        $capabilityMatch = [regex]::Match($fields[1], "\d+(?:\.\d+)+")
+        if (-not $driverMatch.Success -or -not $capabilityMatch.Success) {
+            continue
+        }
+        $driverVersion = [version]$driverMatch.Value
+        $computeCapability = [version]$capabilityMatch.Value
+        if (
+            $driverVersion -ge $minimumCu128WindowsDriver -and
+            $computeCapability -ge $minimumCu128ComputeCapability
+        ) {
+            Write-Host (
+                "Compatible NVIDIA GPU detected (driver $driverVersion, compute " +
+                "$computeCapability); selecting CUDA 12.8 PyTorch."
+            )
+            return "cu128"
+        }
+    }
+    Write-Warning (
+        "No NVIDIA GPU met the CUDA 12.8 requirements (driver >= " +
+        "$minimumCu128WindowsDriver, compute capability >= " +
+        "$minimumCu128ComputeCapability); selecting CPU PyTorch."
+    )
+    return "cpu"
+}
+
+function Invoke-WinGetInstall {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+        [string]$Version = ""
+    )
+
+    $arguments = @(
+        "install",
+        "--id", $PackageId,
+        "--exact",
+        "--source", "winget",
+        "--silent",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+        "--disable-interactivity"
+    )
+    if ($Version) {
+        # Version-pinned packages may need to replace a different installed
+        # version. This branch is reached only after the exact on-disk runtime
+        # check failed, so --force cannot make repeat runs reinstall it.
+        $arguments += @("--version", $Version, "--force")
+    }
+    Invoke-NativeCommand -Executable (Get-WinGetPath) -Arguments $arguments `
+        -FailureMessage "WinGet could not install $PackageId."
+}
+
+function Refresh-ProcessPath {
+    # Installers update the persistent environment, but an already-running
+    # PowerShell process does not receive WM_SETTINGCHANGE. Merge all scopes so
+    # newly installed tools are usable without asking the user to open a shell.
+    $entries = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($scope in @("Machine", "User", "Process")) {
+        $value = [Environment]::GetEnvironmentVariable("Path", $scope)
+        foreach ($entry in @($value -split [IO.Path]::PathSeparator)) {
+            $trimmed = $entry.Trim()
+            if ($trimmed -and $seen.Add($trimmed)) {
+                $entries.Add($trimmed)
+            }
+        }
+    }
+    $env:PATH = $entries -join [IO.Path]::PathSeparator
+}
+
+function Add-ProcessPathPrefix {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $parts = @($env:PATH -split [IO.Path]::PathSeparator) | Where-Object {
+        $_ -and -not $_.Equals($Directory, [StringComparison]::OrdinalIgnoreCase)
+    }
+    $env:PATH = (@($Directory) + $parts) -join [IO.Path]::PathSeparator
+}
+
+function Test-Python312 {
+    param([Parameter(Mandatory = $true)][string]$Candidate)
+
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+        return $false
+    }
+    $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @(
+        "-c",
+        "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+    )
+    return $probe.ExitCode -eq 0
+}
+
+function Find-Python312 {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $launcher = Get-Command "py.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $launcher) {
+        $probe = Invoke-NativeProbe -Executable $launcher.Source -Arguments @(
+            "-3.12", "-c", "import sys; print(sys.executable)"
+        )
+        if ($probe.ExitCode -eq 0 -and $probe.Output.Count -gt 0) {
+            $candidates.Add(([string]($probe.Output | Select-Object -Last 1)).Trim())
+        }
+    }
+    $pythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCommand) {
+        $candidates.Add($pythonCommand.Source)
+    }
+    if ($env:LOCALAPPDATA) {
+        $candidates.Add((Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"))
+    }
+    if ($env:ProgramFiles) {
+        $candidates.Add((Join-Path $env:ProgramFiles "Python312\python.exe"))
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Python312 $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Confirm-Python312 {
+    $resolved = Find-Python312
+    if ($null -ne $resolved) {
+        return $resolved
+    }
+    if ($SkipPythonInstall) {
+        throw "Python 3.12 was not found and installation was explicitly skipped."
+    }
+
+    Write-Host "Python 3.12 was not found; installing $pythonPackageId with WinGet."
+    Invoke-WinGetInstall -PackageId $pythonPackageId
+    Refresh-ProcessPath
+    $resolved = Find-Python312
+    if ($null -eq $resolved) {
+        throw "WinGet completed, but Python 3.12 could not be resolved in the current process."
+    }
+    return $resolved
+}
+
+function Test-VirtualEnvironment {
+    if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+        return $false
+    }
+    return (Test-Python312 $pythonPath)
+}
+
+function Move-IncompatibleEnvironmentAside {
+    if (-not (Test-Path -LiteralPath $environmentPath)) {
+        return
+    }
+    $suffix = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backup = "$environmentPath.incompatible-$suffix"
+    if (Test-Path -LiteralPath $backup) {
+        $backup = "$backup-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+    }
+    Move-Item -LiteralPath $environmentPath -Destination $backup
+    Write-Warning "Moved the incompatible project environment to $backup"
+}
+
+function Get-ExactSharedFfmpegDirectory {
+    $requiredFiles = @(
+        "avcodec-62.dll",
+        "avdevice-62.dll",
+        "avfilter-11.dll",
+        "avformat-62.dll",
+        "avutil-60.dll",
+        "swresample-6.dll",
+        "swscale-9.dll",
+        "ffmpeg.exe",
+        "ffprobe.exe"
+    )
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($packageRoot in @(
+        (Join-Path ([string]$env:LOCALAPPDATA) "Microsoft\WinGet\Packages"),
+        (Join-Path ([string]$env:ProgramFiles) "WinGet\Packages")
+    )) {
+        if (-not $packageRoot -or -not (Test-Path -LiteralPath $packageRoot -PathType Container)) {
+            continue
+        }
+        foreach ($package in Get-ChildItem -LiteralPath $packageRoot -Directory `
+            -Filter "$ffmpegPackageId*" -ErrorAction SilentlyContinue) {
+            $candidates.Add((Join-Path $package.FullName "ffmpeg-$ffmpegVersion-full_build-shared\bin"))
+        }
+    }
+    foreach ($entry in @($env:PATH -split [IO.Path]::PathSeparator)) {
+        if ($entry) {
+            $candidates.Add($entry)
+        }
+    }
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($candidate in $candidates) {
+        if (-not $candidate -or -not $seen.Add($candidate)) {
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container)) {
+            continue
+        }
+        $complete = $true
+        foreach ($file in $requiredFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $candidate $file) -PathType Leaf)) {
+                $complete = $false
+                break
+            }
+        }
+        if (-not $complete) {
+            continue
+        }
+
+        $probe = Invoke-NativeProbe -Executable (Join-Path $candidate "ffmpeg.exe") `
+            -Arguments @("-version")
+        if ($probe.ExitCode -eq 0 -and ($probe.Output | Select-Object -First 1) -match `
+            "^ffmpeg version $([regex]::Escape($ffmpegVersion))(?:[-\s])") {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Confirm-ExactSharedFfmpeg {
+    $directory = Get-ExactSharedFfmpegDirectory
+    if ($null -eq $directory) {
+        if ($SkipSharedFfmpeg) {
+            throw (
+                "FFmpeg $ffmpegVersion full-shared was not found and installation was " +
+                "explicitly skipped. Face readiness cannot be claimed."
+            )
+        }
+        Write-Host "Installing exact FFmpeg $ffmpegVersion full-shared runtime."
+        Invoke-WinGetInstall -PackageId $ffmpegPackageId -Version $ffmpegVersion
+        Refresh-ProcessPath
+        $directory = Get-ExactSharedFfmpegDirectory
+        if ($null -eq $directory) {
+            throw (
+                "WinGet completed, but the exact FFmpeg $ffmpegVersion full-shared " +
+                "runtime (including all DLLs, ffmpeg and ffprobe) could not be verified."
+            )
+        }
+    }
+    Add-ProcessPathPrefix $directory
+    Write-Host "FFmpeg $ffmpegVersion full-shared: $directory"
+    return $directory
+}
+
+function Test-JdkBin {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    $javaPath = Join-Path $Directory "java.exe"
+    $javacPath = Join-Path $Directory "javac.exe"
+    if (
+        -not (Test-Path -LiteralPath $javaPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $javacPath -PathType Leaf)
+    ) {
+        return $false
+    }
+    $javaProbe = Invoke-NativeProbe -Executable $javaPath -Arguments @("-version")
+    if ($javaProbe.ExitCode -ne 0) {
+        return $false
+    }
+    $javacProbe = Invoke-NativeProbe -Executable $javacPath -Arguments @("-version")
+    return $javacProbe.ExitCode -eq 0
+}
+
+function Find-JdkBin {
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    if ($env:JAVA_HOME) {
+        $candidates.Add((Join-Path $env:JAVA_HOME "bin"))
+    }
+    $java = Get-Command "java.exe" -ErrorAction SilentlyContinue
+    $javac = Get-Command "javac.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $java -and $null -ne $javac) {
+        $javaBin = Split-Path -Parent $java.Source
+        $javacBin = Split-Path -Parent $javac.Source
+        if ($javaBin.Equals($javacBin, [StringComparison]::OrdinalIgnoreCase)) {
+            $candidates.Add($javaBin)
+        }
+    }
+    foreach ($root in @(
+        (Join-Path ([string]$env:ProgramFiles) "Eclipse Adoptium"),
+        (Join-Path ([string]$env:ProgramFiles) "Java"),
+        (Join-Path ([string]$env:LOCALAPPDATA) "Programs\Eclipse Adoptium")
+    )) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) {
+            continue
+        }
+        foreach ($jdk in Get-ChildItem -LiteralPath $root -Directory -Filter "jdk*" `
+            -ErrorAction SilentlyContinue | Sort-Object Name -Descending) {
+            $candidates.Add((Join-Path $jdk.FullName "bin"))
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-JdkBin $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Confirm-Jdk {
+    $directory = Find-JdkBin
+    if ($null -eq $directory) {
+        if ($SkipJdkInstall) {
+            throw "A complete JDK (java.exe plus javac.exe) was not found and installation was explicitly skipped."
+        }
+        Write-Host "A complete JDK was not found; installing $jdkPackageId with WinGet."
+        Invoke-WinGetInstall -PackageId $jdkPackageId
+        Refresh-ProcessPath
+        $directory = Find-JdkBin
+        if ($null -eq $directory) {
+            throw "WinGet completed, but a matching java.exe and javac.exe could not be resolved."
+        }
+    }
+
+    Add-ProcessPathPrefix $directory
+    $env:JAVA_HOME = Split-Path -Parent $directory
+    Invoke-NativeCommand -Executable (Join-Path $directory "java.exe") -Arguments @("-version") `
+        -FailureMessage "The selected Java runtime did not start."
+    Invoke-NativeCommand -Executable (Join-Path $directory "javac.exe") -Arguments @("-version") `
+        -FailureMessage "The selected Java compiler did not start."
+    Write-Host "JDK: $env:JAVA_HOME"
+}
+
+function Test-TorchFamily {
+    $validation = @'
+import importlib.metadata as metadata
+import sys
+
+runtime = sys.argv[1]
+expected = {
+    'torch': '2.11.0',
+    'torchvision': '0.26.0',
+    'torchaudio': '2.11.0',
+    'torchcodec': '0.13.0',
+}
+actual = {name: metadata.version(name).split('+')[0] for name in expected}
+if actual != expected:
+    raise SystemExit(f'PyTorch family mismatch: expected {expected}, got {actual}')
+
+import torch
+
+cuda = torch.version.cuda
+if runtime == 'cpu' and cuda is not None:
+    raise SystemExit(f'Expected a CPU PyTorch build, but torch reports CUDA {cuda}')
+if runtime == 'cu128' and (cuda is None or not str(cuda).startswith('12.8')):
+    raise SystemExit(f'Expected a CUDA 12.8 PyTorch build, but torch reports {cuda!r}')
+if runtime == 'cu128' and not torch.cuda.is_available():
+    raise SystemExit('CUDA 12.8 PyTorch is installed, but no usable CUDA device is available')
+print(f'Matched PyTorch family: {actual}; runtime={runtime}; torch CUDA={cuda!r}')
+'@
+    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-c", $validation, $TorchRuntime) `
+        -FailureMessage "The installed PyTorch family is not the requested matched runtime."
+}
+
+function Get-InstalledTorchRuntime {
+    $probe = @'
+import torch
+
+cuda = torch.version.cuda
+if cuda is None:
+    print('cpu')
+elif str(cuda).startswith('12.8'):
+    print('cu128')
+else:
+    print(f'other:{cuda}')
+'@
+    $result = Invoke-NativeProbe -Executable $pythonPath -Arguments @("-c", $probe)
+    if ($result.ExitCode -ne 0) {
+        return "missing"
+    }
+    return [string]($result.Output | Select-Object -Last 1)
+}
+
+# Module checks below must resolve this repository even when the caller invokes
+# the script from another working directory.
+Push-Location -LiteralPath $projectRoot
+try {
+    Refresh-ProcessPath
+    $TorchRuntime = Resolve-TorchRuntime -RequestedRuntime $TorchRuntime
+
+    if (-not (Test-VirtualEnvironment)) {
+        Move-IncompatibleEnvironmentAside
+        $basePython = Confirm-Python312
+        Write-Host "Creating the Python 3.12 project environment at $environmentPath"
+        Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
+            -FailureMessage "Could not create the Python 3.12 project environment."
+        if (-not (Test-VirtualEnvironment)) {
+            throw "The new .venv did not contain a working Python 3.12 interpreter."
+        }
+    }
+    else {
+        Write-Host "Reusing the existing Python 3.12 environment at $environmentPath"
+    }
+
+    Invoke-NativeCommand -Executable $pythonPath `
+        -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools<82", "wheel") `
+        -FailureMessage "Could not update the Python packaging tools."
+
+    $torchIndex = "https://download.pytorch.org/whl/$TorchRuntime"
+    Write-Host "Installing the matched PyTorch 2.11 family ($TorchRuntime)."
+    $torchInstallArguments = @(
+        "-m", "pip", "install",
+        "torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0",
+        "--index-url", $torchIndex
+    )
+    $installedTorchRuntime = Get-InstalledTorchRuntime
+    if ($installedTorchRuntime -ne "missing" -and $installedTorchRuntime -ne $TorchRuntime) {
+        Write-Host (
+            "Replacing the installed PyTorch runtime ($installedTorchRuntime) with $TorchRuntime."
+        )
+        # PEP 440 treats 2.11.0+cpu as satisfying torch==2.11.0. Force the
+        # exact-index wheels only when changing runtime families; requirements
+        # installation below supplies and validates the shared dependencies.
+        $torchInstallArguments += @("--force-reinstall", "--no-deps")
+    }
+    Invoke-NativeCommand -Executable $pythonPath -Arguments $torchInstallArguments `
+        -FailureMessage "Could not install the matched PyTorch packages."
+
+    # TorchCodec 0.13 does not publish a Windows cu128 wheel. Face uses its
+    # supported Windows CPU wheel for decoding while Detectorv2 tensors and
+    # models use the selected CUDA PyTorch runtime.
+    Invoke-NativeCommand -Executable $pythonPath -Arguments @(
+        "-m", "pip", "install", "torchcodec==0.13.0",
+        "--index-url", "https://download.pytorch.org/whl/cpu"
+    ) -FailureMessage "Could not install the supported Windows TorchCodec package."
+
+    Write-Host "Installing all project features into the same environment."
+    Invoke-NativeCommand -Executable $pythonPath `
+        -Arguments @("-m", "pip", "install", "-r", $requirementsPath) `
+        -FailureMessage "Could not install project requirements."
+
+    Test-TorchFamily
+    $ffmpegDirectory = Confirm-ExactSharedFfmpeg
+
+    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-m", "pip", "check") `
+        -FailureMessage "The installed Python dependency set is inconsistent."
+
+    Write-Host "Preparing Py-Feat Detectorv2 model weights (explicit network download when absent)."
+    Invoke-NativeCommand -Executable $pythonPath `
+        -Arguments @("-m", "processing.face_analysis", "--prepare-models") `
+        -FailureMessage "Could not download/load and validate all Py-Feat Detectorv2 model weights."
+
+    Write-Host "Running the offline Face native decode/import readiness smoke test."
+    Invoke-NativeCommand -Executable $pythonPath `
+        -Arguments @("-m", "processing.face_analysis", "--check") `
+        -FailureMessage "Face-processing readiness smoke test failed."
+
+    $faceCommand = ".\.venv\Scripts\python.exe -m processing.face_analysis Videos"
+    $textCommand = ".\.venv\Scripts\python.exe -m processing.text_analysis Videos"
+    $textReady = $false
+    $textStatus = "not ready"
+
+    if ($TextMode -eq "Skip") {
+        $textStatus = "SKIPPED by explicit -TextMode Skip"
+        Write-Warning "Text setup was explicitly skipped; full multimodal readiness is not claimed."
+    }
+    elseif (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
+        $textStatus = "NOT READY: licensed RockSteady JAR is missing"
+        $message = (
+            "The licensed RockSteady JAR is not redistributed by this repository. " +
+            "Place your licensed copy at exactly:`n  $rockSteadyJar"
+        )
+        if ($TextMode -eq "Require") {
+            throw "$message`nFace is ready now: $faceCommand"
+        }
+        Write-Warning $message
+        Write-Host "After placing the JAR, rerun this setup script; it will install/check the JDK and validate Text."
+    }
+    else {
+        Confirm-Jdk
+        Write-Host "Running the Text/RockSteady compile, dictionary and category readiness check."
+        Invoke-NativeCommand -Executable $pythonPath `
+            -Arguments @("-m", "processing.text_analysis", "--check") `
+            -FailureMessage "Text/RockSteady readiness check failed."
+        $textReady = $true
+        $textStatus = "READY"
+    }
+
+    Write-Host ""
+    if ($textReady) {
+        Write-Host "Setup complete: Face READY; Text/RockSteady READY."
+        Write-Host "Run Facial: $faceCommand"
+        Write-Host "Run Text:   $textCommand"
+    }
+    else {
+        Write-Host "Setup complete: Face READY; Text/RockSteady $textStatus."
+        Write-Host "Run Face now: $faceCommand"
+    }
+}
+finally {
+    Pop-Location
+}

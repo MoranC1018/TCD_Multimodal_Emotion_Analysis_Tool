@@ -8,24 +8,25 @@ producing JSON files with segment-level transcripts and timestamps.
 When the input is a folder the output mirrors the same directory structure.
 
 Usage:
-    # Install GPU PyTorch first (see README for CUDA version):
-    pip install torch --index-url https://download.pytorch.org/whl/cu121
-    pip install openai-whisper
+    # From the repository root, install the complete matched environment:
+    powershell -ExecutionPolicy Bypass -File scripts/setup.ps1
+    # NVIDIA alternative:
+    powershell -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cu128
 
     # Single file:
-    python transcribe.py "Videos/clip.mp4"
+    python -m processing.text_analysis.transcribe.transcribe "Videos/clip.mp4"
 
     # Whole folder (output mirrors input tree under output/):
-    python transcribe.py "Path/To/Videos" --output-dir output
+    python -m processing.text_analysis.transcribe.transcribe "Path/To/Videos" --output-dir output
 
-    # From a preprocessing run folder (auto-finds stitched/full videos, names by title):
-    python transcribe.py --from-preprocessing preprocessing/output/<run> --task bilingual
+    # From a procurement run folder (auto-finds stitched/full videos, names by title):
+    python -m processing.text_analysis.transcribe.transcribe --from-procurement procurement/output/<run> --task bilingual
 
     # With options:
-    python transcribe.py "Path/To/Videos" --language fr --task bilingual
+    python -m processing.text_analysis.transcribe.transcribe "Path/To/Videos" --language fr --task bilingual
 
     # Skip files that already have a JSON:
-    python transcribe.py "Path/To/Videos" --skip-existing
+    python -m processing.text_analysis.transcribe.transcribe "Path/To/Videos" --skip-existing
 
 Output (folder mode):
     output/
@@ -39,21 +40,66 @@ Author: Jiaming Liu
 """
 
 import argparse
+import hashlib
 import json
 import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-import torch
-import whisper
+from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
+from processing.io_utils import (
+    atomic_write_json,
+    exclusive_process_lock,
+    lexical_absolute_path,
+)
+from processing.text_analysis.filesystem import assert_safe_output_target
+from processing.text_analysis.contracts import (
+    TEXT_MEDIA_EXTENSIONS,
+    TEXT_SCHEMA_VERSION,
+    canonical_video_relative,
+    file_sha256,
+    inventory_digest,
+    source_fingerprint,
+    validate_canonical_relative,
+    validate_text_identity,
+)
+from processing.text_analysis.transcribe.provenance import (
+    build_output_provenance,
+    collect_whisper_execution_identity,
+    whisper_decode_options,
+    whisper_provenance_is_complete,
+    whisper_provenance_matches,
+)
+from processing.text_analysis.transcribe.integrity import (
+    transcript_segments_are_valid,
+    validate_transcription_artifact_set,
+)
 
-VIDEO_EXTENSIONS = {
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv",
-    ".webm", ".m4v", ".ts", ".mts", ".m2ts",
-    ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a",
-}
+VIDEO_EXTENSIONS = TEXT_MEDIA_EXTENSIONS
 
+TRANSCRIPTION_MANIFEST = Path("_manifests") / "transcription_run_manifest.json"
+
+
+@dataclass(frozen=True)
+class TranscriptionJob:
+    source: Path
+    output_stem: Path
+    source_relative: str
+    source_id: str = ""
+
+    @property
+    def identity(self) -> str:
+        return self.output_stem.as_posix()
+
+    @property
+    def relative_json(self) -> Path:
+        return self.output_stem.with_suffix(".json")
 
 def _resolve_device(device):
+    import torch
+
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
@@ -63,90 +109,660 @@ def _resolve_device(device):
     return device
 
 
+def _load_whisper_model(model_name: str, device: str):
+    """Import Whisper only when a transcription pass actually needs a model."""
+
+    import whisper
+
+    return whisper.load_model(model_name, device=device)
+
+
 def _overlap(s1, e1, s2, e2):
     return max(0.0, min(e1, e2) - max(s1, s2))
 
 
-def _align_segments(segs_fr, segs_en):
-    """Merge French and English segments by time overlap."""
-    if len(segs_fr) != len(segs_en):
-        print(
-            f"WARNING: segment count mismatch (fr={len(segs_fr)}, en={len(segs_en)}). "
-            "Using time-based alignment.",
-            file=sys.stderr,
-        )
+def _validate_alignment_segments(segments, label):
+    if not segments:
+        raise ValueError(f"Cannot align bilingual transcription: {label} has no segments.")
+    previous_start = -1.0
+    for index, segment in enumerate(segments):
+        try:
+            start = float(segment["start"])
+            end = float(segment["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid {label} segment timing at index {index}: {segment!r}") from exc
+        if start < 0 or end <= start or start < previous_start:
+            raise ValueError(f"Invalid or unsorted {label} segment timing at index {index}: {start}-{end}")
+        previous_start = start
+
+
+def _best_overlap_index(segment, candidates):
+    overlaps = [
+        _overlap(segment["start"], segment["end"], candidate["start"], candidate["end"])
+        for candidate in candidates
+    ]
+    best_index = max(range(len(candidates)), key=lambda index: overlaps[index])
+    return best_index, overlaps[best_index]
+
+
+def _alignment_components(segs_original, segs_en):
+    """Return connected time-match groups without reusing either side's text."""
+    node_count = len(segs_original) + len(segs_en)
+    adjacency = [set() for _ in range(node_count)]
+
+    for original_index, segment in enumerate(segs_original):
+        english_index, overlap = _best_overlap_index(segment, segs_en)
+        if overlap <= 0:
+            raise ValueError(
+                f"No English time overlap for original segment {original_index + 1} "
+                f"({segment['start']}-{segment['end']}s)."
+            )
+        english_node = len(segs_original) + english_index
+        adjacency[original_index].add(english_node)
+        adjacency[english_node].add(original_index)
+
+    for english_index, segment in enumerate(segs_en):
+        original_index, overlap = _best_overlap_index(segment, segs_original)
+        if overlap <= 0:
+            raise ValueError(
+                f"No original-language time overlap for English segment {english_index + 1} "
+                f"({segment['start']}-{segment['end']}s)."
+            )
+        english_node = len(segs_original) + english_index
+        adjacency[english_node].add(original_index)
+        adjacency[original_index].add(english_node)
+
+    components = []
+    visited = set()
+    for node in range(node_count):
+        if node in visited:
+            continue
+        stack = [node]
+        original_indexes = []
+        english_indexes = []
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            if current < len(segs_original):
+                original_indexes.append(current)
+            else:
+                english_indexes.append(current - len(segs_original))
+            stack.extend(adjacency[current] - visited)
+        components.append((sorted(original_indexes), sorted(english_indexes)))
+    return sorted(components, key=lambda component: component[0][0])
+
+
+def _align_segments(segs_original, segs_en, original_language="original", min_overlap_ratio=0.25):
+    """Merge two independently segmented Whisper passes using their timestamps."""
+    _validate_alignment_segments(segs_original, "original-language pass")
+    _validate_alignment_segments(segs_en, "English pass")
+    components = _alignment_components(segs_original, segs_en)
 
     segments = []
-    for i, s in enumerate(segs_fr):
-        if len(segs_fr) == len(segs_en):
-            best_en = segs_en[i]
-        else:
-            best_en = max(
-                segs_en,
-                key=lambda e: _overlap(s["start"], s["end"], e["start"], e["end"]),
+    previous_english_index = -1
+    for output_index, (original_indexes, english_indexes) in enumerate(components):
+        if english_indexes[0] <= previous_english_index:
+            raise ValueError("Bilingual time alignment is not monotonic across the two Whisper passes.")
+        previous_english_index = english_indexes[-1]
+        original_group = [segs_original[index] for index in original_indexes]
+        english_group = [segs_en[index] for index in english_indexes]
+        original_start = min(float(segment["start"]) for segment in original_group)
+        original_end = max(float(segment["end"]) for segment in original_group)
+        english_start = min(float(segment["start"]) for segment in english_group)
+        english_end = max(float(segment["end"]) for segment in english_group)
+        intersection = _overlap(original_start, original_end, english_start, english_end)
+        union = max(original_end, english_end) - min(original_start, english_start)
+        overlap_ratio = intersection / union if union > 0 else 0.0
+        if overlap_ratio < min_overlap_ratio:
+            raise ValueError(
+                f"Low bilingual alignment overlap for output segment {output_index + 1}: "
+                f"ratio={overlap_ratio:.3f}, original={original_start}-{original_end}s, "
+                f"English={english_start}-{english_end}s."
             )
-        segments.append({
-            "id": i,
-            "start": round(s["start"], 2),
-            "end": round(s["end"], 2),
-            "text_fr": s["text"].strip(),
-            "text_en": best_en["text"].strip(),
-        })
-        print(f"  [{s['start']:6.1f}s] FR: {s['text'].strip()[:60]}")
-        print(f"           EN: {best_en['text'].strip()[:60]}")
+
+        text_original = " ".join(segment.get("text", "").strip() for segment in original_group).strip()
+        text_en = " ".join(segment.get("text", "").strip() for segment in english_group).strip()
+        if not text_original or not text_en:
+            raise ValueError(f"Empty bilingual text after alignment for output segment {output_index + 1}.")
+        segment = {
+            "id": output_index,
+            "start": round(original_start, 2),
+            "end": round(original_end, 2),
+            "text_original": text_original,
+            "text_en": text_en,
+            "alignment_original_segments": len(original_group),
+            "alignment_en_segments": len(english_group),
+            "alignment_overlap_ratio": round(overlap_ratio, 4),
+            "source_original_segment_indexes": original_indexes,
+            "source_en_segment_indexes": english_indexes,
+            "source_original_segment_ids": [segs_original[index].get("id", index) for index in original_indexes],
+            "source_en_segment_ids": [segs_en[index].get("id", index) for index in english_indexes],
+        }
+        segments.append(segment)
+        print(f"  [{original_start:6.1f}s] {original_language.upper()}: {text_original[:60]}")
+        print(f"           EN: {text_en[:60]}  (overlap={overlap_ratio:.1%})")
     return segments
 
 
-def transcribe_file(video_path, model, device, language=None, task="transcribe"):
+def _plain_segments(segments):
+    output = []
+    for index, segment in enumerate(segments):
+        plain_segment = {
+            "id": segment.get("id", index),
+            "start": round(float(segment["start"]), 2),
+            "end": round(float(segment["end"]), 2),
+            "text": segment.get("text", "").strip(),
+        }
+        output.append(plain_segment)
+    ids = [segment["id"] for segment in output]
+    try:
+        ids_are_unique = len(ids) == len(set(ids))
+    except TypeError as exc:
+        raise ValueError("Whisper segment IDs must be scalar values.") from exc
+    if not ids_are_unique:
+        raise ValueError("Whisper returned duplicate segment IDs.")
+    return output
+
+
+def _segments_sha256(segments):
+    canonical = json.dumps(segments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _source_content_sha256(video_path: Path) -> str:
+    """Hash media content without trusting mutable size/mtime cache keys."""
+
+    return file_sha256(Path(video_path).resolve())
+
+
+def _apply_whisper_provenance(output, *, model_name, provenance):
+    """Attach validated current-schema provenance to a transcript output."""
+
+    if not whisper_provenance_is_complete(provenance):
+        raise ValueError("Cannot write a transcript with incomplete Whisper provenance.")
+    output["model"] = model_name
+    output["whisper_provenance"] = provenance
+    return output
+
+
+def _resolve_output_provenance(
+    provenance_by_kind,
+    *,
+    model_name,
+    requested_task,
+    device,
+    requested_language,
+):
+    """Use a run-level identity when supplied, otherwise collect it once locally."""
+
+    if provenance_by_kind is None:
+        provenance_by_kind = build_output_provenance(
+            collect_whisper_execution_identity(model_name),
+            requested_task=requested_task,
+            device=device,
+            requested_language=requested_language,
+        )
+    required = (
+        {"original", "eng", "bilingual"}
+        if requested_task == "bilingual"
+        else {requested_task}
+    )
+    if set(provenance_by_kind) != required or any(
+        not whisper_provenance_is_complete(provenance_by_kind[kind])
+        for kind in required
+    ):
+        raise ValueError(
+            f"Incomplete Whisper provenance map for task {requested_task!r}."
+        )
+    return provenance_by_kind
+
+
+def _base_output(
+    video_path,
+    language,
+    task,
+    device,
+    segments,
+    *,
+    source_sha256_value=None,
+    source_id="",
+):
+    source = Path(video_path)
+    output = {
+        "schema_version": TEXT_SCHEMA_VERSION,
+        "source": str(source.resolve()),
+        "source_id": str(source_id or ""),
+        "language": language,
+        "task": task,
+        "duration_sec": segments[-1]["end"] if segments else 0.0,
+        "model": None,
+        "device": device,
+        "segments": segments,
+    }
+    if source.is_file():
+        output["source_fingerprint"] = source_fingerprint(source)
+        output["source_sha256"] = source_sha256_value or _source_content_sha256(source)
+    return output
+
+
+def _build_bilingual_outputs(
+    video_path,
+    device,
+    detected_lang,
+    result_original,
+    result_en,
+    *,
+    source_sha256_value=None,
+    source_id="",
+):
+    """Build usable original/English files plus a time-aligned audit file."""
+    original_segments = _plain_segments(result_original["segments"])
+    english_segments = _plain_segments(result_en["segments"])
+    aligned_segments = _align_segments(
+        original_segments, english_segments, detected_lang
+    )
+    used_original = [item for segment in aligned_segments for item in segment["source_original_segment_indexes"]]
+    used_english = [item for segment in aligned_segments for item in segment["source_en_segment_indexes"]]
+    expected_original = list(range(len(original_segments)))
+    expected_english = list(range(len(english_segments)))
+    if sorted(used_original) != sorted(expected_original) or len(used_original) != len(set(used_original)):
+        raise ValueError("Bilingual alignment duplicated or omitted original-language segments.")
+    if sorted(used_english) != sorted(expected_english) or len(used_english) != len(set(used_english)):
+        raise ValueError("Bilingual alignment duplicated or omitted English segments.")
+
+    original = _base_output(
+        video_path, detected_lang, "transcribe", device, original_segments,
+        source_sha256_value=source_sha256_value, source_id=source_id,
+    )
+    english = _base_output(
+        video_path, "en", "translate", device, english_segments,
+        source_sha256_value=source_sha256_value, source_id=source_id,
+    )
+    bilingual = _base_output(
+        video_path, detected_lang, "bilingual", device, aligned_segments,
+        source_sha256_value=source_sha256_value, source_id=source_id,
+    )
+    ratios = [segment["alignment_overlap_ratio"] for segment in aligned_segments]
+    audit = {
+        "method": "mutual_best_time_overlap_components",
+        "original_input_segments": len(original_segments),
+        "english_input_segments": len(english_segments),
+        "aligned_output_segments": len(aligned_segments),
+        "original_segments_used_once": True,
+        "english_segments_used_once": True,
+        "minimum_overlap_ratio": min(ratios),
+        "mean_overlap_ratio": round(sum(ratios) / len(ratios), 4),
+        "original_segments_sha256": _segments_sha256(original_segments),
+        "english_segments_sha256": _segments_sha256(english_segments),
+    }
+    original["bilingual_companion"] = {"kind": "original", **audit}
+    english["bilingual_companion"] = {"kind": "eng", **audit}
+    bilingual["bilingual_alignment"] = audit
+    return {"original": original, "eng": english, "bilingual": bilingual}
+
+
+def transcribe_file(
+    video_path,
+    model,
+    device,
+    language=None,
+    task="transcribe",
+    *,
+    model_name,
+    provenance_by_kind=None,
+    source_sha256_value=None,
+    source_id="",
+):
     """Run Whisper on one video/audio file using a pre-loaded model."""
-    fp16 = device == "cuda"
+    provenance_by_kind = _resolve_output_provenance(
+        provenance_by_kind,
+        model_name=model_name,
+        requested_task=task,
+        device=device,
+        requested_language=language,
+    )
 
     if task == "bilingual":
         print(f"  Pass 1/2 — transcribing original: {video_path.name} ...")
         result_fr = model.transcribe(
-            str(video_path), language=language, task="transcribe",
-            verbose=False, fp16=fp16,
+            str(video_path),
+            **whisper_decode_options(
+                device=device, requested_language=language, task="transcribe"
+            ),
         )
         print(f"  Pass 2/2 — translating to English: {video_path.name} ...")
         result_en = model.transcribe(
-            str(video_path), language=language, task="translate",
-            verbose=False, fp16=fp16,
+            str(video_path),
+            **whisper_decode_options(
+                device=device, requested_language=language, task="translate"
+            ),
         )
         detected_lang = result_fr.get("language", "unknown")
         print(f"  Detected language: {detected_lang}")
-        segments = _align_segments(result_fr["segments"], result_en["segments"])
+        outputs = _build_bilingual_outputs(
+            video_path,
+            device,
+            detected_lang,
+            result_fr,
+            result_en,
+            source_sha256_value=source_sha256_value,
+            source_id=source_id,
+        )
+        for kind, output in outputs.items():
+            _apply_whisper_provenance(
+                output,
+                model_name=model_name,
+                provenance=provenance_by_kind[kind],
+            )
+        return outputs
     else:
         if task == "translate":
             print(f"  Transcribing + translating to English: {video_path.name} ...")
         else:
             print(f"  Transcribing: {video_path.name} ...")
         result = model.transcribe(
-            str(video_path), language=language, task=task,
-            verbose=False, fp16=fp16,
+            str(video_path),
+            **whisper_decode_options(
+                device=device, requested_language=language, task=task
+            ),
         )
         detected_lang = result.get("language", "unknown")
         print(f"  Detected language: {detected_lang}")
-        segments = []
+        segments = _plain_segments(result["segments"])
         for seg in result["segments"]:
-            segments.append({
-                "id": seg["id"],
-                "start": round(seg["start"], 2),
-                "end": round(seg["end"], 2),
-                "text": seg["text"].strip(),
-            })
             print(f"  [{seg['start']:6.1f}s] {seg['text'].strip()[:80]}")
 
     duration = segments[-1]["end"] if segments else 0.0
 
-    return {
-        "source": str(video_path),
-        "language": detected_lang,
-        "task": task,
-        "duration_sec": duration,
-        "model": model.dims.n_audio_ctx,  # kept for provenance; actual name set by caller
-        "device": device,
-        "segments": segments,
-    }
+    output = _base_output(
+        video_path,
+        detected_lang,
+        task,
+        device,
+        segments,
+        source_sha256_value=source_sha256_value,
+        source_id=source_id,
+    )
+    return _apply_whisper_provenance(
+        output,
+        model_name=model_name,
+        provenance=provenance_by_kind[task],
+    )
+
+
+def _output_paths(output_root, relative_json_path, task):
+    if task == "bilingual":
+        return {kind: output_root / kind / relative_json_path for kind in ("original", "eng", "bilingual")}
+    return {task: output_root / relative_json_path}
+
+
+def _write_json_set(outputs, paths):
+    """Stage all JSON files before publishing the complete output set."""
+    staged = []
+    try:
+        for kind, data in outputs.items():
+            path = paths[kind]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", delete=False, dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp",
+            )
+            with handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+            staged.append((Path(handle.name), path))
+        for temporary, destination in staged:
+            temporary.replace(destination)
+    finally:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _read_saved_whisper_pass(path, expected_task):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot reuse saved Whisper output {path}: {exc}") from exc
+    if data.get("task") != expected_task or not isinstance(data.get("segments"), list):
+        raise ValueError(
+            f"Cannot reuse saved Whisper output {path}: expected task={expected_task!r} "
+            "with a segment list."
+        )
+    return data
+
+
+def _saved_pass_is_reusable(
+    path,
+    expected_task,
+    model_name,
+    video_path,
+    *,
+    trust_legacy=False,
+    source_sha256_value=None,
+    expected_provenance=None,
+):
+    """Validate a saved pass before allowing expensive Whisper work to skip.
+
+    Source size, mtime, and absolute path are retained as diagnostics.  Content
+    SHA-256 is the identity: touching or moving unchanged media must not force a
+    new transcription, while a same-size replacement must never be reused.
+    """
+
+    try:
+        data = _read_saved_whisper_pass(path, expected_task)
+    except ValueError:
+        return False
+    if not trust_legacy and data.get("schema_version") != TEXT_SCHEMA_VERSION:
+        return False
+    if not _saved_segments_are_valid(data, expected_task):
+        return False
+    saved_model = data.get("model")
+    if saved_model != model_name and not (trust_legacy and saved_model is None):
+        return False
+    saved_source = data.get("source")
+    if not isinstance(saved_source, str):
+        if trust_legacy and saved_source is None:
+            saved_source = ""
+        else:
+            return False
+    if not saved_source and not trust_legacy:
+        return False
+
+    saved_provenance = data.get("whisper_provenance")
+    if whisper_provenance_is_complete(saved_provenance):
+        if not whisper_provenance_matches(saved_provenance, expected_provenance):
+            return False
+    elif not trust_legacy:
+        return False
+
+    source = Path(video_path)
+    if not source.is_file():
+        return False
+    saved_fingerprint = data.get("source_fingerprint")
+    if not isinstance(saved_fingerprint, dict):
+        if not trust_legacy:
+            return False
+    saved_sha256 = data.get("source_sha256")
+    if isinstance(saved_sha256, str) and len(saved_sha256) == 64:
+        current_sha256 = source_sha256_value or _source_content_sha256(source)
+        return saved_sha256.casefold() == current_sha256.casefold()
+
+    if not trust_legacy:
+        return False
+    # Explicit legacy trust cannot reconstruct a missing content hash.  Use the
+    # strongest old metadata available, but never weaken a complete modern
+    # provenance mismatch above.
+    if isinstance(saved_fingerprint, dict):
+        return saved_fingerprint == source_fingerprint(source)
+    return bool(saved_source and Path(saved_source).resolve() == source.resolve())
+
+
+def _saved_segments_are_valid(data, expected_task):
+    return transcript_segments_are_valid(data, expected_task)
+
+
+def transcription_artifact_set_is_reusable(
+    paths,
+    *,
+    model_name,
+    video_path,
+    provenance_by_kind,
+    source_sha256_value=None,
+    trust_legacy=False,
+):
+    """Return whether an exact output set is safe to reuse as one unit.
+
+    This public predicate is shared with the parent Text pipeline.  Current
+    artifacts are validated together so a bilingual job cannot be skipped when
+    one companion is missing or carries different model/source/provenance data.
+    """
+
+    source_hash = source_sha256_value or _source_content_sha256(Path(video_path))
+    if not trust_legacy:
+        try:
+            validate_transcription_artifact_set(
+                paths,
+                expected_model=model_name,
+                expected_source_sha256=source_hash,
+                expected_provenance_by_kind=provenance_by_kind,
+            )
+        except (OSError, ValueError):
+            return False
+        return True
+    return all(
+        _saved_pass_is_reusable(
+            path,
+            _expected_task(kind),
+            model_name,
+            video_path,
+            trust_legacy=True,
+            source_sha256_value=source_hash,
+            expected_provenance=provenance_by_kind[kind],
+        )
+        for kind, path in paths.items()
+    )
+
+
+def _expected_task(output_kind):
+    return {"original": "transcribe", "eng": "translate", "bilingual": "bilingual"}.get(
+        output_kind, output_kind
+    )
+
+
+def transcribe_bilingual_to_paths(
+    video_path,
+    model,
+    device,
+    paths,
+    *,
+    model_name,
+    language=None,
+    reuse_existing=False,
+    trust_legacy=False,
+    source_sha256_value=None,
+    provenance_by_kind=None,
+    source_id="",
+):
+    """Persist each expensive Whisper pass before attempting bilingual alignment."""
+    provenance_by_kind = _resolve_output_provenance(
+        provenance_by_kind,
+        model_name=model_name,
+        requested_task="bilingual",
+        device=device,
+        requested_language=language,
+    )
+
+    if reuse_existing and _saved_pass_is_reusable(
+        paths["original"], "transcribe", model_name, video_path,
+        trust_legacy=trust_legacy, source_sha256_value=source_sha256_value,
+        expected_provenance=provenance_by_kind["original"],
+    ):
+        original = _read_saved_whisper_pass(paths["original"], "transcribe")
+        print(f"  REUSE original: {paths['original']}")
+    else:
+        if model is None:
+            raise RuntimeError("Whisper model is required to generate the missing original pass.")
+        print(f"  Pass 1/2 — transcribing original: {video_path.name} ...")
+        raw_original = model.transcribe(
+            str(video_path),
+            **whisper_decode_options(
+                device=device, requested_language=language, task="transcribe"
+            ),
+        )
+        detected_language = raw_original.get("language", "unknown")
+        original = _base_output(
+            video_path, detected_language, "transcribe", device,
+            _plain_segments(raw_original["segments"]),
+            source_sha256_value=source_sha256_value,
+            source_id=source_id,
+        )
+        _apply_whisper_provenance(
+            original,
+            model_name=model_name,
+            provenance=provenance_by_kind["original"],
+        )
+        _write_json_set({"original": original}, {"original": paths["original"]})
+        print(f"  SAVED original: {paths['original']} ({len(original['segments'])} segments)")
+
+    if reuse_existing and _saved_pass_is_reusable(
+        paths["eng"], "translate", model_name, video_path,
+        trust_legacy=trust_legacy, source_sha256_value=source_sha256_value,
+        expected_provenance=provenance_by_kind["eng"],
+    ):
+        english = _read_saved_whisper_pass(paths["eng"], "translate")
+        print(f"  REUSE eng: {paths['eng']}")
+    else:
+        if model is None:
+            raise RuntimeError("Whisper model is required to generate the missing English pass.")
+        print(f"  Pass 2/2 — translating to English: {video_path.name} ...")
+        raw_english = model.transcribe(
+            str(video_path),
+            **whisper_decode_options(
+                device=device, requested_language=language, task="translate"
+            ),
+        )
+        english = _base_output(
+            video_path, "en", "translate", device,
+            _plain_segments(raw_english["segments"]),
+            source_sha256_value=source_sha256_value,
+            source_id=source_id,
+        )
+        _apply_whisper_provenance(
+            english,
+            model_name=model_name,
+            provenance=provenance_by_kind["eng"],
+        )
+        _write_json_set({"eng": english}, {"eng": paths["eng"]})
+        print(f"  SAVED eng: {paths['eng']} ({len(english['segments'])} segments)")
+
+    detected_language = str(original.get("language") or "unknown")
+    outputs = _build_bilingual_outputs(
+        video_path,
+        device,
+        detected_language,
+        original,
+        english,
+        source_sha256_value=source_sha256_value,
+        source_id=source_id,
+    )
+    for kind, data in outputs.items():
+        _apply_whisper_provenance(
+            data,
+            model_name=model_name,
+            provenance=provenance_by_kind[kind],
+        )
+    _write_json_set(outputs, paths)
+    return outputs
+
+
+def _procurement_identity(speaker_dir: Path, video_dir: Path) -> Path:
+    """Return the real ``Speaker/Video`` identity produced by procurement."""
+
+    video_name = video_dir.name
+    if video_name.endswith("_full_video"):
+        video_name = video_name[: -len("_full_video")]
+    return validate_text_identity(Path(speaker_dir.name) / video_name)
 
 
 def collect_videos(root: Path):
@@ -157,11 +773,12 @@ def collect_videos(root: Path):
     )
 
 
-def collect_from_preprocessing(downloads_root: Path) -> list[tuple[Path, Path]]:
-    """Find transcribable videos from a preprocessing downloads folder.
+def collect_from_procurement(downloads_root: Path) -> list[tuple[Path, Path]]:
+    """Find transcribable videos from a procurement downloads folder.
 
-    Returns a list of (video_path, output_stem) pairs where output_stem is
-    <Speaker>/<video_title> (using the video folder name, not the filename).
+    Returns ``(media_path, output_stem)`` pairs where ``output_stem`` is the
+    actual ``Speaker/Video`` path already present below ``downloads``.  No
+    country or comparison group is inferred during processing.
 
     Looks for:
       - stitched_imotions.mp4  (standard-license 10% sample)
@@ -177,25 +794,208 @@ def collect_from_preprocessing(downloads_root: Path) -> list[tuple[Path, Path]]:
             # Standard license: stitched_imotions.mp4
             stitched = video_dir / "stitched_imotions.mp4"
             if stitched.exists():
-                results.append((stitched, Path(speaker_dir.name) / video_dir.name))
+                results.append((stitched, _procurement_identity(speaker_dir, video_dir)))
                 continue
-            # CC full-video: single mp4 directly inside *_full_video folder
+            # CC full-video: one supported media file directly inside
+            # *_full_video.  Reject ambiguity rather than silently choosing a
+            # different file on another machine.
             if video_dir.name.endswith("_full_video"):
-                mp4s = [p for p in video_dir.iterdir()
-                        if p.is_file() and p.suffix.lower() == ".mp4"]
-                if mp4s:
-                    results.append((mp4s[0], Path(speaker_dir.name) / video_dir.name))
+                media = sorted(
+                    (
+                        path
+                        for path in video_dir.iterdir()
+                        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+                    ),
+                    key=lambda path: path.name.casefold(),
+                )
+                if len(media) > 1:
+                    raise ValueError(
+                        f"Multiple full-video media files found in {video_dir}: "
+                        f"{', '.join(path.name for path in media)}"
+                    )
+                if media:
+                    results.append((media[0], _procurement_identity(speaker_dir, video_dir)))
     return results
 
 
-def main():
+def _build_transcription_jobs(
+    *,
+    input_value: str | None,
+    procurement_run: Path | None,
+    canonical_layout: bool,
+    speaker_parent_layout: bool = False,
+) -> tuple[Path, Path, list[TranscriptionJob]]:
+    """Return invocation input, source root, and collision-free output jobs."""
+
+    if procurement_run is not None:
+        invocation_input = procurement_run.resolve()
+        source_root = (
+            invocation_input
+            if invocation_input.name.casefold() == "downloads"
+            else invocation_input / "downloads"
+        )
+        if not source_root.is_dir():
+            raise FileNotFoundError(f"No downloads/ folder found under {invocation_input}")
+        pairs = collect_from_procurement(source_root)
+        jobs = [
+            TranscriptionJob(
+                source.resolve(),
+                validate_text_identity(stem),
+                source.resolve().relative_to(source_root).as_posix(),
+            )
+            for source, stem in pairs
+        ]
+    else:
+        if input_value is None:
+            raise ValueError("Provide either 'input' or --from-procurement")
+        invocation_input = Path(input_value).resolve()
+        if invocation_input.is_file():
+            if invocation_input.suffix.lower() not in VIDEO_EXTENSIONS:
+                raise ValueError(f"Unsupported file type: {invocation_input.suffix}")
+            source_root = invocation_input.parent
+            videos = [invocation_input]
+            single_file = True
+        elif invocation_input.is_dir():
+            source_root = invocation_input
+            videos = collect_videos(invocation_input)
+            single_file = False
+        else:
+            raise FileNotFoundError(f"Input path not found: {invocation_input}")
+        if not videos:
+            raise ValueError(f"No video/audio files found under {invocation_input}")
+
+        jobs = []
+        for video in videos:
+            source_relative = video.name if single_file else video.relative_to(source_root).as_posix()
+            if speaker_parent_layout:
+                try:
+                    output_stem = canonical_video_relative(video.stem)
+                except ValueError:
+                    speaker_name = video.parent.name.strip() or "Ungrouped"
+                    output_stem = validate_text_identity(Path(speaker_name) / video.stem)
+            elif canonical_layout:
+                output_stem = canonical_video_relative(video.stem)
+            elif single_file:
+                try:
+                    output_stem = canonical_video_relative(video.stem)
+                except ValueError:
+                    output_stem = Path(video.stem)
+            else:
+                relative_stem = video.relative_to(source_root).with_suffix("")
+                if len(relative_stem.parts) == 3:
+                    try:
+                        output_stem = validate_canonical_relative(relative_stem)
+                    except ValueError:
+                        output_stem = relative_stem
+                else:
+                    output_stem = relative_stem
+            jobs.append(TranscriptionJob(video.resolve(), output_stem, source_relative))
+
+    if not jobs:
+        raise ValueError(f"No transcribable videos found under {source_root}")
+    destinations: dict[str, Path] = {}
+    for job in jobs:
+        key = job.relative_json.as_posix().casefold()
+        previous = destinations.get(key)
+        if previous is not None:
+            raise ValueError(
+                f"Multiple media files map to the same transcript {job.relative_json}: "
+                f"{previous} and {job.source}"
+            )
+        destinations[key] = job.source
+    return invocation_input, source_root.resolve(), jobs
+
+
+def _transcription_record(
+    job: TranscriptionJob,
+    paths: dict[str, Path],
+    output_root: Path,
+    *,
+    status: str,
+    segment_count: int | None = None,
+    error: str | None = None,
+    source_sha256_value: str | None = None,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "source_path": str(job.source),
+        "source_relative": job.source_relative,
+        "source_id": job.source_id,
+        "video_stem": job.output_stem.name,
+        "identity": job.identity,
+        "source_fingerprint": source_fingerprint(job.source),
+        "source_sha256": source_sha256_value or _source_content_sha256(job.source),
+        "status": status,
+        "artifacts": {},
+    }
+    for kind, path in paths.items():
+        artifact: dict[str, object] = {
+            "path": path.resolve().relative_to(output_root.resolve()).as_posix()
+        }
+        if status in {"completed", "skipped"} and path.is_file():
+            artifact["sha256"] = file_sha256(path)
+        record["artifacts"][kind] = artifact
+    if segment_count is not None:
+        record["segment_count"] = segment_count
+    if error is not None:
+        record["error"] = error
+    return record
+
+
+def _write_transcription_manifest(
+    path: Path,
+    *,
+    status: str,
+    started_at: str,
+    invocation_input: Path,
+    source_root: Path,
+    output_root: Path,
+    task: str,
+    model: str,
+    device: str,
+    language: str | None,
+    provenance_by_kind: dict[str, dict[str, object]],
+    records: list[dict[str, object]],
+) -> None:
+    summary = {
+        "total": len(records),
+        "completed": sum(record.get("status") == "completed" for record in records),
+        "skipped": sum(record.get("status") == "skipped" for record in records),
+        "failed": sum(record.get("status") == "failed" for record in records),
+        "planned": sum(record.get("status") == "planned" for record in records),
+    }
+    atomic_write_json(
+        path,
+        {
+            "schema_version": TEXT_SCHEMA_VERSION,
+            "kind": "whisper-transcription-batch",
+            "status": status,
+            "started_at": started_at,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "input_path": str(invocation_input),
+            "source_root": str(source_root),
+            "output_root": str(output_root),
+            "config": {"task": task, "model": model, "device": device, "language": language},
+            "whisper_provenance": provenance_by_kind,
+            "inventory_sha256": inventory_digest(records),
+            "summary": summary,
+            "videos": records,
+        },
+    )
+
+
+def _main_unlocked(argv: list[str] | None = None) -> int:
+    # WinGet updates do not alter the PATH inherited by an already-open shell.
+    # Configure the shared runtime here so Whisper's FFmpeg child is reliable
+    # immediately after scripts/setup.ps1 returns.
+    configure_ffmpeg_shared_libraries()
     parser = argparse.ArgumentParser(description="Batch-transcribe video/audio with Whisper")
     parser.add_argument("input", nargs="?", default=None,
                         help="Path to a video/audio file OR a folder")
-    parser.add_argument("--from-preprocessing", type=Path, default=None, metavar="RUN_FOLDER",
-                        help="Preprocessing run folder (e.g. preprocessing/output/<run>). "
+    parser.add_argument("--from-procurement", type=Path, default=None, metavar="RUN_FOLDER",
+                        help="Procurement run or downloads folder "
+                             "(e.g. procurement/output/<run>). "
                              "Automatically finds stitched_imotions.mp4 / full-video files "
-                             "under its downloads/ subfolder and names outputs by video title.")
+                             "and preserves their Speaker/Video folder identity.")
     parser.add_argument("--model", default="small",
                         choices=["tiny", "base", "small", "medium",
                                  "large", "large-v2", "large-v3"],
@@ -210,119 +1010,275 @@ def main():
     parser.add_argument("--output-dir", default="output",
                         help="Root output folder (default: output/)")
     parser.add_argument("--skip-existing", action="store_true",
-                        help="Skip videos whose JSON output already exists.")
-    args = parser.parse_args()
+                        help="Reuse only complete, provenance-verified JSON outputs.")
+    parser.add_argument(
+        "--trust-legacy", action="store_true",
+        help="Allow reuse of pre-v2 JSON without complete provenance (unsafe; off by default).",
+    )
+    identity_layout = parser.add_mutually_exclusive_group()
+    identity_layout.add_argument(
+        "--canonical-layout", action="store_true",
+        help="Legacy/manual mode: require canonical video names and write "
+             "Country/Speaker/Video.json.",
+    )
+    identity_layout.add_argument(
+        "--speaker-parent-layout",
+        action="store_true",
+        help="General media mode: use each media file's immediate parent folder "
+             "as Speaker and its filename stem as Video; canonical legacy names "
+             "remain canonical.",
+    )
+    parser.add_argument("--batch-manifest", type=Path, help="Batch manifest path")
+    args = parser.parse_args(argv)
 
-    if args.from_preprocessing is None and args.input is None:
-        parser.error("Provide either 'input' or --from-preprocessing.")
-
-    output_root = Path(args.output_dir)
+    output_root = assert_safe_output_target(lexical_absolute_path(args.output_dir))
     device = _resolve_device(args.device)
+    try:
+        provenance_by_kind = build_output_provenance(
+            collect_whisper_execution_identity(args.model),
+            requested_task=args.task,
+            device=device,
+            requested_language=args.language,
+        )
+        invocation_input, source_root, jobs = _build_transcription_jobs(
+            input_value=args.input,
+            procurement_run=args.from_procurement,
+            canonical_layout=args.canonical_layout,
+            speaker_parent_layout=args.speaker_parent_layout,
+        )
+        output_root = assert_safe_output_target(output_root, invocation_input)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
-    # ── Collect files ──────────────────────────────────────────────────────────
-    # preprocessing mode: (video_path, output_stem) pairs with title-based names
-    preprocessing_pairs: list[tuple[Path, Path]] | None = None
-
-    if args.from_preprocessing:
-        run_folder = args.from_preprocessing.resolve()
-        downloads = run_folder / "downloads"
-        if not downloads.is_dir():
-            print(f"ERROR: no downloads/ folder found under {run_folder}", file=sys.stderr)
-            sys.exit(1)
-        preprocessing_pairs = collect_from_preprocessing(downloads)
-        if not preprocessing_pairs:
-            print(f"No transcribable videos found under {downloads}", file=sys.stderr)
-            sys.exit(1)
-        print(f"Found {len(preprocessing_pairs)} video(s) from preprocessing run.")
-        videos = [p for p, _ in preprocessing_pairs]
-    else:
-        input_path = Path(args.input)
-        if input_path.is_file():
-            if input_path.suffix.lower() not in VIDEO_EXTENSIONS:
-                print(f"ERROR: unsupported file type: {input_path.suffix}", file=sys.stderr)
-                sys.exit(1)
-            videos = [input_path]
-            input_root = input_path.parent
-        elif input_path.is_dir():
-            videos = collect_videos(input_path)
-            input_root = input_path
-            if not videos:
-                print(f"No video/audio files found under {input_path}", file=sys.stderr)
-                sys.exit(1)
-            print(f"Found {len(videos)} file(s) under {input_path}")
-        else:
-            print(f"ERROR: path not found: {input_path}", file=sys.stderr)
-            sys.exit(1)
-
-    # ── Filter already-done ────────────────────────────────────────────────────
-    if args.skip_existing:
-        pending_videos = []
-        pending_pairs = []
-        for i, video_path in enumerate(videos):
-            if preprocessing_pairs:
-                _, stem = preprocessing_pairs[i]
-                out = output_root / stem.with_suffix(".json")
-            else:
-                out = output_root / video_path.relative_to(input_root).with_suffix(".json")
-            if out.exists():
-                print(f"  SKIP (exists): {out}")
-            else:
-                pending_videos.append(video_path)
-                if preprocessing_pairs:
-                    pending_pairs.append(preprocessing_pairs[i])
-        videos = pending_videos
-        if preprocessing_pairs:
-            preprocessing_pairs = pending_pairs
-        if not videos:
-            print("All files already transcribed. Nothing to do.")
-            sys.exit(0)
-        print(f"{len(videos)} file(s) remaining after skipping existing outputs.")
-
-    # ── Load model once ────────────────────────────────────────────────────────
-    print(f"\nLoading Whisper model '{args.model}' on {device} ...")
-    if device == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
-    model = whisper.load_model(args.model, device=device)
-
-    # ── Process each file ──────────────────────────────────────────────────────
-    ok, failed = 0, []
-    for idx, video_path in enumerate(videos, 1):
-        if preprocessing_pairs:
-            _, stem = preprocessing_pairs[idx - 1]
-            out_path = output_root / stem.with_suffix(".json")
-            rel = stem
-        else:
-            rel = video_path.relative_to(input_root)
-            out_path = output_root / rel.with_suffix(".json")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        print(f"\n[{idx}/{len(videos)}] {rel}")
-        try:
-            result = transcribe_file(
-                video_path, model, device,
-                language=args.language,
-                task=args.task,
+    manifest_path = (
+        args.batch_manifest.resolve()
+        if args.batch_manifest is not None
+        else output_root / TRANSCRIPTION_MANIFEST
+    )
+    started_at = datetime.now(timezone.utc).isoformat()
+    path_sets = [_output_paths(output_root, job.relative_json, args.task) for job in jobs]
+    source_hashes = [_source_content_sha256(job.source) for job in jobs]
+    records = [
+        _transcription_record(
+            job, paths, output_root, status="planned", source_sha256_value=source_hash
+        )
+        for job, paths, source_hash in zip(jobs, path_sets, source_hashes)
+    ]
+    complete: list[bool] = []
+    for job, paths, source_hash in zip(jobs, path_sets, source_hashes):
+        complete.append(
+            bool(args.skip_existing)
+            and transcription_artifact_set_is_reusable(
+                paths,
+                model_name=args.model,
+                video_path=job.source,
+                provenance_by_kind=provenance_by_kind,
+                source_sha256_value=source_hash,
+                trust_legacy=args.trust_legacy,
             )
-            # Store the human-readable model name instead of the internal dim
-            result["model"] = args.model
+        )
+    _write_transcription_manifest(
+        manifest_path,
+        status="running",
+        started_at=started_at,
+        invocation_input=invocation_input,
+        source_root=source_root,
+        output_root=output_root,
+        task=args.task,
+        model=args.model,
+        device=device,
+        language=args.language,
+        provenance_by_kind=provenance_by_kind,
+        records=records,
+    )
 
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
+    needs_model = False
+    for job, paths, is_complete, source_hash in zip(
+        jobs, path_sets, complete, source_hashes
+    ):
+        if is_complete:
+            continue
+        if args.task != "bilingual" or not args.skip_existing:
+            needs_model = True
+            break
+        original_ready = _saved_pass_is_reusable(
+            paths["original"], "transcribe", args.model, job.source,
+            trust_legacy=args.trust_legacy,
+            source_sha256_value=source_hash,
+            expected_provenance=provenance_by_kind["original"],
+        )
+        english_ready = _saved_pass_is_reusable(
+            paths["eng"], "translate", args.model, job.source,
+            trust_legacy=args.trust_legacy,
+            source_sha256_value=source_hash,
+            expected_provenance=provenance_by_kind["eng"],
+        )
+        if not original_ready or not english_ready:
+            needs_model = True
+            break
 
-            print(f"  -> {out_path}  ({len(result['segments'])} segments)")
-            ok += 1
+    model = None
+    if needs_model:
+        try:
+            import torch
+            print(f"\nLoading Whisper model '{args.model}' on {device} ...")
+            if device == "cuda":
+                print(f"  GPU: {torch.cuda.get_device_name(0)}")
+            model = _load_whisper_model(args.model, device)
         except Exception as exc:
-            print(f"  ERROR: {exc}", file=sys.stderr)
-            failed.append((rel, exc))
+            for index, is_complete in enumerate(complete):
+                if not is_complete:
+                    records[index]["status"] = "failed"
+                    records[index]["error"] = f"{type(exc).__name__}: {exc}"
+            _write_transcription_manifest(
+                manifest_path, status="failed", started_at=started_at,
+                invocation_input=invocation_input, source_root=source_root,
+                output_root=output_root, task=args.task, model=args.model,
+                device=device, language=args.language, records=records,
+                provenance_by_kind=provenance_by_kind,
+            )
+            print(f"ERROR: Whisper model could not be loaded: {exc}", file=sys.stderr)
+            return 1
+    elif any(not value for value in complete):
+        print("\nSaved original and English passes are valid; retrying alignment without loading Whisper.")
 
-    # ── Summary ────────────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"Done. {ok}/{ok + len(failed)} file(s) transcribed successfully.")
+    for index, (job, paths, is_complete, source_hash) in enumerate(
+        zip(jobs, path_sets, complete, source_hashes), start=1
+    ):
+        print(f"\n[{index}/{len(jobs)}] {job.identity}")
+        record_index = index - 1
+        if is_complete:
+            representative = next(iter(paths.values()))
+            saved = _read_saved_whisper_pass(representative, _expected_task(next(iter(paths))))
+            records[record_index] = _transcription_record(
+                job, paths, output_root, status="skipped", segment_count=len(saved["segments"]),
+                source_sha256_value=source_hash,
+            )
+            print(f"  SKIP (verified complete set): {', '.join(str(path) for path in paths.values())}")
+        else:
+            try:
+                if args.task == "bilingual":
+                    outputs = transcribe_bilingual_to_paths(
+                        job.source,
+                        model,
+                        device,
+                        paths,
+                        model_name=args.model,
+                        language=args.language,
+                        reuse_existing=args.skip_existing,
+                        trust_legacy=args.trust_legacy,
+                        source_sha256_value=source_hash,
+                        provenance_by_kind=provenance_by_kind,
+                        source_id=job.source_id,
+                    )
+                    segment_count = len(outputs["bilingual"]["segments"])
+                else:
+                    if model is None:
+                        raise RuntimeError("Whisper model is required for this transcription pass")
+                    result = transcribe_file(
+                        job.source, model, device, language=args.language, task=args.task,
+                        model_name=args.model,
+                        provenance_by_kind=provenance_by_kind,
+                        source_sha256_value=source_hash,
+                        source_id=job.source_id,
+                    )
+                    result["model"] = args.model
+                    outputs = {args.task: result}
+                    _write_json_set(outputs, paths)
+                    segment_count = len(result["segments"])
+                records[record_index] = _transcription_record(
+                    job, paths, output_root, status="completed", segment_count=segment_count,
+                    source_sha256_value=source_hash,
+                )
+                for kind, path in paths.items():
+                    print(f"  -> {kind}: {path} ({len(outputs[kind]['segments'])} segments)")
+            except Exception as exc:
+                records[record_index] = _transcription_record(
+                    job,
+                    paths,
+                    output_root,
+                    status="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                    source_sha256_value=source_hash,
+                )
+                print(f"  ERROR: {exc}", file=sys.stderr)
+        _write_transcription_manifest(
+            manifest_path, status="running", started_at=started_at,
+            invocation_input=invocation_input, source_root=source_root,
+            output_root=output_root, task=args.task, model=args.model,
+            device=device, language=args.language, records=records,
+            provenance_by_kind=provenance_by_kind,
+        )
+
+    failed = sum(record["status"] == "failed" for record in records)
+    final_status = "failed" if failed else "completed"
+    _write_transcription_manifest(
+        manifest_path, status=final_status, started_at=started_at,
+        invocation_input=invocation_input, source_root=source_root,
+        output_root=output_root, task=args.task, model=args.model,
+        device=device, language=args.language, records=records,
+        provenance_by_kind=provenance_by_kind,
+    )
+    succeeded = len(records) - failed
+    print(f"\nDone. {succeeded}/{len(records)} video(s) completed or safely skipped.")
     if failed:
-        print("Failed files:")
-        for rel, exc in failed:
-            print(f"  {rel}: {exc}")
+        print(f"Batch manifest: {manifest_path}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _interrupt_manifest(path: Path) -> None:
+    """Replace a running batch state after Ctrl-C without hiding the interrupt."""
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return
+    if not isinstance(payload, dict) or payload.get("status") != "running":
+        return
+    payload["status"] = "interrupted"
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["interruption"] = {
+        "type": "KeyboardInterrupt",
+        "message": "Transcription was interrupted by the user; completed artifacts remain reusable.",
+    }
+    atomic_write_json(Path(path), payload)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one standalone transcription batch under its output-set lock."""
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--output-dir", default="output")
+    pre_parser.add_argument("--batch-manifest", type=Path)
+    preliminary, _unknown = pre_parser.parse_known_args(arguments)
+    output_root = assert_safe_output_target(
+        lexical_absolute_path(preliminary.output_dir)
+    )
+    manifest_path = (
+        preliminary.batch_manifest.resolve()
+        if preliminary.batch_manifest is not None
+        else output_root / TRANSCRIPTION_MANIFEST
+    )
+    lock_path = output_root.parent / f".{output_root.name}.transcribe.lock"
+    with exclusive_process_lock(
+        lock_path, purpose=f"writing Whisper transcription set {output_root}"
+    ):
+        temporary_pattern = f".{manifest_path.name}.*.tmp"
+        preexisting_temporaries = {
+            path.resolve() for path in manifest_path.parent.glob(temporary_pattern)
+        }
+        try:
+            return _main_unlocked(arguments)
+        except KeyboardInterrupt:
+            _interrupt_manifest(manifest_path)
+            raise
+        finally:
+            for temporary in manifest_path.parent.glob(temporary_pattern):
+                if temporary.resolve() not in preexisting_temporaries and temporary.is_file():
+                    temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

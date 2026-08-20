@@ -42,12 +42,48 @@ cite:
 Record the exact OpenSMILE version, revision, configuration, and feature set in
 the study archive.
 
-## Other Dependencies And Models
+## Native Face And Text Dependencies
+
+The native Face engine uses **Py-Feat 2.1.1** and its Detectorv2 checkpoint
+files. Py-Feat, its transitive dependencies, and every downloaded detector,
+landmark, AU, emotion, and identity checkpoint retain their upstream software
+and model terms. Downloaded checkpoint bytes are not covered by the root MIT
+License and must not be committed without a separate rights review.
+
+The native Text engine uses **OpenAI Whisper**, **PyTorch**, **TorchAudio**,
+**TorchVision**, and **TorchCodec**. Their packages and downloaded Whisper
+weights remain governed by their respective upstream licences and model terms;
+the downloaded weights are outside the root MIT License.
+
+**PyArrow** supplies Parquet serialization for the verified Face artifact.
+PyArrow and its bundled third-party components retain the notices distributed
+by the Apache Arrow project.
+
+## External Media And Java Runtimes
+
+**FFmpeg/ffprobe** and complete shared-library builds are external runtime
+dependencies. Their applicable LGPL/GPL configuration and component notices
+depend on the exact build selected by the installer and remain outside this
+project's root MIT License.
+
+A **Java Development Kit** supplies `java` and `javac` for the Text adapter.
+The JDK remains governed by its distributor's licence and notices.
+
+**RockSteady 0.4** is an external, separately obtained dependency. Its JAR and
+dictionaries are deliberately not distributed by this repository or downloaded
+by `scripts/setup.ps1`. Users must provide a lawfully licensed copy and comply
+with its own terms.
+
+## Other Dependencies, Models, And Marks
 
 Python packages, external tools, and model downloads retain their upstream
 licences and model terms. The Clean Speaker dependency inventory and source
 citations are recorded in
-`procurement/procurement_beta/THIRD_PARTY_NOTICES.md`. FFmpeg builds, gated
-Hugging Face models, optional local wrappers, downloaded media, and credentials
-are not licensed by the root MIT License and should not be added to a release
-without a separate rights review.
+`procurement/procurement_beta/THIRD_PARTY_NOTICES.md`. Gated Hugging Face
+models, optional local wrappers, downloaded media, and credentials are not
+licensed by the root MIT License and should not be added to a release without
+a separate rights review.
+
+The names, wordmarks, crests, logos, and other marks of Trinity College Dublin
+and affiliated institutions are not licensed by the root MIT License. Their use
+is subject to the relevant institution's brand and permission requirements.
