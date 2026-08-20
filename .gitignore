@@ -1,0 +1,217 @@
+# ============================================================
+# Multimodal Emotion Analysis Tool - local and generated files
+# ============================================================
+
+# --- RockSteady (commercial confidential — NEVER commit) ---
+external/
+
+# --- Internal team documents (not for repo) ---
+Information/
+Meeting/
+
+# --- Personal / local-only files (not for repo) ---
+_local/
+.codex/
+**/.codex/
+*codex*
+*Codex*
+_codex_*/
+**/_codex_*/
+
+# --- API keys and secrets ---
+.env
+*.env
+config.env
+secrets.json
+!.env.example
+!**/.env.example
+!**/config.env.example
+
+# --- Downloaded media ---
+downloads/
+Videos/
+*.mp4
+*.mp3
+*.wav
+*.m4a
+*.webm
+*.mkv
+*.mov
+*.avi
+*.part
+
+# --- Pipeline outputs (generated, keep empty placeholders only) ---
+output/*
+!output/.gitkeep
+**/output/*
+!**/output/.gitkeep
+**/input/*
+!**/input/.gitkeep
+**/archive/*
+!**/archive/.gitkeep
+**/logs/*
+!**/logs/.gitkeep
+download_log.csv
+youtube_metadata_cache.json
+
+# --- Temporary / scratch files ---
+tmp/
+temp/
+tempdebugging/
+*.tmp
+*.temp
+*.bak
+*.log
+~$*
+
+# --- Local archives, crash reports, and databases ---
+*.zip
+*.7z
+*.rar
+*.dmp
+*.dump
+hs_err_pid*
+core.*
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Conor workflow generated video sampling outputs ---
+raw_clips/
+**/raw_clips/
+imotions_clips/
+**/imotions_clips/
+video_timecodes/
+**/video_timecodes/
+video_timecodes_previous_runs/
+**/video_timecodes_previous_runs/
+stitched_imotions.mp4
+**/stitched_imotions.mp4
+_stitched_raw_for_conversion.mp4
+**/_stitched_raw_for_conversion.mp4
+_concat_raw_clips.txt
+**/_concat_raw_clips.txt
+extraction_metadata.json
+**/extraction_metadata.json
+*_extraction_complete.json
+**/*_extraction_complete.json
+_extraction_complete.json
+**/_extraction_complete.json
+*_with_extraction_links.docx
+
+# --- Licence audit generated outputs ---
+*_license_audit_*.docx
+*_license_audit_summary_*.txt
+*_license_audit_log_*.docx
+*_audit_debug_*.csv
+*_audit_console_*.log
+*_blind_verification_*.csv
+*_blind_verification_summary_*.txt
+*_blind_verification_console_*.log
+PIPELINE_FINISHED_*.txt
+LAST_ERROR.txt
+
+# --- Researcher catalogs, transcripts, and generated reports ---
+/procurement/license_check/*.docx
+/reports/
+/processing/text_analysis/transcribe/output/
+/processing/text_analysis/prepare_input/rocksteady_input/
+/processing/text_analysis/parse_output/*.csv
+
+# --- iMotions/local analysis generated outputs (generated, keep empty placeholders only) ---
+analysis/iMotions_Output/*
+!analysis/iMotions_Output/.gitkeep
+analysis/audio_outputs/*
+!analysis/audio_outputs/.gitkeep
+analysis/text_output/*
+!analysis/text_output/.gitkeep
+Archive/*
+!Archive/.gitkeep
+**/other_findings/
+**/histogram_graphs/
+**/logscale_histogram_graphs/
+**/histograms.csv
+**/histograms.xlsx
+**/logscale_histograms.csv
+**/emotion_histograms_0_to_100.csv
+**/valence_histograms_minus100_to_100.csv
+**/other_histograms.csv
+**/chi_squared_results.csv
+**/spearman_results.csv
+**/descriptor_statistics.csv
+**/column_manifest.csv
+**/facial_region_column_map.csv
+**/facial_region_correlations.csv
+*.xlsx
+**/combined_analysis_manifest*.json
+
+# --- Legacy local workflow folders ---
+Pre-Processing/
+processing/audio_analysis/vendor/
+
+# --- Whisper model weights ---
+~/.cache/whisper/
+
+# --- Machine-learning model caches and downloaded weights ---
+.cache/
+**/model_cache/
+**/model_weights/
+*.onnx
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# --- Windows ---
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- macOS ---
+.DS_Store
+
+# --- IDE ---
+.vscode/
+.idea/
+*.suo
+*.user
+
+# --- Procurement beta generated run artifacts ---
+_clean_speaker_beta_cache/
+**/_clean_speaker_beta_cache/
+clean_speaker_beta_*/
+**/clean_speaker_beta_*/
+identity_stills/
+**/identity_stills/
+face_visibility_intervals.csv
+face_visibility_intervals.json
+voice_activity_intervals.csv
+voice_activity_intervals.json
+clean_overlap_segments.csv
+clean_overlap_segments.json
+selected_segments.json
+face_segment_validation.json
+stitched_output_validation.json
+clean_speaker_beta_manifest.json
+clean_speaker_beta_summary.json
+review.html

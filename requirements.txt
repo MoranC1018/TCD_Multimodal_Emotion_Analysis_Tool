@@ -1,0 +1,47 @@
+# Multimodal Emotion Analysis Tool - Python dependencies
+#
+# For CUDA, install a matching PyTorch/Torchaudio build first, for example:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# Then install everything else:
+#   pip install -r requirements.txt
+
+# --- License check ---
+# The current audit scripts use urllib from the standard library; requests is
+# kept for the older main pipeline code and future API helpers.
+requests>=2.31.0
+python-docx>=1.1.0
+psutil>=5.9.0
+
+# --- Native Windows desktop shell ---
+# Uses the installed Microsoft Edge WebView2 runtime without showing browser
+# chrome or an Edge taskbar identity.
+pywebview==6.2.1
+
+# --- Clip downloader ---
+yt-dlp>=2024.1.0
+# ffmpeg and ffprobe must be installed separately and added to PATH.
+
+# --- iMotions analysis ---
+openpyxl>=3.1.0
+
+# --- Audio analysis ---
+torch
+torchaudio
+transformers==4.46.3
+numpy
+soundfile
+librosa
+
+# --- Whisper transcription ---
+openai-whisper>=20231117
+# For CUDA systems, keep torch and torchaudio on the same PyTorch index/build.
+
+# --- Procurement beta clean speaker detection ---
+# Used by procurement.procurement_beta when available. The beta CLI falls back
+# with warnings if these model packages are not installed yet.
+opencv-python>=4.9.0
+mediapipe>=0.10.0
+pyannote.audio>=3.1.0
+speechbrain>=1.0.0
+huggingface_hub>=0.23.0

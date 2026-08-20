@@ -1,0 +1,925 @@
+# Multimodal Emotion Analysis Tool
+
+Windows research software for collecting video, extracting multimodal signals,
+and producing reproducible statistical reports. The application connects three
+stages:
+
+```text
+Procurement -> Processing -> Analysis
+```
+
+- **Procurement** reviews video sources and creates full, sampled, focused, or
+  clean-speaker media.
+- **Processing** runs or imports face, audio, and text outputs.
+- **Analysis** creates per-video and per-speaker statistics, histograms,
+  comparisons, and audit manifests.
+
+This is research software, not a diagnostic system. Researchers remain
+responsible for copyright, model licences, consent, privacy, data protection,
+interpretation of generated results, and any action taken from them.
+
+## Academic Provenance And Release Boundary
+
+The **Multimodal Emotion Analysis Tool** was developed by Conor Moran and
+Jiaming Liu, with academic direction from Professor Khurshid Ahmad and Dr
+Tracey Hilton at the School of Computer Science, Trinity College Dublin, the University of Dublin. Institutional affiliation does not imply endorsement
+of particular findings.
+
+Project-authored code and documentation are released under the root
+[MIT License](LICENSE). Bundled third-party components retain their own terms:
+in particular, OpenSMILE 3.0.0 is excluded from the MIT License and remains
+under the audEERING Research License, including its non-commercial boundary.
+Read [Third-Party Notices](THIRD_PARTY_NOTICES.md) before reuse or
+redistribution. Citation metadata, attribution, contribution guidance, and the
+private vulnerability-reporting process are in [CITATION.cff](CITATION.cff),
+[AUTHORS.md](AUTHORS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[SECURITY.md](SECURITY.md).
+
+## Contents
+
+1. [Current capabilities](#current-capabilities)
+2. [Installation](#installation)
+3. [Initial credential setup](#initial-credential-setup)
+4. [Recommended workflow](#recommended-workflow)
+5. [Inputs and outputs](#inputs-and-outputs)
+6. [Resource controls and benchmark](#resource-controls-and-benchmark)
+7. [Command-line use](#command-line-use)
+8. [Verification and troubleshooting](#verification-and-troubleshooting)
+9. [User manual](#user-manual)
+
+## Current Capabilities
+
+| Stage | Available in the application | Current boundary |
+| --- | --- | --- |
+| Procurement | YouTube URL, DOCX list, local video, or recursive folder input | Online metadata depends on YouTube availability and API quota |
+| Standard sampling | Configurable random percentage and maximum clip length | Sampling is random and non-overlapping |
+| Full video | Keeps or downloads the complete source | Requires enough output storage |
+| Focus | Interactive timeline and exact segment selection | MP4 and WebM are the most reliable local preview formats |
+| Clean speaker segments | Face visibility, voice activity, overlap selection, and stitching | Model-backed runs require the dependencies described below |
+| Face processing | Import an existing processed folder | In-app face processing is not enabled in this release |
+| Audio processing | OpenSMILE and optional audio-emotion models | OpenSMILE 3.0.0 uses the audEERING Research License; review its non-commercial/product boundary |
+| Text processing | Import an existing processed folder | In-app text processing is not enabled in this release |
+| iMotions analysis | Emotions, action units, movement, geometry, and comparisons | Expects valid iMotions CSV exports |
+| Audio analysis | Emotion-model and OpenSMILE report generation | Expects outputs from this tool's audio processor |
+
+Generated videos, audio, iMotions exports, API credentials, model weights,
+caches, logs, and reports are intentionally excluded from git.
+
+## Installation
+
+### 1. System Requirements
+
+The supported desktop path is Windows 10 or Windows 11.
+
+Install:
+
+- Python 3.12 or newer.
+- [FFmpeg](https://ffmpeg.org/download.html), including `ffmpeg` and
+  `ffprobe`, on `PATH`.
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed by
+  `requirements.txt` or available on `PATH`.
+- Microsoft Edge WebView2 Runtime. It is already present on normal current
+  Windows installations.
+- The bundled OpenSMILE 3.0.0 Windows distribution for audio acoustic
+  features. Keep its complete `LICENSE` and `licenses/` tree. `OPENSMILE_HOME`
+  can select a separately installed compatible distribution when required.
+
+Confirm the external commands:
+
+```powershell
+ffmpeg -version
+ffprobe -version
+yt-dlp --version
+```
+
+### 2. Create The Python Environment
+
+From the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+For automated tests:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+```
+
+The launcher prefers `.venv\Scripts\python.exe`, then supported per-user Python
+installations. Keeping a repository-local environment makes package versions
+predictable.
+
+### 3. Optional CUDA Setup
+
+The default `pip install -r requirements.txt` may install CPU-only PyTorch.
+For NVIDIA acceleration, install matching CUDA builds of both `torch` and
+`torchaudio` before installing the remaining requirements. Follow the
+[official PyTorch selector](https://pytorch.org/get-started/locally/) because
+the correct command depends on the installed driver and supported CUDA build.
+
+Check the active environment:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+Selecting **CUDA** in the application does not install CUDA. It requires the
+command above to report `True`.
+
+### 4. Launch
+
+Double-click:
+
+```text
+Launch_Video_Processing_Stack.bat
+```
+
+The application opens in a native WebView2 desktop window without browser
+navigation controls. The first launch presents the EULA as a native dialog.
+Acceptance is recorded in ignored local file `_local/eula.txt`, for example:
+
+```text
+# data: accepted_at=2026-07-27T14:33:33Z
+terms_accepted=true
+```
+
+Every screen rechecks this local value. Revoking access changes it to `false`
+and closes the application.
+
+## Initial Credential Setup
+
+Open **Settings** from the top-left of the home screen.
+
+### YouTube Data API
+
+**Required credential type:** a Google Cloud **API key** for
+**YouTube Data API v3**. OAuth client credentials, service-account JSON, and a
+YouTube account password are not required for the public metadata used here.
+
+1. Sign in to Google Cloud and create or choose a project.
+2. Enable **YouTube Data API v3**.
+3. Create an API key under the project's credentials.
+4. Restrict the key to **YouTube Data API v3** where practical.
+5. Paste it into **Settings > YouTube Data API key** and select **Save
+   settings**.
+
+Google's current setup reference is
+[YouTube Data API Overview](https://developers.google.com/youtube/v3/getting-started).
+
+The key improves title, duration, upload-date, thumbnail, and licence metadata.
+Direct URLs and `yt-dlp` provide fallbacks, but some fields may remain
+`Unknown` when the API is unavailable or its quota is exhausted.
+
+### Hugging Face
+
+**Required credential type:** a Hugging Face **User Access Token**. A
+**fine-grained token with read access** is recommended. A general `read` token
+also works, but the application does not need write, billing, organization
+administration, or Inference Provider permissions.
+
+Create the token at the
+[Hugging Face token settings](https://huggingface.co/settings/tokens), following
+the [User Access Token guide](https://huggingface.co/docs/hub/en/security-tokens).
+For pyannote diarization, the same Hugging Face account must first accept the
+conditions on both gated repositories:
+
+- [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+- [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+
+For a fine-grained token, grant read access to those repositories. Paste the
+token into **Settings > Hugging Face token** and save it. A token alone cannot
+bypass model conditions that the account has not accepted.
+
+### Credential Storage
+
+Credentials are stored locally outside tracked source files. The UI returns
+only `Configured` and a masked suffix after saving. Never put keys or tokens in
+the README, `.env` files committed to git, screenshots, issue reports, or
+shared logs.
+
+**YouTube download fallback** can allow `yt-dlp` to use Edge, Chrome, or Firefox
+cookies when YouTube requests sign-in or bot confirmation. Use it only when
+needed and only with a browser profile that the researcher is permitted to
+use.
+
+## Recommended Workflow
+
+1. Open **Settings**, configure credentials, and keep resource limits enabled.
+2. Open **Procurement**.
+3. Select a YouTube URL, one local video, a recursive folder, or a DOCX list.
+4. Review speaker grouping, title, duration, upload date, thumbnail, and
+   licence.
+5. Untick speaker groups that are outside the study.
+6. Select Standard, Full, Focus, or Clean Speaker mode.
+7. Run Procurement and inspect its completion manifest.
+8. Open **Processing**. Run Audio in-app and import existing Face/Text outputs
+   as required.
+9. Open **Analysis**. Run iMotions and audio reports separately.
+10. Preserve the source list, processing manifests, settings, model versions,
+    and generated reports with the research archive.
+
+The **Guided workflow** switch on the home screen can move through selected
+stages in order. Each processing stream can independently be run in-app where
+supported or marked as an imported folder.
+
+## Inputs And Outputs
+
+### Procurement Inputs
+
+| Input | Accepted form | Grouping behaviour |
+| --- | --- | --- |
+| YouTube | Watch, share, Shorts, or embed URL | One scanned video |
+| Folder tree | Recursive MP4, MOV, MKV, WebM, or AVI files | Subfolder structure is retained and used for speaker groups |
+| DOCX | YouTube links inside Word table cells or hyperlinks | Speaker/table labels are retained where available |
+| Local video | One MP4, MOV, MKV, WebM, or AVI | Parent folder supplies the initial group |
+
+Leaving the source field blank and selecting **Search** opens an in-app choice
+between a modern folder picker and a modern DOCX/video file picker.
+
+There is no application-level maximum local video byte size. Local media stays
+on disk and is referenced by path. Practical limits are free output storage,
+filesystem format, codec support, duration, resolution, model memory, and
+network availability. FAT32 has a 4 GiB single-file limit; NTFS is recommended.
+
+### Procurement Modes
+
+**Standard sampling**
+
+- Defaults to 10 percent.
+- Selects random, non-overlapping source intervals.
+- Splits selections at the configured maximum segment length, default 30
+  seconds.
+- Records selected timestamps so the sample can be audited.
+
+**Full video**
+
+- Keeps a local source or downloads the complete online source.
+- Does not apply the Standard percentage or maximum segment settings.
+
+**Focus**
+
+- Uses an embedded YouTube player or a local media preview.
+- Accepts seconds, `MM:SS`, or `HH:MM:SS`.
+- Snaps near the playhead and supports click-to-select, edge dragging, and
+  deletion of selected intervals.
+- Inserts the configured black/silent gap between clips. `0` joins them
+  directly.
+
+**Clean speaker segments**
+
+- Samples the video and identifies the recurring target face.
+- creates up to 20 diverse identity stills.
+- Finds face-visible intervals and dominant-speaker voice intervals.
+- Intersects the two timelines.
+- Keeps overlaps at or above the minimum clean duration.
+- **Clean compilation** retains every accepted overlap.
+- **Percentage sample** fills a target percentage from the strongest and
+  longest clean sections, with a configurable clip cap.
+
+Each clean-speaker result includes selected and rejected interval metadata,
+identity stills, face/voice timelines, and a stitched MP4. The strict path
+fails closed when model-backed identity or voice evidence is unavailable.
+Technical details and model licences are in
+[Clean Speaker Setup](procurement/procurement_beta/SETUP.md) and
+[Third-Party Notices](procurement/procurement_beta/THIRD_PARTY_NOTICES.md).
+
+### Processing Outputs
+
+Audio Processing mirrors the input speaker/video folder structure:
+
+```text
+audio_output/
+  audio_analysis_manifest.csv
+  run_log.txt
+  Speaker_Name/
+    Video_Name/
+      audio_analysis.csv
+      opensmile_features.csv
+      audio_analysis_manifest.json
+```
+
+- `audio_analysis.csv` contains one row per time window and optional emotion
+  probabilities.
+- `opensmile_features.csv` contains the selected acoustic feature set.
+- Manifests record source paths, models, settings, availability, and errors.
+
+### Analysis Outputs
+
+Reports are divided by data meaning:
+
+```text
+output/
+  emotion/
+    <speaker-or-run>/
+      <video>/
+      combined/
+  raw/
+    <speaker-or-run>/
+      <video>/
+      combined/
+```
+
+Outputs can include CSV and XLSX histograms, SVG graphs, log-scale histograms,
+descriptive statistics, chi-squared comparisons, pairwise matrices, Spearman
+comparisons, region correlations, and column manifests. Each speaker receives
+individual video reports and one `combined` report across that speaker's input
+files.
+
+Log-scale histograms use:
+
+```text
+log10(count + 1)
+```
+
+They supplement, rather than replace, the linear counts. Full formulas and
+column contracts are documented in
+[Analysis Calculations](analysis/CALCULATIONS.md).
+
+## Resource Controls And Benchmark
+
+### What The Controls Mean
+
+- **Maximum CPU load** is both a process-tree pause threshold and the basis for
+  logical-processor affinity.
+- **Maximum CPU cores** applies an additional affinity cap. `0` means the CPU
+  percentage chooses the count automatically.
+- **Maximum GPU load** monitors system-wide NVIDIA utilization with
+  `nvidia-smi`; it cannot attribute shared GPU load to one process.
+- **System RAM percentage** protects whole-machine headroom.
+- **Tool process RAM in GB** monitors resident memory in the launched process
+  tree instead.
+- **Native library threads** limits OpenMP, MKL, OpenBLAS, NumExpr, ONNX, and
+  related native worker pools per process.
+- **Monitor interval** controls how often the launcher samples resources.
+
+The launcher pauses and resumes with hysteresis. Sustained RAM pressure can
+terminate the process tree after 30 seconds. These controls reduce crash risk
+but cannot prevent driver resets, hardware faults, or unreported native
+allocations.
+
+### Reference Computer
+
+Benchmarks in this repository were measured on:
+
+| Component | Reference hardware |
+| --- | --- |
+| CPU | AMD Ryzen 9 5900X, 12 cores / 24 logical processors, up to 4.2 GHz |
+| RAM | 23.9 GiB |
+| GPU | NVIDIA GeForce RTX 3070, 8 GiB VRAM |
+| Current model runtime | PyTorch 2.10 CPU build; CUDA unavailable in that environment |
+
+Metadata-only bounded stress tests:
+
+| Operation | Scale | Wall time | Peak traced Python memory |
+| --- | ---: | ---: | ---: |
+| Recursive folder scan | 100 videos | 0.0819 s | 0.115 MB |
+| Recursive folder scan | 1,000 videos | 0.7389 s | 1.006 MB |
+| Recursive folder scan | 5,000 videos | 3.6698 s | 4.998 MB |
+| DOCX table scan | 100 rows | 0.4909 s | 2.225 MB |
+| DOCX table scan | 1,000 rows | 4.7481 s | 2.623 MB |
+| DOCX table scan | 5,000 rows | 24.0104 s | 7.655 MB |
+
+Real Clean Speaker runs measured on 2026-07-28 used a curated 20-image face
+bank, 1 FPS scanning, 1 FPS candidate validation, one CPU-backed video at a
+time, a 10-second minimum overlap, 0.5-second gaps, and no final pruning pass:
+
+| Video | Source duration | Clean output | Accepted overlaps | Face | Voice | Candidate validation | Stitch | End to end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reference video A | 15:26.0 | 11:10.6 | 19 | 217.6 s | 40.7 s | 210.4 s | 128.8 s | about 9:59 |
+| Reference video B | 31:43.5 | 12:24.0 | 40 | 106.0 s | 72.9 s | 86.8 s | 89.9 s | about 6:29 |
+
+Both runs completed with zero failed and zero unusable videos. The longer
+reference source finished faster because runtime follows accepted candidate
+density, decoding, validation, and stitch work rather than duration alone.
+
+Times are reference observations, not guarantees. Video duration, resolution,
+codec, face density, number of candidates, model cache state, storage speed,
+and network access can dominate runtime.
+
+### Recommended Settings For Similar Hardware
+
+For a 12-core Ryzen, 24 GiB RAM, and 8 GiB NVIDIA GPU:
+
+| Setting | Recommended starting value | Reason |
+| --- | ---: | --- |
+| Enforce limits | On | Keeps every launched mode under one policy |
+| Maximum CPU load | 85% | Leaves capacity for Windows, decoding, and the UI |
+| Maximum CPU cores | 20 | Leaves four logical processors outside affinity |
+| Maximum GPU load | 90% | Leaves display and driver headroom |
+| RAM limit type | System RAM percentage | Includes the pipeline and unrelated applications |
+| Maximum system RAM | 85% | Leaves roughly 3.6 GiB on a 23.9 GiB system |
+| Native library threads | 4 | Avoids multiplication of large native pools |
+| Monitor interval | 2 seconds | Responsive without excessive polling |
+
+Clean Speaker starting values:
+
+| Setting | Recommended value |
+| --- | ---: |
+| Concurrent videos | 1 |
+| Run one video per process | On |
+| Skip completed outputs | On |
+| Cooldown between videos | 30-60 seconds |
+| Parallel face/audio analysis | Off |
+| Scan FPS | 1 |
+| Candidate validation FPS | 1-2 for throughput; 4 for stricter cutaway checking |
+| Max YouTube height | 720 |
+| Identity stills | 20 |
+| Face confidence | 0.65 |
+| Speaker confidence | 0.65 |
+| Keep debug artifacts | Off except during diagnosis |
+
+Store large runs on a local, non-synced NTFS drive. Copy results into OneDrive
+or another sync service only after the run. On this reference environment,
+model execution is CPU-backed until a CUDA PyTorch build is installed.
+
+## Command-Line Use
+
+The desktop application is the recommended path for non-technical users. These
+commands are useful for automation and diagnosis.
+
+Run the DOCX Procurement pipeline:
+
+```powershell
+python -m procurement.run_pipeline "C:\path\to\input.docx"
+```
+
+Useful Procurement options:
+
+```powershell
+python -m procurement.run_pipeline INPUT.docx --limit 3
+python -m procurement.run_pipeline INPUT.docx --force
+python -m procurement.run_pipeline INPUT.docx --no-stitch
+python -m procurement.run_pipeline INPUT.docx --dry-run
+```
+
+Check audio dependencies:
+
+```powershell
+python processing\audio_analysis\run_audio_analysis.py doctor
+```
+
+Run Audio Processing:
+
+```powershell
+python processing\audio_analysis\run_audio_analysis.py batch "C:\path\to\videos"
+python processing\audio_analysis\run_audio_analysis.py single "C:\path\to\video.mp4"
+```
+
+Run iMotions and audio Analysis:
+
+```powershell
+python -m analysis.imotions "C:\path\to\imotions_csvs" --logscale
+python -m analysis.audio "C:\path\to\audio_outputs" --logscale
+```
+
+Run the combined workflow from existing Analysis reports:
+
+```powershell
+python -m analysis.workflow `
+  --output-root "C:\path\to\combined_output" `
+  --imotions-source "C:\path\to\video_reports" --imotions-method import `
+  --audio-source "C:\path\to\audio_reports" --audio-method import `
+  --speaker-groups-json '[{"id":"group-1","name":"Group 1","speaker_ids":["Speaker A","Speaker B"]}]'
+```
+
+Use `run` instead of `import` for a modality when its source contains raw
+iMotions exports or processed `audio_analysis.csv` files that still need
+Analysis. The desktop application is easier for defining speaker groups.
+
+## Verification And Troubleshooting
+
+Run the test suite:
+
+```powershell
+python -m pytest -q
+node --check application\static\app.js
+```
+
+The real-browser Analysis smoke is optional during normal development. Its
+portable test resolver accepts these environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `MEAP_TEST_NODE` | Full path to the Node.js executable |
+| `MEAP_TEST_PLAYWRIGHT` | Folder containing the installed Playwright package |
+| `MEAP_TEST_BROWSER_EXECUTABLE` | Full path to Microsoft Edge or another Chromium executable |
+| `MEAP_STRICT_BROWSER_TESTS=1` | Fail instead of skip when browser automation is unavailable; use this in release CI |
+
+Example strict Edge check:
+
+```powershell
+$env:MEAP_TEST_NODE = "C:\Program Files\nodejs\node.exe"
+$env:MEAP_TEST_PLAYWRIGHT = "C:\path\to\node_modules\playwright"
+$env:MEAP_TEST_BROWSER_EXECUTABLE = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+$env:MEAP_STRICT_BROWSER_TESTS = "1"
+python -m unittest application.tests.test_release_ui_contract.ReleaseUiContractTests.test_analysis_browser_interactions_and_responsive_rendering -v
+```
+
+Unset the variables after a local check if they should not affect later test
+runs. Without overrides, the test searches common Node, Playwright, and Edge
+locations and skips with setup guidance when optional browser automation is
+not installed.
+
+Before a Clean Speaker batch, select **Check model readiness**. Before an audio
+batch, run the `doctor` command above.
+
+Common causes:
+
+| Symptom | Check |
+| --- | --- |
+| Duration, thumbnail, or licence is unknown | YouTube API key, quota, private/deleted video, then `yt-dlp` availability |
+| YouTube download requests sign-in | Update `yt-dlp`; configure the browser-cookie fallback only when permitted |
+| Clean Speaker produces no output | Readiness report, Hugging Face token, accepted pyannote conditions, identity reference quality, and confidence thresholds |
+| CUDA option fails | `torch.cuda.is_available()` must be `True` in the exact launcher environment |
+| Audio emotion columns are blank | Emotion models toggle, audio `doctor`, model downloads, and manifest warnings |
+| OpenSMILE output is missing | `OPENSMILE_HOME`, executable/config path, and audio `doctor` |
+| Focus video does not preview | Try MP4/WebM, but processing may still work through FFmpeg |
+| Long run pauses | Resource monitor has reached CPU, GPU, or RAM limit; inspect the visible launcher/PowerShell log |
+| OneDrive file is unavailable | Hydrate the file locally or move the run to a non-synced NTFS folder |
+
+Further technical documents:
+
+- [Research Methods and Reproducibility](docs/RESEARCH_METHODS.md)
+- [Release Readiness and Limits](docs/RELEASE_READINESS.md)
+- [Analysis Calculations](analysis/CALCULATIONS.md)
+- [Audio Processing Contract](processing/audio_analysis/README.md)
+- [Clean Speaker Setup](procurement/procurement_beta/SETUP.md)
+- [Third-Party Notices](procurement/procurement_beta/THIRD_PARTY_NOTICES.md)
+
+# User Manual
+
+## Home Screen
+
+| Control | What it does |
+| --- | --- |
+| Settings icon | Opens credentials, download fallback, resource controls, and EULA access controls |
+| Procurement tile | Opens video source selection and Procurement modes |
+| Processing tile | Opens Face, Audio, and Text processing choices |
+| Analysis tile | Opens iMotions or Audio statistical report generation |
+| Guided workflow switch | Shows or hides the multi-stage workflow planner |
+| Procurement / Processing / Analysis checkboxes | Include or exclude each stage from the guided sequence |
+| Face / Audio / Text checkboxes | Include or exclude each processing stream |
+| Run in app / Import folder menu | Chooses whether that stream is executed or supplied from an existing folder |
+| Browse | Selects the import folder for that stream |
+| Start workflow | Begins at the first selected stage and carries paths forward |
+
+Face and Text are import-only in the current release. Audio can run in-app or
+be imported.
+
+## Settings
+
+| Control | What it does |
+| --- | --- |
+| YouTube Data API key | Stores a new Google Cloud API key for public YouTube metadata |
+| Remove stored YouTube API key | Deletes the saved YouTube key on the next save |
+| How to get a YouTube API key | Opens Google's official setup guide |
+| Hugging Face token | Stores a new Hugging Face User Access Token |
+| Remove stored Hugging Face token | Deletes the saved token on the next save |
+| How to create a Hugging Face access token | Opens the official token guide |
+| YouTube download fallback | Optionally lets `yt-dlp` read cookies from Edge, Chrome, or Firefox |
+| Enforce limits for all tool processes | Enables or disables the launcher resource policy |
+| Maximum CPU load | Pauses above this load and limits automatic CPU affinity |
+| Maximum CPU cores | Caps logical processors; `0` uses the CPU percentage automatically |
+| Maximum GPU load | Pauses above this NVIDIA utilization when `nvidia-smi` is available |
+| RAM limit type | Switches between whole-system percentage and process-tree gigabytes |
+| Maximum system RAM | Pauses when overall used RAM reaches this percentage |
+| Maximum tool process RAM | Pauses when the launched process tree reaches this resident-memory amount |
+| Native library threads | Caps native math/ONNX thread pools per process |
+| Monitor interval | Sets telemetry polling frequency |
+| EULA file | Shows the local acceptance record used by every screen |
+| Revoke access | Requires confirmation, sets acceptance to false, and closes the application |
+| Save settings | Validates and stores changes locally |
+| Close icon | Closes the dialog without saving unsaved changes |
+
+## Procurement: Choose Input
+
+| Control | What it does |
+| --- | --- |
+| Back shield | Returns to the three home tiles |
+| Source field | Accepts a YouTube URL, folder path, DOCX path, or local video path |
+| Search | Scans the entered source; if blank or spaces only, opens the source-choice dialog |
+| Folder | Opens the modern recursive folder picker |
+| DOCX or video | Opens the modern file picker for `.docx`, `.mp4`, `.mov`, `.mkv`, `.webm`, or `.avi` |
+| Output directory | Shows where the Procurement run will be written |
+| Change output folder | Opens the folder picker for a different output root |
+| Input / Review / Run steps | Show progress through Procurement; unavailable future steps remain disabled |
+
+## Procurement: Review And Mode
+
+| Control | What it does |
+| --- | --- |
+| Search again | Returns to source selection and rescans a different input |
+| Continue | Runs the selected mode, or opens the Focus video list |
+| Clear / All | Unticks or reticks all speaker groups |
+| Speaker checkbox/tab | Includes or excludes the entire speaker group and opens its video list |
+| Sort menu | Orders the active speaker's videos by speaker order, upload date, or duration |
+| Thumbnail | Opens the original YouTube page when a YouTube link exists |
+| Video title | Opens the original YouTube page during Review |
+| Standard sampling | Shows percentage and maximum segment length controls |
+| Full video | Selects complete-video processing |
+| Focus | Shows the inter-segment black/silent gap setting |
+| Clean speaker segments | Shows clean compilation and percentage-sample settings |
+| Run button | Remains disabled until a mode and at least one speaker are selected |
+
+The video metadata row shows speaker, duration, upload date, and licence. Unknown
+values are displayed as unknown rather than guessed.
+
+## Clean Speaker Controls
+
+| Control | What it does |
+| --- | --- |
+| Clean compilation | Keeps every accepted face-and-voice overlap |
+| Percentage sample | Fills the target share from accepted clean overlaps |
+| Minimum clean overlap | Rejects overlaps shorter than this duration |
+| Black/silent gap | Inserts this gap between stitched clips |
+| Target percentage | Appears only for Percentage sample |
+| Max clip length | Appears only for Percentage sample |
+| Only YouTube video IDs | Restricts a scanned DOCX/folder run to comma-separated IDs |
+| Run one random scanned video | Performs a quick validation on one item |
+| Random seed | Makes the random validation choice repeatable |
+| Run one video per process | Releases model memory after each video and improves recovery |
+| Skip completed outputs | Uses manifests to resume without repeating finished videos |
+| Skip first videos | Starts after a known number of scanned items |
+| Cooldown between videos | Waits between isolated video jobs |
+| Reference voice audio | Supplies an optional known-speaker voice recording |
+| Identity stills | Sets the number of diverse main-person reference images to retain |
+| Scan FPS | Controls baseline face sampling density |
+| Candidate validation FPS | Controls stricter checking inside proposed face intervals |
+| Max YouTube download height | Caps online source resolution; `0` allows the downloader default |
+| Face confidence | Sets the identity acceptance threshold |
+| Speaker confidence | Sets the voice-cluster acceptance threshold |
+| Concurrent videos | Runs this many videos simultaneously |
+| Model device | Uses Auto, CPU, or requires CUDA |
+| Parallel face/audio analysis | Runs both detector streams together at higher resource cost |
+| Keep debug artifacts | Preserves intermediate frames, audio, and detector logs |
+| Check model readiness | Reports required commands, packages, models, and token state before running |
+
+For the reference 24 GiB system, keep **Concurrent videos** at 1 and
+**Parallel face/audio analysis** off.
+
+## Focus Editor
+
+| Control | What it does |
+| --- | --- |
+| Video title in Focus list | Opens this video's segment editor instead of navigating to YouTube |
+| Close icon | Closes the editor and keeps saved segment selections |
+| Player controls | Play, pause, seek, change volume, and enter player full screen where supported |
+| Timeline | Clicks seek the player; dragging an empty area creates a proposed range |
+| Existing clip bar | Click to select; drag either edge to expand or contract it |
+| Start / End fields | Accept seconds, `MM:SS`, or `HH:MM:SS` |
+| Use current | Copies the player's current time into the adjacent field |
+| Add segment | Validates and stores the entered interval |
+| Delete selected | Removes the highlighted interval |
+| Segment row | Selects the matching bar and loads its times into the fields |
+| Selected clip / share | Reports duration and percentage for the selected interval |
+| Create focused videos | Stitches all saved Focus intervals for selected videos |
+
+Near-playhead selections snap to the current time. A selected segment is
+highlighted both on the timeline and in the segment list.
+
+## Processing Hub
+
+| Control | What it does |
+| --- | --- |
+| Face tile | Placeholder for future in-app face processing |
+| Audio tile | Opens the working Audio Processing screen |
+| Text tile | Placeholder for future in-app text processing |
+| Import processed face/audio/text toggle | Marks that stream as supplied by an existing folder |
+| Browse | Selects the corresponding imported output folder |
+| Continue to analysis | Opens Analysis after required processing paths are present |
+
+Imported streams and in-app streams can be mixed in one guided workflow.
+
+## Audio Processing
+
+| Control | What it does |
+| --- | --- |
+| Back to processing | Returns to the Processing hub |
+| Batch folder | Recursively processes MP4 files and preserves the input tree |
+| Single video | Processes one MP4 |
+| Select input folder | Opens the batch folder picker |
+| Select single video | Opens the MP4 file picker |
+| Audio source path | Accepts a pasted folder or MP4 path |
+| Import existing audio outputs | Uses an existing audio output folder and does not run OpenSMILE |
+| Audio output directory | Shows the destination root |
+| Change output folder | Selects another destination |
+| Run audio processing | Validates the request and starts the batch or single-video run |
+| Emotion models | When off, still runs OpenSMILE but leaves model emotion columns blank |
+| Advanced audio options | Expands settings intended for technical users |
+| Window seconds | Length of each acoustic/model window; default 10 seconds |
+| Stride seconds | Distance between window starts; default 5 seconds |
+| OpenSMILE feature set | Chooses eGeMAPS, ComParE 2016, or the ComParE alias |
+| Emotion model device | Auto, CPU, or required CUDA |
+| Keep temporary audio | Preserves extracted WAV windows |
+| Debug fallback model | Writes a separate fallback-model comparison |
+| Stop on first batch error | Ends a batch at its first failed video |
+| Stop | Terminates the active Audio Processing tree |
+| Back to audio options | Returns to inputs after completion or failure |
+| Open analysis | Carries the completed audio path into Analysis |
+
+For standard research extraction, keep 10-second windows, 5-second stride,
+eGeMAPS, Auto device, and temporary/debug outputs off.
+
+## Analysis
+
+Analysis can combine Video / iMotions, Audio, and imported Text constructs in
+one run. Video and Audio can process a fresh source in the application or reuse
+an existing Analysis report folder. Text is import-only, and all three source
+types can be mixed in the same run.
+
+| Control | What it does |
+| --- | --- |
+| Video / iMotions | Enables analysis of iMotions emotions, action units, landmarks, movement, and geometry |
+| Audio | Enables analysis of this tool's audio emotion and OpenSMILE outputs |
+| Text | Imports completed speaker-level text constructs from `multimodal/speaker_level_summary.csv`; it does not run the separate text analyser |
+| Run analysis | Processes that modality's fresh source before building the combined result |
+| Use existing results | Reads an existing Analysis report tree without changing it |
+| Source folder | Accepts the enabled modality's fresh input or existing report folder |
+| Browse | Selects the folder for that modality |
+| Discover speakers | Scans every enabled source and opens the group editor |
+| Add group | Creates another named comparison group |
+| Speaker assignment | Places a discovered speaker in exactly one group for this run |
+| Combined workbook | Builds descriptive group sheets and their adjacent probability mirrors |
+| Default reference value | Sets the comparison value used unless a sheet or metric override is supplied |
+| Reference overrides | Accepts advanced, case-sensitive per-sheet or per-metric reference values as JSON |
+| Generate graphs | Writes SVG histogram graphs for modalities using **Run analysis** |
+| Log-scale outputs | Adds `log10(count + 1)` histograms for modalities using **Run analysis** |
+| Video / iMotions advanced options | Expands iMotions-specific column controls |
+| Include landmarks | Includes raw landmark columns |
+| Include timing columns | Includes timing and counter fields |
+| Exclude geometry | Omits geometry columns from histogram output |
+| Report output directory | Sets the destination for new Analysis and combined outputs |
+| Run Analysis | Validates sources and groups, then runs one coordinated workflow |
+| Stop | Terminates active Analysis work |
+| Back to analysis options | Returns to the Analysis configuration screen |
+
+### Set Up Speaker Groups
+
+1. Enable Video / iMotions, Audio, Text, or any useful combination.
+2. Choose **Run analysis** or **Use existing results** separately for Video and
+   Audio. Text uses **Use existing results** only. Select each source folder.
+3. Select **Discover speakers**.
+4. Name the groups and assign every discovered speaker exactly once.
+5. Keep speakers in the order in which they should appear in the workbook.
+6. Choose the output directory and select **Run Analysis**.
+
+Groups define the speakers being compared; they are not raw-data filters. Each
+group receives its own quantitative sheet for every enabled modality. The
+submitted speakers appear first, in the submitted order, followed by one
+**Overall** column. The Overall value is the mean of the available speaker
+means. A speaker missing from one modality remains blank for that modality and
+is excluded from that result with a warning.
+
+The Run button explains anything still required. When the combined workbook is
+enabled, all discovered speakers must be assigned so no one is silently left
+out. Imported Text construct values appear in the comparison sheet but are not
+used for Video or Audio probability inference because those outputs use
+different measurement scales.
+
+Reference override keys must match generated names exactly. A sheet override
+uses the quantitative worksheet title, for example
+`{"Audio - Group 1": 0}`. A metric override uses
+`<worksheet title>|<group id>|<metric>`, for example
+`{"Audio - Group 1|group-1|Arousal": 0}`. Names are case-sensitive. Excel
+worksheet titles longer than 31 characters are shortened deterministically;
+an invalid or stale key stops the run and the error lists valid generated
+examples rather than silently applying the default.
+
+### Fresh And Existing Sources
+
+For **Run analysis**, choose the source that has not yet been statistically
+analysed:
+
+- Video / iMotions: a folder containing iMotions CSV exports.
+- Audio: a folder containing processed `audio_analysis.csv` files and their
+  OpenSMILE-derived values.
+
+New modality reports are written below the selected output root in `video/`
+and `audio/`. The coordinator uses the reports returned by those fresh runs.
+
+For **Use existing results**, choose an Analysis output tree containing one or
+more reports in this established shape:
+
+```text
+<source>/<domain>/<speaker>/combined/other_findings/descriptive_statistics.csv
+```
+
+Imported folders are read-only. The output directory must be separate from an
+imported report folder. A mixed run is valid, for example fresh Audio with
+imported Video / iMotions.
+
+### Combined Outputs
+
+The selected output directory contains:
+
+```text
+combined_analysis.xlsx
+combined_analysis_manifest.json
+video/                         # present when Video / iMotions ran fresh
+audio/                         # present when Audio ran fresh
+```
+
+`combined_analysis_manifest.json` records status, source methods and paths,
+speaker groups, software version, best-effort Git revision, accepted and
+rejected report decisions, modality output roots, resolved reference sources,
+workbook path, and warnings. A failed manifest also records the failed stage
+and a sanitized one-line error. Keep it with the workbook when archiving or
+sharing a run.
+
+Before a new run uses the same output directory, any previous fixed-name
+workbook and manifest are moved into a self-contained run directory below
+`combined_analysis_history/`. The archived manifest is rewritten to identify
+its matching archived workbook and records that workbook's SHA-256 hash. This
+prevents a failed rerun from leaving an older `combined_analysis.xlsx` beside
+the new failed manifest or a historical manifest pointing at a later run.
+Imported source files are never moved or changed.
+
+#### Combined workbook measure contract
+
+The workbook keeps four semantic sections separate and lists the same contract
+in its non-quantitative **Measure Guide** sheet:
+
+- **Emotions:** Audio includes Anger, Contempt, Disgust, Fear, Joy, Sadness,
+  Surprise, Neutral, and Other on `0..100` (source probabilities `0..1`
+  multiplied by 100; Joy imports the source label `Happiness`). Video includes
+  Anger, Contempt, Disgust, Fear, Joy, Sadness, Surprise, Neutral, and
+  Confusion on `0..100`.
+- **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
+  Negative Sentiment are `0..1`; imported legacy headers `Positive valence`
+  and `Negative valence` are accepted as aliases, with canonical sentiment
+  headers preferred when both are present.
+- **Valence:** Audio Valence maps source `0..1` to output `-100..100` with
+  `(raw * 200) - 100`. Video Valence and Adaptive Valence remain
+  `-100..100`. Joy and Valence are never substituted for Positive or Negative
+  Sentiment.
+- **Dimensions:** Audio Arousal and Dominance map source probabilities `0..1`
+  to `0..100`. Video Engagement and Adaptive Engagement are `0..100`. Text
+  Arousal / Activation, Dominance / Power, and Affiliation / Social
+  orientation are `-1..1`.
+
+These modality scales are not directly comparable without rescaling. The
+Measure Guide records Section, Modality, Display measure, Imported source
+label, Workbook sheet, Output range, and Transformation/meaning for every
+displayed measure. Legacy audio reports that predate optional model classes
+show explicit blanks and one warning; new full reports retain all nine audio
+emotions. Action units, muscles, and tones remain available in their detailed
+reports but are outside this combined emotional workbook.
+
+In `combined_analysis.xlsx`, every quantitative descriptive sheet is followed
+immediately by one probability mirror. Individual speaker cells in the mirror
+remain formula links to their descriptive values. Only the group Overall cells
+are replaced by probabilities. Definition and empty placeholder sheets are not
+duplicated. **Inference Settings** records resolved references, and
+**Inference Details** exposes the values and formulas supporting each result.
+The settings sheet records the original submitted key, whether it matched the
+default, a sheet, or a metric, the matched source, and the resolved value.
+
+### Interpret The Probability Sheets
+
+The reported quantity is:
+
+```text
+P(population mean > reference | observed speaker means)
+```
+
+The independent observations are the valid **speaker means in that group**.
+The model treats those speaker means as exchangeable, independent and
+identically distributed Normal observations. The intended population is the
+conceptual speaker population represented by the user-defined group, not the
+frames, videos, or CSV rows used to estimate each speaker mean. Generalization
+therefore depends on whether the named speakers are a defensible sample of that
+population. Individual speaker values remain descriptive; inference is attached
+only to the group's Overall result.
+
+- **Posterior probability** is the directional Student-t model estimate that
+  the population mean is above the chosen reference, given the observed
+  speaker means and the model assumptions.
+- **p-value** is the two-sided one-sample test result against the reference. It
+  is not the probability that the null hypothesis is true.
+- **q-value** is the Benjamini-Hochberg false-discovery-rate adjustment of the
+  p-values within that quantitative worksheet. It helps interpret a family of
+  metrics tested together.
+
+For two or more speaker means with positive sample variance, the workbook uses
+the Student-t result under an unknown-variance Normal model and the
+reference/independence prior `pi(mu, sigma^2) proportional to 1/sigma^2`.
+When `n < 2`, the descriptive mean remains available but inferential values are
+blank. When two or more speaker means are identical, the sample standard
+deviation remains available as zero, but the posterior under that improper
+prior and the one-sample t statistic are undefined. The standard error,
+interval, t statistic, p-value, q-value, effect size, and posterior probability
+are therefore left blank rather than reported as limiting conventions.
+
+Missing, formula-empty, and nonnumeric speaker cells are excluded consistently.
+The live Excel `COUNT`, `AVERAGE`, and ordinary direct-reference `STDEV.S`
+formulas use the source cells themselves, so blanks are not coerced to zero and
+the workbook does not require dynamic-array formula support. Python and
+recalculated Excel therefore use the same observations.
+
+The workbook stores live formulas and requests automatic full recalculation.
+Open it in desktop Excel once before reading or exporting inferential values;
+some preview tools display formulas without calculating their latest results.

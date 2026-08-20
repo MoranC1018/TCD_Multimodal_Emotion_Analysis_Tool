@@ -1,0 +1,39 @@
+{
+  "strong_cc_signals": [
+    "\\bcreative commons\\b",
+    "\\bcc[-\\s]?by\\b",
+    "\\bcc[-\\s]?by[-\\s]?sa\\b",
+    "\\bcc[-\\s]?by[-\\s]?nc\\b",
+    "\\bcc[-\\s]?by[-\\s]?nd\\b",
+    "\\bcc[-\\s]?0\\b",
+    "\\bcc0\\b",
+    "creativecommons\\.org/licenses/",
+    "creativecommons\\.org/publicdomain/",
+    "\\blicensed under (?:a )?creative commons\\b",
+    "\\bunder (?:the )?creative commons licence\\b",
+    "\\bunder (?:the )?creative commons license\\b"
+  ],
+  "public_domain_signals": [
+    "\\bpublic domain\\b",
+    "\\bno known copyright restrictions\\b",
+    "\\bfree cultural work\\b"
+  ],
+  "restrictive_signals": [
+    "\\ball rights reserved\\b",
+    "\\bdo not re[-\\s]?upload\\b",
+    "\\bdo not redistribute\\b",
+    "\\bunauthori[sz]ed use\\b",
+    "\\bno part of this\\b.*\\breproduced\\b",
+    "\\bcopyright(?:ed)? material\\b",
+    "\\bused with permission\\b",
+    "\\blicensed to youtube by\\b"
+  ],
+  "ambiguous_signals": [
+    "\\broyalty[-\\s]?free\\b",
+    "\\bcopyright[-\\s]?free\\b",
+    "\\bfair use\\b",
+    "\\bfor educational purposes\\b",
+    "\\bcredit to\\b",
+    "\\bsource:\\b"
+  ]
+}

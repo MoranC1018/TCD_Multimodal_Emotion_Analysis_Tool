@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Multimodal Emotion Analysis Tool</title>
+    <meta name="theme-color" content="#002147">
+    <meta name="launcher-token" content="__LAUNCHER_TOKEN__">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <section id="modeHome" class="mode-home">
+      <div class="mode-home-inner">
+        <button id="openSettingsButton" class="home-settings-button" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"></path><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.36a1.7 1.7 0 0 0-1 .58V20a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.36a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.64 15a1.7 1.7 0 0 0-.58-1H4a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.64a1.7 1.7 0 0 0 1-.58V4a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 .58 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.36 9c.14.35.35.69.58 1H20a2 2 0 1 1 0 4h-.09c-.23.31-.44.65-.51 1Z"></path></svg>
+          Settings
+        </button>
+        <div class="mode-home-head">
+          <div>
+            <h1>Multimodal Emotion Analysis Tool</h1>
+            <p>Choose the stage of the video processing stack.</p>
+            <p class="institutional-affiliation">School of Computer Science, Trinity College Dublin, the University of Dublin</p>
+          </div>
+        </div>
+        <div class="mode-tile-grid" aria-label="Analysis stages">
+          <button id="openProcurementButton" class="mode-tile" type="button">
+            <span class="tile-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
+            </span>
+            <strong>Procurement — source collection and preprocessing</strong>
+          </button>
+          <button id="openProcessingButton" class="mode-tile" type="button">
+            <span class="tile-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path><path d="M8 5v4M14 10v4M11 15v4"></path></svg>
+            </span>
+            <strong>Processing — generate or import modality results</strong>
+          </button>
+          <button id="openAnalysisButton" class="mode-tile" type="button">
+            <span class="tile-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 19V5"></path><path d="M8 17v-6"></path><path d="M13 17V7"></path><path d="M18 17v-3"></path><path d="M3 19h18"></path></svg>
+            </span>
+            <strong>Analysis — postprocessing and reporting</strong>
+          </button>
+        </div>
+        <section class="workflow-planner" aria-labelledby="workflowPlannerTitle">
+          <div class="planner-head">
+            <div>
+              <h2 id="workflowPlannerTitle">Guided workflow</h2>
+              <p>Pick the stages and processing streams you want to run, then move through them in order.</p>
+            </div>
+            <label class="switch-control">
+              <input id="guidedWorkflowToggle" type="checkbox">
+              <span>Workflow mode</span>
+            </label>
+          </div>
+          <div id="homeStatusLabel" class="home-status" role="status">Ready</div>
+          <div id="workflowPlannerBody" class="workflow-planner-body hidden">
+            <div class="workflow-stage-grid">
+              <label class="check-option compact">
+                <input id="workflowProcurementToggle" type="checkbox" checked>
+                <span><strong>Procurement — source collection and preprocessing</strong></span>
+              </label>
+              <label class="check-option compact">
+                <input id="workflowProcessingToggle" type="checkbox" checked>
+                <span><strong>Processing — generate or import modality results</strong></span>
+              </label>
+              <label class="check-option compact">
+                <input id="workflowAnalysisToggle" type="checkbox" checked>
+                <span><strong>Analysis — postprocessing and reporting</strong></span>
+              </label>
+            </div>
+            <div class="workflow-process-grid">
+              <div class="workflow-process-card">
+                <label class="check-option compact">
+                  <input id="workflowFaceToggle" type="checkbox" checked>
+                  <span><strong>Face</strong><small>Import existing face outputs.</small></span>
+                </label>
+                <select id="workflowFaceMethod">
+                  <option value="import">Import folder</option>
+                </select>
+                <div class="path-row">
+                  <input id="workflowFaceImportPath" type="text" placeholder="Face output folder">
+                  <button id="browseWorkflowFaceButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+              <div class="workflow-process-card">
+                <label class="check-option compact">
+                  <input id="workflowAudioToggle" type="checkbox" checked>
+                  <span><strong>Audio</strong><small>Open audio processing or import existing output.</small></span>
+                </label>
+                <select id="workflowAudioMethod">
+                  <option value="run">Run in app</option>
+                  <option value="import">Import folder</option>
+                </select>
+                <div class="path-row">
+                  <input id="workflowAudioImportPath" type="text" placeholder="Audio output folder">
+                  <button id="browseWorkflowAudioButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+              <div class="workflow-process-card">
+                <label class="check-option compact">
+                  <input id="workflowTextToggle" type="checkbox">
+                  <span><strong>Text</strong><small>Import existing transcript outputs.</small></span>
+                </label>
+                <select id="workflowTextMethod">
+                  <option value="import">Import folder</option>
+                </select>
+                <div class="path-row">
+                  <input id="workflowTextImportPath" type="text" placeholder="Text output folder">
+                  <button id="browseWorkflowTextButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+            </div>
+            <button id="startGuidedWorkflowButton" type="button" class="primary-button">Start workflow</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <main id="workflowApp" class="app-window hidden">
+      <aside class="step-rail" aria-label="Workflow steps">
+        <div class="brand">
+          <button id="backToModesButton" class="brand-back" type="button" aria-label="Back to mode selection">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18 9 12l6-6"></path></svg>
+          </button>
+          <div>
+            <h1 id="moduleTitle">Procurement</h1>
+            <p id="statusLabel">Ready</p>
+          </div>
+        </div>
+        <div id="procurementSteps" class="step-list">
+          <button class="step active" type="button" data-screen-target="input">
+            <span>1</span>
+            Input
+          </button>
+          <button class="step" type="button" data-screen-target="review">
+            <span>2</span>
+            Review
+          </button>
+          <button class="step" type="button" data-screen-target="run" disabled>
+            <span>3</span>
+            Run
+          </button>
+        </div>
+      </aside>
+
+      <section class="screen-stack">
+        <section id="processingHubScreen" class="screen" data-screen="processing-hub">
+          <div class="screen-head">
+            <div>
+              <h2>Processing</h2>
+              <p>Choose which processing stream to run.</p>
+            </div>
+          </div>
+          <div class="subtile-grid">
+            <button id="openFaceProcessingButton" class="mode-tile unavailable" type="button" disabled aria-disabled="true">
+              <span class="tile-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M9 10h.01M15 10h.01"></path><path d="M8 15s1.5 2 4 2 4-2 4-2"></path><path d="M4 12a8 8 0 1 0 16 0 8 8 0 0 0-16 0"></path></svg>
+              </span>
+              <strong>Face</strong>
+              <small>Import face outputs below. In-app processing is not included in this release.</small>
+              <span class="availability-label">Import only</span>
+            </button>
+            <button id="openAudioProcessingButton" class="mode-tile" type="button">
+              <span class="tile-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3v18"></path><path d="M8 8v8"></path><path d="M4 11v2"></path><path d="M16 6v12"></path><path d="M20 10v4"></path></svg>
+              </span>
+              <strong>Audio</strong>
+              <small>Run OpenSMILE and optional emotion models.</small>
+            </button>
+            <button id="openTextProcessingButton" class="mode-tile unavailable" type="button" disabled aria-disabled="true">
+              <span class="tile-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M5 4h14"></path><path d="M7 8h10"></path><path d="M8 12h8"></path><path d="M10 16h4"></path></svg>
+              </span>
+              <strong>Text</strong>
+              <small>Import transcript outputs below. In-app processing is not included in this release.</small>
+              <span class="availability-label">Import only</span>
+            </button>
+          </div>
+          <section class="processing-import-panel" aria-labelledby="processingImportsTitle">
+            <div>
+              <h3 id="processingImportsTitle">Processing inputs</h3>
+              <p>Each stream can either run in this app or use already processed files from a folder.</p>
+            </div>
+            <div class="process-import-grid">
+              <div class="process-import-card">
+                <label class="check-option compact">
+                  <input id="faceImportToggle" type="checkbox">
+                  <span><strong>Import face outputs</strong><small>Use existing action units, head movement, and face feature files.</small></span>
+                </label>
+                <div class="path-row">
+                  <input id="faceImportPathInput" type="text" placeholder="Processed face folder">
+                  <button id="browseFaceImportButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+              <div class="process-import-card">
+                <label class="check-option compact">
+                  <input id="audioImportHubToggle" type="checkbox">
+                  <span><strong>Import audio outputs</strong><small>Skip OpenSMILE here and provide an existing audio output folder.</small></span>
+                </label>
+                <div class="path-row">
+                  <input id="audioImportHubPathInput" type="text" placeholder="Processed audio folder">
+                  <button id="browseAudioImportHubButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+              <div class="process-import-card">
+                <label class="check-option compact">
+                  <input id="textImportToggle" type="checkbox">
+                  <span><strong>Import text outputs</strong><small>Use transcripts or existing text processing results.</small></span>
+                </label>
+                <div class="path-row">
+                  <input id="textImportPathInput" type="text" placeholder="Processed text folder">
+                  <button id="browseTextImportButton" type="button" class="secondary-button">Browse</button>
+                </div>
+              </div>
+            </div>
+            <div class="processing-actions">
+              <button id="continueToAnalysisButton" type="button" class="primary-button">Continue to analysis</button>
+            </div>
+          </section>
+        </section>
+
+        <section id="audioInputScreen" class="screen" data-screen="audio-input">
+          <div class="screen-head">
+            <div>
+              <h2>Audio Processing</h2>
+              <p>Run OpenSMILE over one MP4 file or a folder tree containing MP4 videos.</p>
+            </div>
+            <div class="head-actions">
+              <button id="backToProcessingButton" type="button" class="secondary-button">Back to processing</button>
+            </div>
+          </div>
+
+          <div class="audio-layout">
+            <section class="input-panel">
+              <h3>Input</h3>
+              <div id="audioModeToggle" class="mode-toggle">
+                <label class="mode-option active" data-audio-mode-option="batch">
+                  <input type="radio" name="audioMode" value="batch" checked>
+                  <span>
+                    <strong>Batch folder</strong>
+                    <small>Folder containing processed videos or a downloads tree.</small>
+                  </span>
+                </label>
+                <label class="mode-option" data-audio-mode-option="single">
+                  <input type="radio" name="audioMode" value="single">
+                  <span>
+                    <strong>Single video</strong>
+                    <small>One .mp4 file, such as stitched_imotions.mp4.</small>
+                  </span>
+                </label>
+              </div>
+              <button id="browseAudioFolderButton" type="button" class="primary-wide">Select input folder</button>
+              <button id="browseAudioVideoButton" type="button" class="secondary-wide">Select single video</button>
+              <label id="audioSourcePathLabel" for="audioSourcePathInput">Audio source path</label>
+              <input id="audioSourcePathInput" type="text" placeholder="Paste downloads folder or MP4 path">
+              <label class="check-option compact">
+                <input id="audioImportToggle" type="checkbox">
+                <span>
+                  <strong>Import existing audio outputs</strong>
+                  <small>Use a processed audio folder instead of running OpenSMILE in-app.</small>
+                </span>
+              </label>
+            </section>
+
+            <section class="input-panel">
+              <h3>Output</h3>
+              <label for="audioOutputRootInput">Audio output directory</label>
+              <input id="audioOutputRootInput" type="text">
+              <button id="browseAudioOutputButton" type="button" class="secondary-wide">Change output folder</button>
+              <button id="runAudioButton" type="button" class="primary-wide">Run audio processing</button>
+            </section>
+
+            <section class="input-panel audio-options-panel">
+              <h3>Options</h3>
+              <label class="check-option">
+                <input id="audioEmotionsToggle" type="checkbox" checked>
+                <span>
+                  <strong>Emotion models</strong>
+                  <small>When off, OpenSMILE runs and emotion columns are left blank.</small>
+                </span>
+              </label>
+              <details class="advanced-options">
+                <summary>Advanced audio options</summary>
+                <div class="advanced-grid">
+                  <div class="settings-pair">
+                    <label for="audioWindowSecondsInput">Window seconds</label>
+                    <input id="audioWindowSecondsInput" type="number" min="0.5" max="120" step="0.5" value="10">
+                  </div>
+                  <div class="settings-pair">
+                    <label for="audioStrideSecondsInput">Stride seconds</label>
+                    <input id="audioStrideSecondsInput" type="number" min="0.5" max="120" step="0.5" value="5">
+                  </div>
+                  <label for="audioFeatureSetSelect">OpenSMILE feature set</label>
+                  <select id="audioFeatureSetSelect">
+                    <option value="egemaps">eGeMAPS</option>
+                    <option value="compare16">ComParE 2016</option>
+                    <option value="compare">ComParE alias</option>
+                  </select>
+                  <label for="audioDeviceSelect">Emotion model device</label>
+                  <select id="audioDeviceSelect">
+                    <option value="auto">Auto</option>
+                    <option value="cpu">CPU</option>
+                    <option value="cuda">CUDA</option>
+                  </select>
+                  <label class="check-option">
+                    <input id="audioKeepTempToggle" type="checkbox">
+                    <span>
+                      <strong>Keep temporary audio</strong>
+                      <small>Preserve extracted WAV windows for debugging.</small>
+                    </span>
+                  </label>
+                  <label class="check-option">
+                    <input id="audioDebugToggle" type="checkbox">
+                    <span>
+                      <strong>Debug fallback model</strong>
+                      <small>Also write separate fallback comparison output.</small>
+                    </span>
+                  </label>
+                  <label class="check-option">
+                    <input id="audioStopOnErrorToggle" type="checkbox">
+                    <span>
+                      <strong>Stop on first batch error</strong>
+                      <small>Only applies to batch folder runs.</small>
+                    </span>
+                  </label>
+                </div>
+              </details>
+            </section>
+          </div>
+        </section>
+
+        <section id="audioRunScreen" class="screen" data-screen="audio-run">
+          <div class="run-center">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2 id="audioRunTitle">Running audio processing</h2>
+            <p id="audioRunSubtitle">This can take a few minutes for larger batches.</p>
+            <div class="progress-track">
+              <div id="audioProgressBar" class="progress-bar"></div>
+            </div>
+            <div id="audioProgressLabel" class="progress-label">Starting...</div>
+            <div class="run-actions">
+              <button id="stopAudioButton" type="button" class="ghost-button">Stop</button>
+              <button id="backToAudioInputButton" type="button" class="secondary-button">Back to audio options</button>
+            </div>
+            <div id="audioNextStep" class="next-step-panel hidden">
+              <strong id="audioNextTitle">Continue to Analysis</strong>
+              <span id="audioNextCopy">Audio outputs are ready. Move into Analysis when all processing streams are complete.</span>
+              <button id="audioToAnalysisButton" type="button" class="primary-button">Open analysis</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="analysisInputScreen" class="screen" data-screen="analysis-input">
+          <div class="screen-head">
+            <div>
+              <h2>Analysis</h2>
+              <p>Combine available video and audio reports, then compare linked speakers as groups.</p>
+            </div>
+          </div>
+          <div class="analysis-workflow-layout">
+            <section class="analysis-source-section" aria-labelledby="analysisSourcesTitle">
+              <div class="analysis-section-head">
+                <div>
+                  <h3 id="analysisSourcesTitle">Modalities</h3>
+                  <p>Enable each source needed in this analysis run.</p>
+                </div>
+              </div>
+              <div class="analysis-modality-grid">
+                <article class="analysis-modality-card" data-analysis-modality="imotions">
+                  <div class="analysis-modality-head">
+                    <label class="check-option compact">
+                      <input id="analysisImotionsEnabled" type="checkbox" checked>
+                      <span>
+                        <strong>Video / iMotions</strong>
+                        <small>Emotions, action units, landmarks, and movement.</small>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="analysis-source-method" role="radiogroup" aria-label="Video and iMotions source method">
+                    <label>
+                      <input id="analysisImotionsRunMethod" type="radio" name="analysisImotionsSourceMethod" value="run" checked>
+                      <span>Run analysis</span>
+                    </label>
+                    <label>
+                      <input id="analysisImotionsImportMethod" type="radio" name="analysisImotionsSourceMethod" value="import">
+                      <span>Use existing results</span>
+                    </label>
+                  </div>
+                  <label for="analysisImotionsSourcePath">Video / iMotions source folder</label>
+                  <div class="path-row">
+                    <input id="analysisImotionsSourcePath" type="text" placeholder="iMotions exports or existing video reports">
+                    <button id="browseAnalysisImotionsSource" type="button" class="secondary-button">Browse</button>
+                  </div>
+                  <small class="analysis-source-help" data-analysis-help="imotions">Choose the folder containing iMotions CSV exports.</small>
+                </article>
+
+                <article class="analysis-modality-card" data-analysis-modality="audio">
+                  <div class="analysis-modality-head">
+                    <label class="check-option compact">
+                      <input id="analysisAudioEnabled" type="checkbox">
+                      <span>
+                        <strong>Audio</strong>
+                        <small>OpenSMILE and audio emotion processing results.</small>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="analysis-source-method" role="radiogroup" aria-label="Audio source method">
+                    <label>
+                      <input id="analysisAudioRunMethod" type="radio" name="analysisAudioSourceMethod" value="run" checked>
+                      <span>Run analysis</span>
+                    </label>
+                    <label>
+                      <input id="analysisAudioImportMethod" type="radio" name="analysisAudioSourceMethod" value="import">
+                      <span>Use existing results</span>
+                    </label>
+                  </div>
+                  <label for="analysisAudioSourcePath">Audio source folder</label>
+                  <div class="path-row">
+                    <input id="analysisAudioSourcePath" type="text" placeholder="Processed audio or existing audio reports">
+                    <button id="browseAnalysisAudioSource" type="button" class="secondary-button">Browse</button>
+                  </div>
+                  <small class="analysis-source-help" data-analysis-help="audio">Choose the folder containing processed audio_analysis.csv files.</small>
+                </article>
+
+                <article class="analysis-modality-card" data-analysis-modality="text">
+                  <div class="analysis-modality-head">
+                    <label class="check-option compact">
+                      <input id="analysisTextEnabled" type="checkbox">
+                      <span>
+                        <strong>Text</strong>
+                        <small>Import completed transcript construct results.</small>
+                      </span>
+                    </label>
+                  </div>
+                  <div class="analysis-source-method" role="radiogroup" aria-label="Text source method">
+                    <label>
+                      <input id="analysisTextImportMethod" type="radio" name="analysisTextSourceMethod" value="import" checked>
+                      <span>Use existing results</span>
+                    </label>
+                  </div>
+                  <label for="analysisTextSourcePath">Text source folder</label>
+                  <div class="path-row">
+                    <input id="analysisTextSourcePath" type="text" placeholder="Folder containing text_output/multimodal">
+                    <button id="browseAnalysisTextSource" type="button" class="secondary-button">Browse</button>
+                  </div>
+                  <small class="analysis-source-help" data-analysis-help="text">Choose completed text results containing multimodal/speaker_level_summary.csv.</small>
+                </article>
+              </div>
+            </section>
+
+            <section id="analysisSpeakerPanel" class="analysis-speaker-panel" aria-labelledby="analysisGroupsTitle">
+              <div class="analysis-section-head">
+                <div>
+                  <h3 id="analysisGroupsTitle">Speaker groups</h3>
+                  <p>Each speaker can belong to one group. Groups keep related speakers together; Overall combines all selected speakers.</p>
+                </div>
+                <div class="analysis-section-actions">
+                  <button id="discoverAnalysisSpeakersButton" type="button" class="secondary-button">Discover speakers</button>
+                  <button id="addAnalysisSpeakerGroupButton" type="button" class="ghost-button" disabled>Add group</button>
+                </div>
+              </div>
+              <p id="analysisSpeakerDiscoveryStatus" class="analysis-discovery-status" role="status" aria-live="polite">Choose source folders, then discover speakers.</p>
+              <div id="analysisGroupWarningStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+              <div id="analysisSpeakerGroups" class="analysis-speaker-groups"></div>
+            </section>
+
+            <div class="analysis-common-grid">
+              <section class="input-panel analysis-options-panel">
+                <h3>Report options</h3>
+                <label class="check-option">
+                  <input id="analysisWriteCombinedToggle" type="checkbox" checked>
+                  <span>
+                    <strong>Combined workbook</strong>
+                    <small>Build one workbook from the selected modalities and speaker groups.</small>
+                  </span>
+                </label>
+                <div class="settings-pair">
+                  <span class="field-label">Workbook name</span>
+                  <output id="analysisWorkbookName" class="fixed-value">combined_analysis.xlsx</output>
+                </div>
+                <label class="check-option">
+                  <input id="analysisConstructComparisonToggle" type="checkbox" checked>
+                  <span>
+                    <strong>Construct comparison</strong>
+                    <small>Add the side-by-side Video, Audio, and Text comparison sheet.</small>
+                  </span>
+                </label>
+                <label class="check-option">
+                  <input id="analysisProbabilitySheetsToggle" type="checkbox" checked>
+                  <span>
+                    <strong>Probability sheets</strong>
+                    <small>Add inference mirrors, settings, and the probability outline.</small>
+                  </span>
+                </label>
+                <details id="analysisStatisticalAdvanced" class="advanced-options analysis-reference-overrides">
+                  <summary>Statistical options</summary>
+                  <div class="advanced-grid">
+                    <label for="analysisHeadlinePolicySelect">Speaker mean method</label>
+                    <select id="analysisHeadlinePolicySelect">
+                      <option value="weighted" selected>Weight by valid observations</option>
+                      <option value="equal">Equal weight per video</option>
+                    </select>
+                    <label for="analysisConfidenceLevelInput">Confidence level (%)</label>
+                    <input id="analysisConfidenceLevelInput" type="number" min="50" max="99.9" step="0.1" value="95">
+                    <label for="analysisDefaultReferenceInput">Default reference value</label>
+                    <input id="analysisDefaultReferenceInput" type="number" step="any" value="0">
+                    <label for="analysisReferenceOverridesInput">Per-sheet or per-metric values (JSON)</label>
+                    <textarea id="analysisReferenceOverridesInput" rows="4" spellcheck="false" placeholder='{"Audio|Arousal": 0}'>{}</textarea>
+                  </div>
+                </details>
+                <label id="analysisGraphsOption" class="check-option">
+                  <input id="analysisGraphsToggle" type="checkbox" checked>
+                  <span>
+                    <strong>Generate graphs</strong>
+                    <small>Create SVG histogram graphs alongside CSV and XLSX outputs.</small>
+                  </span>
+                </label>
+                <label id="analysisLogscaleOption" class="check-option">
+                  <input id="analysisLogscaleToggle" type="checkbox">
+                  <span>
+                    <strong>Log-scale outputs</strong>
+                    <small>Also create log-scale histogram report files.</small>
+                  </span>
+                </label>
+                <details id="analysisFaceAdvanced" class="advanced-options">
+                  <summary>Video / iMotions advanced options</summary>
+                  <div class="advanced-grid">
+                    <label class="check-option">
+                      <input id="analysisLandmarksToggle" type="checkbox">
+                      <span><strong>Include landmarks</strong><small>Add raw landmark columns to histogram outputs.</small></span>
+                    </label>
+                    <label class="check-option">
+                      <input id="analysisTimingToggle" type="checkbox">
+                      <span><strong>Include timing columns</strong><small>Add frame timing and counter columns to histograms.</small></span>
+                    </label>
+                    <label class="check-option">
+                      <input id="analysisExcludeGeometryToggle" type="checkbox">
+                      <span><strong>Exclude geometry</strong><small>Skip raw geometry columns in histogram output.</small></span>
+                    </label>
+                  </div>
+                </details>
+              </section>
+
+              <section class="input-panel analysis-output-panel">
+                <h3>Output</h3>
+                <label for="analysisOutputRootInput">Report output directory</label>
+                <input id="analysisOutputRootInput" type="text" placeholder="Combined analysis output folder">
+                <button id="browseAnalysisOutputButton" type="button" class="secondary-wide">Change output folder</button>
+                <div id="analysisRunGateMessages" class="analysis-run-gate" role="status" aria-live="polite"></div>
+                <button id="runAnalysisButton" type="button" class="primary-wide" disabled>Complete sources and groups to run</button>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section id="analysisRunScreen" class="screen" data-screen="analysis-run">
+          <div class="run-center">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2 id="analysisRunTitle">Running analysis</h2>
+            <p id="analysisRunSubtitle">Reports are being generated from the selected processed outputs.</p>
+            <div class="progress-track">
+              <div id="analysisProgressBar" class="progress-bar"></div>
+            </div>
+            <div id="analysisProgressLabel" class="progress-label">Starting...</div>
+            <div class="run-actions">
+              <button id="stopAnalysisButton" type="button" class="ghost-button">Stop</button>
+              <button id="backToAnalysisInputButton" type="button" class="secondary-button">Back to analysis options</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="inputScreen" class="screen active" data-screen="input">
+          <div class="screen-head">
+            <div>
+              <h2>Choose Input</h2>
+              <p>Enter one supported local source or a direct YouTube URL.</p>
+            </div>
+          </div>
+
+          <div class="input-grid">
+            <section class="input-panel">
+              <h3>Video Source</h3>
+              <label for="sourcePathInput">Source</label>
+              <div class="source-search-row">
+                <input
+                  id="sourcePathInput"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Paste a YouTube URL or local path"
+                >
+                <button id="scanButton" type="button" class="primary-button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                  Search
+                </button>
+              </div>
+              <div class="input-format-list" aria-label="Supported procurement inputs">
+                <div>
+                  <strong>YouTube URL</strong>
+                  <span>youtube.com, youtu.be, Shorts, live, and embed links.</span>
+                </div>
+                <div>
+                  <strong>Folder tree</strong>
+                  <span>Scans subfolders recursively and preserves speaker folders.</span>
+                </div>
+                <div>
+                  <strong>DOCX list</strong>
+                  <span>.docx file with YouTube links stored in table rows.</span>
+                </div>
+                <div>
+                  <strong>Local video</strong>
+                  <span>.mp4, .mov, .mkv, .webm, or .avi</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="input-panel">
+              <h3>Output</h3>
+              <label for="outputRootInput">Output directory</label>
+              <input id="outputRootInput" type="text">
+              <button id="browseOutputButton" type="button" class="secondary-wide">Change output folder</button>
+            </section>
+          </div>
+        </section>
+
+        <section id="reviewScreen" class="screen" data-screen="review">
+          <div class="screen-head">
+            <div>
+              <h2>Video Overview</h2>
+              <p id="scanSummary">No source scanned yet</p>
+            </div>
+            <div class="head-actions">
+              <button id="rescanButton" type="button" class="ghost-button">Search again</button>
+              <button id="toRunButton" type="button" class="primary-button">Continue</button>
+            </div>
+          </div>
+
+          <div class="review-layout">
+            <aside class="scan-tabs" aria-label="Scan results">
+              <div class="scan-tabs-head">
+                <h3>Scan results</h3>
+                <button id="toggleAllSpeakersButton" type="button" class="scan-tabs-action">Clear</button>
+              </div>
+              <p id="speakerSelectionSummary" class="speaker-selection-summary">No speakers selected</p>
+              <div id="scanTabList" class="scan-tab-list"></div>
+            </aside>
+
+            <section class="overview-main">
+              <div class="overview-toolbar">
+                <div id="speakerTitle" class="speaker-title-large">Select a source to scan</div>
+                <label>
+                  Sort
+                  <select id="sortSelect">
+                    <option value="speaker">Speaker order</option>
+                    <option value="date-desc">Upload date newest</option>
+                    <option value="date-asc">Upload date oldest</option>
+                    <option value="length-desc">Length longest</option>
+                    <option value="length-asc">Length shortest</option>
+                  </select>
+                </label>
+              </div>
+              <div id="videoGroups" class="video-groups"></div>
+            </section>
+
+            <aside class="mode-panel">
+              <h3>Mode</h3>
+              <label class="mode-option" data-mode-option="standard">
+                <input type="radio" name="mode" value="standard">
+                <span>
+                  <strong>Standard sampling</strong>
+                  <small>Random, non-overlapping sample from each video.</small>
+                </span>
+              </label>
+              <div id="standardSettings" class="mode-settings hidden">
+                <div class="settings-pair">
+                  <label for="samplePercentInput">Sample percentage</label>
+                  <input id="samplePercentInput" type="number" min="1" max="100" step="1" value="10">
+                </div>
+                <div class="settings-pair">
+                  <label for="maxSegmentInput">Max segment length</label>
+                  <input id="maxSegmentInput" type="number" min="1" max="3600" step="1" value="30">
+                </div>
+              </div>
+              <label class="mode-option" data-mode-option="full">
+                <input type="radio" name="mode" value="full">
+                <span>
+                  <strong>Full video</strong>
+                  <small>Process complete videos.</small>
+                </span>
+              </label>
+              <label class="mode-option" data-mode-option="manual">
+                <input type="radio" name="mode" value="manual">
+                <span>
+                  <strong>Focus</strong>
+                  <small>Choose exact segments in an embedded video preview.</small>
+                </span>
+              </label>
+              <div id="focusSettings" class="mode-settings hidden">
+                <div class="settings-pair">
+                  <label for="focusGapInput">Black/silent gap</label>
+                  <input id="focusGapInput" type="number" min="0" max="60" step="0.5" value="0">
+                </div>
+                <p class="hint">A value of 0 joins selected segments directly.</p>
+              </div>
+              <label class="mode-option" data-mode-option="clean-speaker-beta">
+                <input type="radio" name="mode" value="clean-speaker-beta">
+                <span>
+                  <strong>Clean speaker segments</strong>
+                  <small>Find segments where the main person is visible and speaking.</small>
+                </span>
+              </label>
+              <div id="cleanSpeakerSettings" class="mode-settings hidden">
+                <fieldset class="clean-output-picker">
+                  <legend>Output</legend>
+                  <div class="clean-output-options">
+                    <label class="clean-output-option">
+                      <input type="radio" name="betaOutputMode" value="clean" checked>
+                      <span>
+                        <strong>Clean compilation</strong>
+                        <small>Keep every clean overlap.</small>
+                      </span>
+                    </label>
+                    <label class="clean-output-option">
+                      <input type="radio" name="betaOutputMode" value="percentage">
+                      <span>
+                        <strong>Percentage sample</strong>
+                        <small>Fill a target share from the best clips.</small>
+                      </span>
+                    </label>
+                  </div>
+                </fieldset>
+                <div class="clean-speaker-primary-grid">
+                  <div class="settings-pair">
+                    <label for="betaMinCleanInput">Minimum clean overlap</label>
+                    <input id="betaMinCleanInput" type="number" min="1" max="3600" step="1" value="10">
+                  </div>
+                  <div class="settings-pair">
+                    <label for="betaGapInput">Black/silent gap</label>
+                    <input id="betaGapInput" type="number" min="0" max="60" step="0.5" value="0.5">
+                  </div>
+                  <div id="betaPercentageSettings" class="settings-pair hidden">
+                    <label for="betaPercentInput">Target percentage</label>
+                    <input id="betaPercentInput" type="number" min="1" max="100" step="1" value="10">
+                  </div>
+                  <div id="betaMaxSegmentSettings" class="settings-pair hidden">
+                    <label for="betaMaxSegmentInput">Max clip length</label>
+                    <input id="betaMaxSegmentInput" type="number" min="1" max="3600" step="1" value="30">
+                  </div>
+                </div>
+                <details class="advanced-options beta-run-selection">
+                  <summary>Run selection</summary>
+                  <div class="advanced-grid">
+                    <label for="betaOnlyVideoIdsInput">Only YouTube video IDs</label>
+                    <input id="betaOnlyVideoIdsInput" type="text" placeholder="Optional: mZBHkYWKE5M, hb37d4fZKm0">
+                    <label class="check-option">
+                      <input id="betaRandomOneToggle" type="checkbox">
+                      <span>
+                        <strong>Run one random scanned video</strong>
+                        <small>Useful for a quick validation pass before the full source.</small>
+                      </span>
+                    </label>
+                    <label for="betaRandomSeedInput">Random seed</label>
+                    <input id="betaRandomSeedInput" type="text" placeholder="Optional repeatable random pick">
+                  </div>
+                </details>
+                <details class="advanced-options beta-stability">
+                  <summary>Stability and resume</summary>
+                  <div class="advanced-grid stability-grid">
+                    <label class="check-option compact">
+                      <input id="betaIsolatedModeToggle" type="checkbox" checked>
+                      <span>
+                        <strong>Run one video per process</strong>
+                        <small>Safer for long batches because memory is released after each video.</small>
+                      </span>
+                    </label>
+                    <label class="check-option compact">
+                      <input id="betaSkipCompletedToggle" type="checkbox" checked>
+                      <span>
+                        <strong>Skip completed outputs</strong>
+                        <small>Resume after a crash without redoing videos that already have manifests.</small>
+                      </span>
+                    </label>
+                    <div class="settings-pair">
+                      <label for="betaSkipFirstInput">Skip first videos</label>
+                      <input id="betaSkipFirstInput" type="number" min="0" max="10000" step="1" value="0">
+                    </div>
+                    <div class="settings-pair">
+                      <label for="betaCooldownInput">Cooldown between videos (s)</label>
+                      <input id="betaCooldownInput" type="number" min="0" max="3600" step="5" value="60">
+                    </div>
+                  </div>
+                </details>
+                <details class="advanced-options beta-advanced">
+                  <summary>Advanced clean speaker options</summary>
+                  <div class="advanced-grid">
+                    <label for="betaReferenceAudioInput">Reference voice audio</label>
+                    <input id="betaReferenceAudioInput" type="text" placeholder="Optional WAV/MP3 speaker profile">
+                    <label for="betaIdentityStillsInput">Identity stills</label>
+                    <input id="betaIdentityStillsInput" type="number" min="0" max="100" step="1" value="20">
+                    <label for="betaScanFpsInput">Scan FPS</label>
+                    <input id="betaScanFpsInput" type="number" min="0.1" max="10" step="0.1" value="1">
+                    <label for="betaValidationFpsInput">Candidate validation FPS</label>
+                    <input id="betaValidationFpsInput" type="number" min="0.1" max="10" step="0.1" value="4">
+                    <label for="betaMaxDownloadHeightInput">Max YouTube download height</label>
+                    <input id="betaMaxDownloadHeightInput" type="number" min="0" max="2160" step="120" value="720">
+                    <label for="betaFaceConfidenceInput">Face confidence</label>
+                    <input id="betaFaceConfidenceInput" type="number" min="0" max="1" step="0.01" value="0.65">
+                    <label for="betaSpeakerConfidenceInput">Speaker confidence</label>
+                    <input id="betaSpeakerConfidenceInput" type="number" min="0" max="1" step="0.01" value="0.65">
+                    <label for="betaWorkerCountInput">Concurrent videos</label>
+                    <input id="betaWorkerCountInput" type="number" min="1" step="1" value="1">
+                    <label for="betaDeviceSelect">Model device</label>
+                    <select id="betaDeviceSelect">
+                      <option value="auto">Auto</option>
+                      <option value="cpu">CPU</option>
+                      <option value="cuda">CUDA</option>
+                    </select>
+                    <label class="check-option">
+                      <input id="betaParallelDetectorToggle" type="checkbox">
+                      <span>
+                        <strong>Parallel face/audio analysis</strong>
+                        <small>Faster on strong workstations, heavier on RAM, CPU, and GPU.</small>
+                      </span>
+                    </label>
+                    <label class="check-option">
+                      <input id="betaKeepDebugToggle" type="checkbox">
+                      <span>
+                        <strong>Keep debug artifacts</strong>
+                        <small>Save intermediate detector files for review.</small>
+                      </span>
+                    </label>
+                  </div>
+                </details>
+                <div class="readiness-panel">
+                  <button id="checkBetaReadinessButton" type="button" class="secondary-wide">Check model readiness</button>
+                  <div id="betaReadinessList" class="readiness-list" aria-live="polite"></div>
+                </div>
+              </div>
+              <button id="runButton" type="button" class="primary-wide" disabled>Select a mode to continue</button>
+            </aside>
+          </div>
+        </section>
+
+        <section id="runScreen" class="screen" data-screen="run">
+          <div id="runProgressView" class="run-center">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2 id="runTitle">Ready to run</h2>
+            <p id="runSubtitle">Choose a mode from the review screen.</p>
+            <div class="progress-track">
+              <div id="progressBar" class="progress-bar"></div>
+            </div>
+            <div id="progressLabel" class="progress-label">0%</div>
+            <div class="run-actions">
+              <button id="stopButton" type="button" class="ghost-button">Stop</button>
+              <button id="backToReviewButton" type="button" class="secondary-button">Back to review</button>
+            </div>
+            <div id="procurementNextStep" class="next-step-panel hidden">
+              <strong id="procurementNextTitle">Step 4: Continue to Processing</strong>
+              <span id="procurementNextCopy">Procurement is complete. Move into Processing to run face, audio, or text analysis on the set.</span>
+              <button id="goToProcessingButton" type="button" class="primary-button">Open processing</button>
+            </div>
+          </div>
+          <div id="manualRunView" class="run-shell hidden">
+            <div class="screen-head">
+              <div>
+                <h2>Focus Selection</h2>
+                <p id="manualSummary">Select a video title to focus on specific segments.</p>
+              </div>
+              <div class="head-actions">
+                <button id="manualBackButton" type="button" class="secondary-button">Back to review</button>
+                <button id="manualRunButton" type="button" class="primary-button" disabled>Create focused videos</button>
+              </div>
+            </div>
+            <div id="manualVideoList" class="manual-video-list"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="sourcePickerDialog" class="modal-dialog source-picker-dialog" aria-labelledby="sourcePickerDialogTitle">
+      <div class="dialog-head">
+        <h2 id="sourcePickerDialogTitle">Choose source</h2>
+        <button id="closeSourcePickerButton" type="button" class="icon-button" aria-label="Close">&times;</button>
+      </div>
+      <div class="source-picker-actions">
+        <button id="chooseSourceFolderButton" type="button" class="primary-wide">Folder</button>
+        <button id="chooseSourceFileButton" type="button" class="secondary-wide">DOCX or video</button>
+      </div>
+    </dialog>
+
+    <dialog id="segmentDialog" class="segment-dialog" aria-labelledby="segmentDialogTitle">
+      <div class="dialog-head">
+        <div>
+          <h2 id="segmentDialogTitle">Focus segments</h2>
+          <p id="segmentDialogMeta">Preview the video, then add the time ranges to keep.</p>
+        </div>
+        <button id="closeSegmentDialogButton" type="button" class="icon-button" aria-label="Close">&times;</button>
+      </div>
+      <div class="player-frame">
+        <div id="youtubePlayer" class="youtube-player hidden">
+          <div id="youtubePlayerHost"></div>
+        </div>
+        <video id="manualPlayer" class="hidden" controls preload="metadata"></video>
+      </div>
+      <div
+        class="timeline"
+        id="timeline"
+        role="slider"
+        tabindex="0"
+        aria-label="Video playback position"
+        aria-valuemin="0"
+        aria-valuemax="0"
+        aria-valuenow="0"
+        aria-valuetext="0:00 of 0:00"
+      >
+        <div class="timeline-grid"></div>
+        <div id="segmentsLayer" class="segments-layer"></div>
+        <div id="previewLayer" class="preview-layer"></div>
+        <div id="timelinePlayhead" class="timeline-playhead" aria-hidden="true"></div>
+      </div>
+      <div class="timeline-footer">
+        <div id="tickLayer" class="tick-layer"></div>
+        <output id="playbackTimeLabel" class="playback-time-label">0:00 / 0:00</output>
+      </div>
+      <div class="segment-controls">
+        <label>
+          Start (MM:SS)
+          <input id="segmentStartInput" type="text" inputmode="decimal" value="0:00" placeholder="0:00">
+        </label>
+        <button id="useStartButton" type="button" class="secondary-button">Use current</button>
+        <label>
+          End (MM:SS)
+          <input id="segmentEndInput" type="text" inputmode="decimal" value="0:30" placeholder="0:30">
+        </label>
+        <button id="useEndButton" type="button" class="secondary-button">Use current</button>
+        <button id="addSegmentButton" type="button" class="primary-button">Add segment</button>
+        <button id="deleteSegmentButton" type="button" class="danger-button" disabled>Delete selected</button>
+      </div>
+      <div class="manual-stats" aria-live="polite">
+        <span id="manualTotal">Selected clip: none</span>
+        <span id="manualShare">Clip share: 0.0%</span>
+        <span id="manualCount">Segments: 0</span>
+      </div>
+      <div id="segmentList" class="segment-list"></div>
+    </dialog>
+
+    <dialog id="settingsDialog" class="modal-dialog settings-dialog" aria-labelledby="settingsDialogTitle">
+      <div class="dialog-head">
+        <div>
+          <h2 id="settingsDialogTitle">Settings</h2>
+          <p>Local settings for this launcher.</p>
+        </div>
+        <button id="closeSettingsButton" type="button" class="icon-button" aria-label="Close">&times;</button>
+      </div>
+      <div class="dialog-body settings-body">
+        <section class="settings-section">
+          <h3>API keys</h3>
+          <label for="youtubeApiKeyInput">YouTube Data API key</label>
+          <div id="youtubeApiKeyStatus" class="credential-status">Not configured</div>
+          <input id="youtubeApiKeyInput" type="password" autocomplete="off" placeholder="Paste a new API key">
+          <label class="clear-secret-option">
+            <input id="clearYoutubeApiKeyToggle" type="checkbox">
+            Remove the stored YouTube API key
+          </label>
+          <a class="help-link" href="https://developers.google.com/youtube/v3/getting-started" target="_blank" rel="noreferrer">How to get a YouTube API key</a>
+          <label for="huggingFaceTokenInput">Hugging Face token</label>
+          <div id="huggingFaceTokenStatus" class="credential-status">Not configured</div>
+          <input id="huggingFaceTokenInput" type="password" autocomplete="off" placeholder="Paste a new token">
+          <label class="clear-secret-option">
+            <input id="clearHuggingFaceTokenToggle" type="checkbox">
+            Remove the stored Hugging Face token
+          </label>
+          <a class="help-link" href="https://huggingface.co/docs/hub/security-tokens" target="_blank" rel="noreferrer">How to create a Hugging Face access token</a>
+          <label for="youtubeCookiesBrowserSelect">YouTube download fallback</label>
+          <select id="youtubeCookiesBrowserSelect">
+            <option value="">Do not use browser cookies</option>
+            <option value="edge">Use Microsoft Edge cookies</option>
+            <option value="chrome">Use Chrome cookies</option>
+            <option value="firefox">Use Firefox cookies</option>
+          </select>
+          <p>Use this only if YouTube asks yt-dlp to sign in or confirm it is not a bot.</p>
+        </section>
+        <section class="settings-section">
+          <h3>System resources (all modes)</h3>
+          <label class="clear-secret-option">
+            <input id="resourceLimitsEnabledToggle" type="checkbox" checked>
+            Enforce limits for all tool processes
+          </label>
+          <div class="resource-settings-grid">
+            <label>
+              Maximum CPU load
+              <span class="input-with-unit"><input id="maxCpuPercentInput" type="number" min="10" max="100" step="1" value="90"><span>%</span></span>
+            </label>
+            <label>
+              Maximum CPU cores
+              <span class="input-with-unit"><input id="maxCpuCoresInput" type="number" min="0" max="256" step="1" value="0"><span>0 = auto</span></span>
+            </label>
+            <label>
+              Maximum GPU load
+              <span class="input-with-unit"><input id="maxGpuPercentInput" type="number" min="10" max="100" step="1" value="95"><span>%</span></span>
+            </label>
+            <label>
+              RAM limit type
+              <select id="ramLimitModeSelect">
+                <option value="percent">System RAM percentage</option>
+                <option value="gb">Tool process RAM in GB</option>
+              </select>
+            </label>
+            <label id="maxRamPercentField">
+              Maximum system RAM
+              <span class="input-with-unit"><input id="maxRamPercentInput" type="number" min="10" max="95" step="1" value="90"><span>%</span></span>
+            </label>
+            <label id="maxRamGbField" class="hidden">
+              Maximum tool process RAM
+              <span class="input-with-unit"><input id="maxRamGbInput" type="number" min="1" max="1024" step="0.5" value="16"><span>GB</span></span>
+            </label>
+            <label>
+              Native library threads
+              <span class="input-with-unit"><input id="nativeThreadsInput" type="number" min="1" max="256" step="1" value="1"><span>per process</span></span>
+            </label>
+            <label>
+              Monitor interval
+              <span class="input-with-unit"><input id="resourcePollSecondsInput" type="number" min="0.5" max="30" step="0.5" value="2"><span>s</span></span>
+            </label>
+          </div>
+          <p id="resourceCapabilitiesText" class="resource-capabilities"></p>
+        </section>
+        <section class="settings-section danger-section">
+          <h3>Access</h3>
+          <label for="eulaPathInput">EULA file</label>
+          <input id="eulaPathInput" type="text" readonly>
+          <p>Revoking access sets terms_accepted=false in the EULA file and closes the app. The app will not open again until that file is set back to true.</p>
+          <button id="revokeAccessButton" type="button" class="secondary-button danger-button">Revoke access</button>
+        </section>
+      </div>
+      <div class="dialog-actions">
+        <button id="saveSettingsButton" type="button" class="primary-button">Save settings</button>
+      </div>
+    </dialog>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

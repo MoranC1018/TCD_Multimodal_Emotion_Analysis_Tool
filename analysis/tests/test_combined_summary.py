@@ -1,0 +1,758 @@
+import csv
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import openpyxl
+
+from analysis.combined_summary import (
+    AUDIO_DIMENSIONS,
+    AUDIO_EMOTIONS,
+    AUDIO_METRICS,
+    AUDIO_REQUIRED_METRICS,
+    AUDIO_VALENCE,
+    TEXT_DIMENSIONS,
+    TEXT_SENTIMENT,
+    VIDEO_DIMENSIONS,
+    VIDEO_EMOTIONS,
+    VIDEO_METRICS,
+    VIDEO_SENTIMENT,
+    VIDEO_VALENCE,
+    CombinedSource,
+    InputError,
+    SpeakerGroupDefinition,
+    TextConstructSummary,
+    build_combined_workbook,
+    discover_combined_sources,
+    protected_manual_discovery_directories,
+)
+
+
+def write_sectioned_report(
+    path: Path,
+    metrics: tuple[str, ...],
+    base: float,
+    source_orders: dict[str, list[str]] | None = None,
+    sources: list[str] | None = None,
+    counts: list[int] | None = None,
+) -> None:
+    """Write the descriptive-statistics CSV shape emitted by histograms."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sources = sources or ["001_First", "002_Second", "003_Third", "004_Fourth", "005_Fifth"]
+    counts = counts or [10] * len(sources)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        for metric_index, metric in enumerate(metrics):
+            mean = base + metric_index
+            writer.writerow([metric])
+            writer.writerow(["classification", "core", "category", "emotion", "unit", "score"])
+            writer.writerow(["metric", *(source_orders or {}).get(metric, sources)])
+            writer.writerow(["count", *counts])
+            writer.writerow(["missing", *([0] * len(sources))])
+            writer.writerow(["mean", *[mean + offset for offset in range(len(sources))]])
+            writer.writerow(["stddev", *([1] * len(sources))])
+            writer.writerow(["kurtosis", *([0] * len(sources))])
+            writer.writerow([])
+
+
+class CombinedSummaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.output_path = self.root / "combined-summary.xlsx"
+        self.audio_emotion_root = self.root / "audio_output"
+        self.video_emotion_root = self.root / "video_output"
+        self._write_report(self.audio_emotion_root, "Andy Burnham", AUDIO_METRICS, 10)
+        self._write_report(self.audio_emotion_root, "MARINE_LE_PEN", AUDIO_METRICS, 20)
+        self._write_report(self.video_emotion_root, "Andy Burnham", VIDEO_METRICS, 30)
+        self._write_report(self.video_emotion_root, "Marine Le Pen", VIDEO_METRICS, 40)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _write_report(
+        self,
+        root: Path,
+        speaker: str,
+        metrics: tuple[str, ...],
+        base: float,
+        source_orders: dict[str, list[str]] | None = None,
+    ) -> Path:
+        return_path = (
+            root
+            / "emotion"
+            / speaker
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(return_path, metrics, base, source_orders)
+        return return_path
+
+    def test_discovers_speaker_combined_reports_only(self) -> None:
+        ignored = (
+            self.audio_emotion_root
+            / "emotion"
+            / "Andy Burnham"
+            / "001_First"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(ignored, AUDIO_METRICS, 99)
+        debug = (
+            self.audio_emotion_root
+            / "emotion"
+            / "Debug Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(debug, AUDIO_METRICS, 99)
+
+        sources = discover_combined_sources(self.audio_emotion_root, "audio")
+
+        self.assertEqual(
+            [(item.speaker_key, item.modality) for item in sources],
+            [("andyburnham", "audio"), ("marinelepen", "audio")],
+        )
+
+    def test_discovers_reports_from_a_generated_stage_root(self) -> None:
+        stage_root = self.root / "generated_audio_stage"
+        report = (
+            stage_root
+            / "emotion"
+            / "analysis_run"
+            / "Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(report, AUDIO_METRICS, 10)
+
+        sources = discover_combined_sources(stage_root, "audio")
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].display_name, "Andy Burnham")
+        self.assertEqual(sources[0].report_path, report.resolve())
+
+    def test_discovery_prefers_emotion_and_normalizes_case_insensitive_aliases(self) -> None:
+        raw = self._write_report(self.audio_emotion_root, "andy_burnham", AUDIO_METRICS, 50)
+        self._write_report(self.audio_emotion_root, "Andy Burnham", AUDIO_METRICS, 60)
+        raw_destination = (
+            self.audio_emotion_root
+            / "raw"
+            / "andy_burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        raw_destination.parent.mkdir(parents=True)
+        raw.replace(raw_destination)
+
+        sources = discover_combined_sources(self.audio_emotion_root, "audio")
+
+        self.assertEqual(sources[0].speaker_key, "andyburnham")
+        self.assertEqual(sources[0].display_name, "Andy Burnham")
+        self.assertEqual(sources[0].report_path.name, "descriptive_statistics.csv")
+
+    def test_duplicate_or_ambiguous_reports_are_rejected(self) -> None:
+        canonical_report = (
+            self.audio_emotion_root
+            / "emotion"
+            / "Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        canonical_report.unlink()
+        self._write_report(self.audio_emotion_root, "Andy Burnham Copy", AUDIO_METRICS, 50)
+        self._write_report(self.audio_emotion_root, "Andy Burnham Second", AUDIO_METRICS, 60)
+
+        with self.assertRaisesRegex(InputError, "duplicate|ambiguous"):
+            discover_combined_sources(self.audio_emotion_root, "audio")
+
+    def test_rejects_output_destination_equal_to_a_source_report(self) -> None:
+        sources = discover_combined_sources(self.video_emotion_root, "video")
+        source_path = sources[0].report_path
+        before = source_path.read_bytes()
+
+        with self.assertRaisesRegex(InputError, "source report"):
+            build_combined_workbook({"video": sources}, source_path)
+
+        self.assertEqual(source_path.read_bytes(), before)
+
+    def test_rejects_output_destination_inside_manual_discovery(self) -> None:
+        manual_root = self.root / "Statistics_Manual_Discovery"
+        manual_root.mkdir()
+        checkout_anchor = self.root / "checkout" / "analysis" / "test_anchor.py"
+        checkout_anchor.parent.mkdir(parents=True)
+        discovered = protected_manual_discovery_directories(checkout_anchor)
+        self.assertEqual(discovered, (manual_root.resolve(),))
+        destination = manual_root / "task-3-protected-output-do-not-create" / "combined-summary.xlsx"
+
+        with patch(
+            "analysis.combined_summary.protected_manual_discovery_directories",
+            return_value=discovered,
+        ):
+            with self.assertRaisesRegex(InputError, "Statistics_Manual_Discovery"):
+                build_combined_workbook(
+                    {"video": discover_combined_sources(self.video_emotion_root, "video")},
+                    destination,
+                )
+
+        self.assertFalse(destination.parent.exists())
+
+    def test_rejects_required_metric_with_reordered_source_labels(self) -> None:
+        self._write_report(
+            self.audio_emotion_root,
+            "Andy Burnham",
+            AUDIO_METRICS,
+            10,
+            {"Joy": ["002_Second", "001_First", "003_Third", "004_Fourth", "005_Fifth"]},
+        )
+
+        with self.assertRaisesRegex(InputError, "source order"):
+            discover_combined_sources(self.audio_emotion_root, "audio")
+
+    def test_partial_report_preserves_video_ordinals_and_uses_observed_counts(self) -> None:
+        partial = (
+            self.video_emotion_root
+            / "emotion"
+            / "Matteo Renzi"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(
+            partial,
+            VIDEO_METRICS,
+            50,
+            sources=["003_Third", "005_Fifth"],
+            counts=[10, 20],
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=(
+                SpeakerGroupDefinition("italy", "Italy", ("Matteo Renzi",)),
+            ),
+        )
+
+        sheet = openpyxl.load_workbook(result.workbook_path, data_only=False)["Video"]
+        self.assertEqual(sheet["D17"].value, 30)
+        self.assertEqual(sheet["D18"].value, 15)
+        self.assertAlmostEqual(sheet["D19"].value, 7.0710678118654755)
+        self.assertEqual(
+            [sheet[f"D{row}"].value for row in range(21, 26)],
+            [None, None, 10, None, 20],
+        )
+        self.assertEqual(
+            [sheet[f"D{row}"].value for row in range(27, 32)],
+            [None, None, "50.00 (+/- 1.00)", None, "51.00 (+/- 1.00)"],
+        )
+        self.assertTrue(any("2 of 5" in warning and "Matteo Renzi" in warning for warning in result.warnings))
+
+    def test_default_layout_uses_only_supplied_speakers(self) -> None:
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+        )
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+
+        self.assertIsNone(book["Video"]["F2"].value)
+        self.assertEqual(result.warnings, ())
+        self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,E2)")
+
+    def test_custom_group_uses_submitted_speaker_order_and_group_overall(self) -> None:
+        self._write_report(self.video_emotion_root, "Nigel Farage", VIDEO_METRICS, 50)
+        group = SpeakerGroupDefinition(
+            group_id="focus",
+            name="Focus group",
+            speaker_ids=("Andy Burnham", "Nigel Farage", "Marine Le Pen"),
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=(group,),
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        cells = result.source_cells["Video|Anger"]
+        self.assertEqual(result.quantitative_sheets, ("Video",))
+        self.assertEqual(
+            [book["Video"][coordinate].value for coordinate in ("B1", "D1", "E1", "F1", "S1")],
+            ["Focus group", "Burnham", "Farrage", "Le Pen", "Overall"],
+        )
+        self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,E2,F2)")
+        self.assertEqual(cells.speaker_ids, ("andy_burnham", "nigel_farage", "marine_le_pen"))
+        self.assertEqual(cells.speaker_cells, ("D2", "E2", "F2"))
+        self.assertEqual(cells.overall, "S2")
+        self.assertEqual([book["Video"][coordinate].value for coordinate in ("D17", "E17", "F17")], [50, 50, 50])
+        self.assertTrue(all(book["Video"][coordinate].value for coordinate in ("D27", "E27", "F27")))
+        self.assertTrue(all(book["Video"][coordinate].value == "0/0/0/0/0" for coordinate in ("D98", "E98", "F98")))
+
+    def test_multiple_groups_share_modality_sheets_and_keep_linked_blocks_together(self) -> None:
+        groups = (
+            SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),
+            SpeakerGroupDefinition("fr", "France", ("Marine Le Pen",)),
+        )
+
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(
+            result.quantitative_sheets,
+            ("Audio", "Video"),
+        )
+        self.assertEqual(
+            book.sheetnames,
+            [
+                "Audio",
+                "Domain Def Text",
+                "Video",
+                "Domain Def Speech",
+                "Measure Guide",
+                "Text sentiment",
+            ],
+        )
+        self.assertEqual(
+            [book["Video"][coordinate].value for coordinate in ("B1", "D1", "G1", "H1", "S1")],
+            ["United Kingdom", "Burnham", "France", "Le Pen", "Overall"],
+        )
+        self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,H2)")
+        self.assertIn("Video|Anger", result.source_cells)
+        self.assertGreaterEqual(book["Video"].column_dimensions["G"].width, 18)
+        self.assertGreaterEqual(book["Video"].column_dimensions["H"].width, 18)
+        self.assertGreaterEqual(book["Video"].column_dimensions["N"].width, 20)
+
+    def test_full_metric_inventory_drives_dynamic_audio_rows_and_measure_guide(self) -> None:
+        groups = (SpeakerGroupDefinition("focus", "Focus", ("Andy Burnham",)),)
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        audio = book["Audio"]
+        headline_rows = {
+            audio.cell(row, 2).value: row
+            for row in range(2, 2 + len(AUDIO_METRICS))
+        }
+        self.assertEqual(tuple(headline_rows), AUDIO_METRICS)
+        self.assertEqual(
+            set(result.source_cells),
+            {f"Audio|{metric}" for metric in AUDIO_METRICS}
+            | {f"Video|{metric}" for metric in VIDEO_METRICS},
+        )
+        self.assertTrue(all(emotion in headline_rows for emotion in AUDIO_EMOTIONS))
+        count_row = next(
+            row for row in range(1, audio.max_row + 1) if audio.cell(row, 2).value == "COUNT"
+        )
+        detail_row = next(
+            row for row in range(1, audio.max_row + 1) if audio.cell(row, 2).value == "Measures"
+        )
+        self.assertGreater(count_row, max(headline_rows.values()))
+        self.assertGreater(detail_row, count_row + len(("Total", "Average", "Std Dev", *range(5))))
+        self.assertEqual(
+            tuple(
+                audio.cell(detail_row + 1 + index * 5, 2).value
+                for index in range(len(AUDIO_METRICS))
+            ),
+            AUDIO_METRICS,
+        )
+
+        guide = book["Measure Guide"]
+        rows = {
+            (row[1].value, row[2].value): tuple(cell.value for cell in row)
+            for row in guide.iter_rows(min_row=2)
+        }
+        expected_ranges = {
+            **{("Audio", metric): "0..100" for metric in (*AUDIO_EMOTIONS, *AUDIO_DIMENSIONS)},
+            **{("Audio", metric): "-100..100" for metric in AUDIO_VALENCE},
+            **{("Video", metric): "0..100" for metric in (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, *VIDEO_DIMENSIONS)},
+            **{("Video", metric): "-100..100" for metric in VIDEO_VALENCE},
+            **{("Text", metric): "0..1" for metric in TEXT_SENTIMENT},
+            **{("Text", metric): "-1..1" for metric in TEXT_DIMENSIONS},
+        }
+        self.assertEqual({key: row[5] for key, row in rows.items()}, expected_ranges)
+        self.assertTrue(
+            any("not directly comparable without rescaling" in str(row[6]) for row in rows.values())
+        )
+
+    def test_legacy_audio_report_keeps_optional_emotions_blank_with_one_warning(self) -> None:
+        report = (
+            self.audio_emotion_root
+            / "emotion"
+            / "Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(report, AUDIO_REQUIRED_METRICS, 10)
+
+        result = build_combined_workbook(
+            {"audio": discover_combined_sources(self.audio_emotion_root, "audio")},
+            self.output_path,
+            speaker_groups=(SpeakerGroupDefinition("focus", "Focus", ("Andy Burnham",)),),
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        for metric in set(AUDIO_METRICS) - set(AUDIO_REQUIRED_METRICS):
+            coordinate = result.source_cells[f"Audio|{metric}"].speaker_cells[0]
+            self.assertIsNone(book["Audio"][coordinate].value)
+        legacy_warnings = [warning for warning in result.warnings if "legacy audio report" in warning.casefold()]
+        self.assertEqual(len(legacy_warnings), 1)
+        self.assertIn("cells are blank", legacy_warnings[0])
+
+    def test_arbitrary_non_political_speaker_names_build_grouped_workbook(self) -> None:
+        root = self.root / "arbitrary-audio"
+        self._write_report(root, "Researcher Alpha", AUDIO_METRICS, 10)
+        sources = discover_combined_sources(root, "audio")
+
+        result = build_combined_workbook(
+            {"audio": sources},
+            self.output_path,
+            speaker_groups=(SpeakerGroupDefinition("lab", "Lab cohort", ("researcheralpha",)),),
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(sources[0].display_name, "Researcher Alpha")
+        self.assertEqual(book["Audio"]["D1"].value, "Researcher Alpha")
+        self.assertEqual(result.source_cells["Audio|Anger"].speaker_ids, ("researcheralpha",))
+
+    def test_arbitrary_non_political_speaker_is_not_omitted_without_explicit_groups(self) -> None:
+        root = self.root / "arbitrary-default-audio"
+        self._write_report(root, "Researcher Alpha", AUDIO_METRICS, 10)
+
+        result = build_combined_workbook(
+            {"audio": discover_combined_sources(root, "audio")},
+            self.output_path,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(book["Audio"]["B1"].value, "Speakers")
+        self.assertEqual(book["Audio"]["D1"].value, "Researcher Alpha")
+        self.assertEqual(result.source_cells["Audio|Anger"].speaker_ids, ("researcheralpha",))
+        self.assertFalse(any("political" in warning.casefold() for warning in result.warnings))
+
+    def test_combined_workbook_neutralizes_hostile_group_and_speaker_labels(self) -> None:
+        root = self.root / "hostile-audio"
+        self._write_report(root, "=1+1", AUDIO_METRICS, 10)
+
+        result = build_combined_workbook(
+            {"audio": discover_combined_sources(root, "audio")},
+            self.output_path,
+            speaker_groups=(SpeakerGroupDefinition("hostile", "@cohort", ("11",)),),
+        )
+
+        sheet = openpyxl.load_workbook(result.workbook_path, data_only=False)["Audio"]
+        self.assertEqual(sheet["B1"].value, "'@cohort")
+        self.assertEqual(sheet["D1"].value, "'=1+1")
+        self.assertEqual(sheet["B1"].data_type, "s")
+        self.assertEqual(sheet["D1"].data_type, "s")
+        self.assertEqual(sheet["D2"].data_type, "n")
+
+    def test_construct_comparison_is_formula_linked_and_can_be_disabled(self) -> None:
+        groups = (
+            SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),
+            SpeakerGroupDefinition("fr", "France", ("Marine Le Pen",)),
+        )
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+            include_construct_comparison=True,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        sheet = book["Construct Comparison"]
+        self.assertEqual(sheet["A1"].value, "Multimodal construct comparison by speaker")
+        self.assertEqual(sheet["A4"].value, "United Kingdom")
+        self.assertEqual(sheet["A5"].value, "Andy Burnham")
+        self.assertEqual(sheet["A7"].value, "Emotions: Anger")
+        self.assertIn("'Video'!D2", sheet["B7"].value)
+        self.assertIn("'Audio'!D2", sheet["C7"].value)
+        self.assertIsNone(sheet["D7"].value)
+
+        labelled_rows: dict[str, int] = {}
+        for row in range(7, sheet.max_row + 1):
+            label = sheet.cell(row, 1).value
+            if label:
+                labelled_rows.setdefault(label, row)
+        positive_row = labelled_rows["Sentiment: Positive Sentiment"]
+        self.assertIsNone(sheet.cell(positive_row, 2).value)
+        self.assertIsNone(sheet.cell(positive_row, 3).value)
+        self.assertIsNone(sheet.cell(positive_row, 4).value)
+        valence_row = labelled_rows["Valence: Valence"]
+        self.assertIn("'Video'!D12", sheet.cell(valence_row, 2).value)
+        self.assertIn("'Audio'!D11", sheet.cell(valence_row, 3).value)
+        self.assertNotIn("Joy", str(sheet.cell(valence_row, 2).value))
+
+        without_comparison = self.root / "without-comparison.xlsx"
+        build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            without_comparison,
+            speaker_groups=groups,
+            include_construct_comparison=False,
+        )
+        without_book = openpyxl.load_workbook(without_comparison, read_only=True)
+        try:
+            self.assertNotIn("Construct Comparison", without_book.sheetnames)
+        finally:
+            without_book.close()
+
+    def test_imported_text_constructs_populate_source_and_comparison_sheets(self) -> None:
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+        text_summary = TextConstructSummary(
+            speaker_id="andy_burnham",
+            display_name="Andy Burnham",
+            country="United Kingdom",
+            constructs={
+                "Positive Sentiment": 0.20,
+                "Negative Sentiment": 0.10,
+                "Arousal / Activation": 0.30,
+                "Dominance / Power": 0.40,
+                "Affiliation / Social orientation": 0.50,
+            },
+            source_path=self.root / "speaker_level_summary.csv",
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=groups,
+            text_summaries=(text_summary,),
+            include_construct_comparison=True,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(book["Text sentiment"]["D2"].value, 0.20)
+        self.assertEqual(book["Text sentiment"]["D6"].value, 0.50)
+        comparison = book["Construct Comparison"]
+        positive_row = next(
+            row
+            for row in range(7, comparison.max_row + 1)
+            if comparison.cell(row, 1).value == "Sentiment: Positive Sentiment"
+        )
+        self.assertIn("'Text sentiment'!D2", comparison.cell(positive_row, 4).value)
+        self.assertIsNone(comparison.cell(positive_row, 2).value)
+        self.assertIsNone(comparison.cell(positive_row, 3).value)
+        self.assertNotIn("Text|Positive Sentiment", result.source_cells)
+
+    def test_headline_policy_defaults_to_observation_weighting_and_allows_equal_videos(self) -> None:
+        report = (
+            self.video_emotion_root
+            / "emotion"
+            / "Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(report, VIDEO_METRICS, 10, counts=[100, 1, 1, 1, 1])
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+
+        weighted = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=groups,
+            headline_policy="weighted",
+        )
+        equal_path = self.root / "equal.xlsx"
+        build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            equal_path,
+            speaker_groups=groups,
+            headline_policy="equal",
+        )
+
+        weighted_value = openpyxl.load_workbook(weighted.workbook_path, data_only=False)["Video"]["D2"].value
+        equal_value = openpyxl.load_workbook(equal_path, data_only=False)["Video"]["D2"].value
+        self.assertAlmostEqual(weighted_value, 10.096153846153847)
+        self.assertEqual(equal_value, 12.0)
+
+    def test_multiple_long_group_names_are_kept_inside_one_modality_sheet(self) -> None:
+        groups = (
+            SpeakerGroupDefinition("first", "A very long group name with a shared prefix one", ("Andy Burnham",)),
+            SpeakerGroupDefinition("second", "A very long group name with a shared prefix two", ("Marine Le Pen",)),
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=groups,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(result.quantitative_sheets, ("Video",))
+        self.assertEqual(book["Video"]["B1"].value, groups[0].name)
+        self.assertEqual(book["Video"]["G1"].value, groups[1].name)
+
+    def test_case_only_group_names_do_not_create_extra_sheets(self) -> None:
+        name = "X" * 23
+        groups = (
+            SpeakerGroupDefinition("first", name, ("Andy Burnham",)),
+            SpeakerGroupDefinition("second", name.lower(), ("Marine Le Pen",)),
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=groups,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertEqual(result.quantitative_sheets, ("Video",))
+        self.assertEqual(book["Video"]["B1"].value, name)
+        self.assertEqual(book["Video"]["G1"].value, name.lower())
+
+    def test_rejects_invalid_speaker_group_definitions(self) -> None:
+        source_mapping = {"video": discover_combined_sources(self.video_emotion_root, "video")}
+        invalid_groups = (
+            ("duplicate ids", (
+                SpeakerGroupDefinition("same", "First", ("Andy Burnham",)),
+                SpeakerGroupDefinition("same", "Second", ("Marine Le Pen",)),
+            )),
+            ("duplicate names", (
+                SpeakerGroupDefinition("first", "Same", ("Andy Burnham",)),
+                SpeakerGroupDefinition("second", "Same", ("Marine Le Pen",)),
+            )),
+            ("duplicate memberships", (
+                SpeakerGroupDefinition("first", "First", ("Andy Burnham",)),
+                SpeakerGroupDefinition("second", "Second", ("Andy Burnham",)),
+            )),
+            ("blank group", (SpeakerGroupDefinition("", "First", ("Andy Burnham",)),)),
+            ("empty membership", (SpeakerGroupDefinition("first", "First", ()),)),
+        )
+
+        for label, groups in invalid_groups:
+            with self.subTest(label=label), self.assertRaises(InputError):
+                build_combined_workbook(source_mapping, self.output_path, speaker_groups=groups)
+
+    def test_explicit_empty_speaker_groups_are_rejected_before_writing(self) -> None:
+        source_mapping = {"video": discover_combined_sources(self.video_emotion_root, "video")}
+
+        for index, groups in enumerate(((), []), start=1):
+            destination = self.root / f"empty-groups-{index}.xlsx"
+            with self.subTest(groups=type(groups).__name__), self.assertRaisesRegex(
+                InputError,
+                "speaker group",
+            ):
+                build_combined_workbook(source_mapping, destination, speaker_groups=groups)
+            self.assertFalse(destination.exists())
+
+    def test_missing_group_speaker_in_modality_stays_blank_and_is_excluded_from_overall(self) -> None:
+        group = SpeakerGroupDefinition(
+            "uk", "United Kingdom", ("Andy Burnham", "Zack Polanski")
+        )
+
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+            speaker_groups=(group,),
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        self.assertIsNone(book["Video"]["E2"].value)
+        self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2)")
+        self.assertTrue(any("Zack Polanski" in warning for warning in result.warnings))
+
+    def test_builds_only_available_quantitative_sheets(self) -> None:
+        video_sources = discover_combined_sources(self.video_emotion_root, "video")
+        video_result = build_combined_workbook({"video": video_sources}, self.output_path)
+        video_book = openpyxl.load_workbook(video_result.workbook_path, data_only=False)
+
+        self.assertIn("Video", video_book.sheetnames)
+        self.assertNotIn("Audio", video_book.sheetnames)
+        self.assertEqual(video_result.quantitative_sheets, ("Video",))
+        self.assertEqual(
+            video_book.sheetnames,
+            ["Domain Def Text", "Video", "Domain Def Speech", "Measure Guide", "Text sentiment"],
+        )
+
+        audio_result = build_combined_workbook(
+            {"audio": discover_combined_sources(self.audio_emotion_root, "audio")},
+            self.root / "audio-summary.xlsx",
+        )
+        audio_book = openpyxl.load_workbook(audio_result.workbook_path, data_only=False)
+        self.assertEqual(audio_result.quantitative_sheets, ("Audio",))
+        self.assertEqual(
+            audio_book.sheetnames,
+            ["Audio", "Domain Def Text", "Domain Def Speech", "Measure Guide", "Text sentiment"],
+        )
+
+    def test_default_headline_layout_and_mean_of_means_coordinates(self) -> None:
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+        )
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        video_anger = result.source_cells["Video|Anger"]
+        audio_anger = result.source_cells["Audio|Anger"]
+
+        self.assertEqual(
+            book.sheetnames,
+            ["Audio", "Domain Def Text", "Video", "Domain Def Speech", "Measure Guide", "Text sentiment"],
+        )
+        self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,E2)")
+        self.assertEqual(book["Audio"]["S2"].value, "=AVERAGE(D2,E2)")
+        self.assertEqual(video_anger.overall, "S2")
+        self.assertEqual(audio_anger.overall, "S2")
+        self.assertEqual(video_anger.speaker_cells, ("D2", "E2"))
+        self.assertEqual(video_anger.speaker_ids, ("andy_burnham", "marine_le_pen"))
+        self.assertEqual(len(video_anger.speaker_cells), len(video_anger.speaker_ids))
+        self.assertEqual(book["Video"]["D2"].number_format, "0.00")
+        self.assertEqual(book["Video"].freeze_panes, "B2")
+        self.assertEqual(list(book["Video"].merged_cells.ranges), [])
+        self.assertTrue(book.calculation.fullCalcOnLoad)
+        self.assertTrue(book.calculation.forceFullCalc)
+
+    def test_ports_static_definition_sheet_values_and_fonts(self) -> None:
+        result = build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+        )
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+
+        self.assertEqual(book["Domain Def Text"]["A1"].value, "terms in general inquirer")
+        self.assertEqual(book["Domain Def Text"]["A1"].font.name, "Aptos Narrow")
+        self.assertEqual(book["Domain Def Text"]["A1"].font.sz, 11)
+
+    def test_does_not_write_the_manual_reference_workbooks(self) -> None:
+        reference_paths = tuple(
+            workbook
+            for path in protected_manual_discovery_directories(__file__)
+            for workbook in path.glob("*.xlsx")
+        )
+        before = {path: path.stat().st_mtime_ns for path in reference_paths}
+
+        build_combined_workbook(
+            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            self.output_path,
+        )
+
+        self.assertEqual({path: path.stat().st_mtime_ns for path in reference_paths}, before)
+
+
+if __name__ == "__main__":
+    unittest.main()
