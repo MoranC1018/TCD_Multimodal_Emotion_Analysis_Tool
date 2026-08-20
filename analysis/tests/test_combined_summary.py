@@ -167,8 +167,8 @@ class CombinedSummaryTests(unittest.TestCase):
             / "descriptive_statistics.csv"
         )
         canonical_report.unlink()
-        self._write_report(self.audio_emotion_root, "Andy Burnham Copy", AUDIO_METRICS, 50)
-        self._write_report(self.audio_emotion_root, "Andy Burnham Second", AUDIO_METRICS, 60)
+        self._write_report(self.audio_emotion_root, "Andy-Burnham", AUDIO_METRICS, 50)
+        self._write_report(self.audio_emotion_root, "Andy Burnham", AUDIO_METRICS, 60)
 
         with self.assertRaisesRegex(InputError, "duplicate|ambiguous"):
             discover_combined_sources(self.audio_emotion_root, "audio")
@@ -285,10 +285,10 @@ class CombinedSummaryTests(unittest.TestCase):
         self.assertEqual(result.quantitative_sheets, ("Video",))
         self.assertEqual(
             [book["Video"][coordinate].value for coordinate in ("B1", "D1", "E1", "F1", "S1")],
-            ["Focus group", "Burnham", "Farrage", "Le Pen", "Overall"],
+            ["Focus group", "Andy Burnham", "Nigel Farage", "Marine Le Pen", "Overall"],
         )
         self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,E2,F2)")
-        self.assertEqual(cells.speaker_ids, ("andy_burnham", "nigel_farage", "marine_le_pen"))
+        self.assertEqual(cells.speaker_ids, ("andyburnham", "nigelfarage", "marinelepen"))
         self.assertEqual(cells.speaker_cells, ("D2", "E2", "F2"))
         self.assertEqual(cells.overall, "S2")
         self.assertEqual([book["Video"][coordinate].value for coordinate in ("D17", "E17", "F17")], [50, 50, 50])
@@ -328,7 +328,7 @@ class CombinedSummaryTests(unittest.TestCase):
         )
         self.assertEqual(
             [book["Video"][coordinate].value for coordinate in ("B1", "D1", "G1", "H1", "S1")],
-            ["United Kingdom", "Burnham", "France", "Le Pen", "Overall"],
+            ["United Kingdom", "Andy Burnham", "France", "Marine Le Pen", "Overall"],
         )
         self.assertEqual(book["Video"]["S2"].value, "=AVERAGE(D2,H2)")
         self.assertIn("Video|Anger", result.source_cells)
@@ -719,7 +719,7 @@ class CombinedSummaryTests(unittest.TestCase):
         self.assertEqual(video_anger.overall, "S2")
         self.assertEqual(audio_anger.overall, "S2")
         self.assertEqual(video_anger.speaker_cells, ("D2", "E2"))
-        self.assertEqual(video_anger.speaker_ids, ("andy_burnham", "marine_le_pen"))
+        self.assertEqual(video_anger.speaker_ids, ("andyburnham", "marinelepen"))
         self.assertEqual(len(video_anger.speaker_cells), len(video_anger.speaker_ids))
         self.assertEqual(book["Video"]["D2"].number_format, "0.00")
         self.assertEqual(book["Video"].freeze_panes, "B2")

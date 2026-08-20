@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -593,32 +594,40 @@ class ReleaseUiContractTests(unittest.TestCase):
     def test_analysis_sends_one_multi_modality_payload(self) -> None:
         self.assertIn('api("/api/run-analysis-workflow"', self.javascript)
         self.assertIn("buildAnalysisModalities", self.javascript)
-        self.assertIn("buildAnalysisSpeakerGroups", self.javascript)
-        self.assertIn("speakerGroups: buildAnalysisSpeakerGroups()", self.javascript)
+        self.assertIn("buildAnalysisProfilePayload", self.javascript)
+        self.assertIn("analysisProfile,", self.javascript)
         self.assertNotIn('api("/api/run-analysis"', self.javascript)
         self.assertNotIn("analysisModeInputs", self.javascript)
 
-    def test_analysis_discovers_and_edits_non_overlapping_speaker_groups(self) -> None:
+    def test_analysis_has_nested_metadata_customization_and_mixed_manual_groups(self) -> None:
         for element_id in (
+            "analysisCustomizeScreen",
+            "openAnalysisCustomizeButton",
             "discoverAnalysisSpeakersButton",
             "analysisSpeakerDiscoveryStatus",
+            "analysisSortFields",
+            "analysisAutomaticGroupField",
+            "analysisMetadataFilters",
             "analysisSpeakerGroups",
             "addAnalysisSpeakerGroupButton",
+            "analysisProfilePreview",
+            "saveAnalysisCustomizationButton",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', self.html)
-        self.assertIn('api("/api/analysis-speakers"', self.javascript)
+        self.assertIn('api("/api/analysis-profile-context"', self.javascript)
         self.assertIn("discoverAnalysisSpeakers", self.javascript)
         self.assertIn("renderAnalysisSpeakerGroups", self.javascript)
-        self.assertIn("assignAnalysisSpeaker", self.javascript)
-        self.assertIn("Each speaker can belong to one group", self.html)
-        self.assertIn("Probability requires at least two contributing speakers", self.javascript)
+        self.assertIn("assignAnalysisProfileMember", self.javascript)
+        self.assertIn("whole speaker or individual source", self.html)
+        self.assertIn("belongs to more than one manual group", self.javascript)
 
-    def test_analysis_prefills_neutral_groups_from_discovered_speakers(self) -> None:
+    def test_analysis_profile_defaults_keep_all_sources_without_fixed_caps(self) -> None:
         self.assertNotIn("HISTORICAL_ANALYSIS_GROUPS", self.javascript)
         self.assertNotIn("canUseHistoricalAnalysisGroups", self.javascript)
-        self.assertIn("createSensibleAnalysisGroups", self.javascript)
-        self.assertIn("name: `Group ${groups.length + 1}`", self.javascript)
+        self.assertIn("createAnalysisProfileDraft", self.javascript)
+        self.assertNotIn("supports at most four speaker groups", self.javascript)
+        self.assertNotIn("maximum of three speakers", self.javascript)
 
     def test_analysis_common_and_face_only_options_are_scoped(self) -> None:
         for element_id in (
@@ -671,7 +680,7 @@ class ReleaseUiContractTests(unittest.TestCase):
     def test_analysis_run_is_gated_and_text_import_is_submitted(self) -> None:
         self.assertIn("updateAnalysisForm", self.javascript)
         self.assertIn("hasCompleteAnalysisModality", self.javascript)
-        self.assertIn("analysisSpeakerGroupIssues", self.javascript)
+        self.assertIn("analysisProfileIssues", self.javascript)
         self.assertIn("runAnalysisButton.disabled", self.javascript)
         self.assertIn("Enable Video / iMotions, Audio, or Text.", self.javascript)
         self.assertIn("String(analysisDefaultReferenceInput.value).trim()", self.javascript)
@@ -767,10 +776,10 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn('id="analysisLogscaleOption"', self.html)
         self.assertIn("hasAnalysisRunModality", self.javascript)
 
-    def test_analysis_group_warning_counts_contributors_per_modality(self) -> None:
-        self.assertIn("analysisGroupContributionWarning", self.javascript)
-        self.assertIn("speaker.availableIn", self.javascript)
-        self.assertIn("fewer than two contributors", self.javascript)
+    def test_analysis_manual_group_warnings_report_source_overlap(self) -> None:
+        self.assertIn("profileMemberConflict", self.javascript)
+        self.assertIn("A source can belong to only one manual group", self.javascript)
+        self.assertIn("analysisProfileIssues", self.javascript)
 
     def test_analysis_default_output_hydration_rechecks_run_gate(self) -> None:
         self.assertRegex(
@@ -869,16 +878,26 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertNotIn("Multimodal Emotion Analysis Pipeline", self.html)
         self.assertNotIn("MultimodalEmotionAnalysisPipeline", self.javascript)
 
-    def test_text_affiliation_replaces_unapproved_visual_identity_assets(self) -> None:
-        for asset in ("trinity-main-logo.jpg", "trinity-shield.png", "trinity-shield.ico"):
-            self.assertFalse((UI_ROOT / "static" / asset).exists())
-            self.assertNotIn(asset, self.html)
-            self.assertNotIn(asset, self.launcher)
+    def test_authorized_trinity_branding_uses_the_official_assets(self) -> None:
+        expected_sha256 = {
+            "trinity-main-logo.jpg": "640730cdb5df84408350754c71cc9176b3a3afebc7ea9719ae6fddff2eb3cf75",
+            "trinity-shield.png": "c7f9c4e88db12c9dcc36a05fcd6e015d19590758a5ddbd4f2be2a07f3794a23e",
+            "trinity-shield.ico": "cba770fa9cfa75d95435aac3c636bb025c4fe8ad329a52ced0cd799f4f315c3a",
+        }
+        for asset, expected_digest in expected_sha256.items():
+            with self.subTest(asset=asset):
+                asset_path = UI_ROOT / "static" / asset
+                self.assertTrue(asset_path.is_file())
+                self.assertEqual(hashlib.sha256(asset_path.read_bytes()).hexdigest(), expected_digest)
+        self.assertIn('rel="icon" type="image/png" href="/static/trinity-shield.png"', self.html)
+        self.assertIn('class="trinity-main-logo"', self.html)
+        self.assertIn('src="/static/trinity-main-logo.jpg"', self.html)
+        self.assertIn('alt="Trinity College Dublin, the University of Dublin"', self.html)
         self.assertIn(
             "School of Computer Science, Trinity College Dublin, the University of Dublin",
             self.html,
         )
-        self.assertNotIn("APP_ICON", self.launcher)
+        self.assertIn('APP_ICON = STATIC_ROOT / "trinity-shield.ico"', self.launcher)
 
     def test_native_shell_keeps_native_browse_and_fullscreen_controls(self) -> None:
         self.assertIn("window.pywebview?.api?.browse_for_path", self.javascript)

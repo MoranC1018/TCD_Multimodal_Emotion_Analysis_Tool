@@ -41,7 +41,6 @@ from analysis.audio import (
 from analysis.combined_summary import (
     AUDIO_METRICS,
     AUDIO_REQUIRED_METRICS,
-    SPEAKERS,
     VIDEO_METRICS,
     InputError,
     Speaker,
@@ -62,6 +61,14 @@ from analysis.imotions import (
     inspect_imotions_csv,
     read_imotions_csv,
 )
+from analysis.metadata import (
+    find_source_manifest,
+    load_source_metadata,
+    resolve_analysis_profile,
+    validate_source_manifest_associations,
+    validate_text_profile_grouping,
+)
+from analysis.profile import AnalysisProfile, profile_payload
 from analysis.text_results import TextResultsError, discover_text_results
 from procurement.video_sampling import run_docx_extractions
 from procurement.external_tools import (
@@ -327,6 +334,7 @@ class AnalysisWorkflowRunRequest:
     output_root: Path
     modalities: tuple[AnalysisModalityRunRequest, ...]
     speaker_groups: tuple[AnalysisSpeakerGroupRunRequest, ...] = ()
+    analysis_profile: AnalysisProfile | None = None
     write_combined_workbook: bool = True
     include_construct_comparison: bool = True
     include_probability_sheets: bool = True
@@ -434,13 +442,12 @@ def discover_analysis_speakers(
                 warnings,
             )
 
-    known_ids = tuple(speaker.speaker_id for speaker in SPEAKERS)
-    ordered_ids = [speaker_id for speaker_id in known_ids if speaker_id in available_in]
-    ordered_ids.extend(
-        sorted(
-            (speaker_id for speaker_id in available_in if speaker_id not in known_ids),
-            key=lambda speaker_id: discovered_speakers[speaker_id].display_name.casefold(),
-        )
+    ordered_ids = sorted(
+        available_in,
+        key=lambda speaker_id: (
+            discovered_speakers[speaker_id].display_name.casefold(),
+            speaker_id,
+        ),
     )
 
     return {
@@ -458,6 +465,59 @@ def discover_analysis_speakers(
             for speaker in (discovered_speakers[speaker_id],)
         ],
         "warnings": warnings,
+    }
+
+
+def discover_analysis_profile_context(
+    modalities: Iterable[AnalysisModalityRunRequest],
+    *,
+    source_manifest: Path | None = None,
+) -> dict[str, object]:
+    """Describe reusable metadata choices for the source run behind Analysis inputs."""
+
+    modality_paths = tuple(modality.source_path for modality in modalities)
+    manifest_path = (
+        Path(source_manifest).expanduser().resolve()
+        if source_manifest is not None
+        else find_source_manifest(modality_paths)
+    )
+    metadata = load_source_metadata(manifest_path)
+    validate_source_manifest_associations(
+        modality_paths,
+        metadata.manifest_path,
+        metadata.manifest_sha256,
+    )
+    selected_sources = tuple(source for source in metadata.sources if source.selected)
+    sources_by_speaker: dict[str, list[str]] = {}
+    speaker_names: dict[str, str] = {}
+    for source in selected_sources:
+        sources_by_speaker.setdefault(source.speaker_key, []).append(source.source_id)
+        speaker_names.setdefault(source.speaker_key, source.speaker)
+    return {
+        "sourceManifest": str(metadata.manifest_path),
+        "sourceManifestSha256": metadata.manifest_sha256,
+        "metadataFields": [
+            {"name": field, "values": list(metadata.distinct_values(field))}
+            for field in metadata.fields
+        ],
+        "speakers": [
+            {
+                "id": speaker_id,
+                "name": speaker_names[speaker_id],
+                "sourceIds": source_ids,
+            }
+            for speaker_id, source_ids in sources_by_speaker.items()
+        ],
+        "sources": [
+            {
+                "id": source.source_id,
+                "title": source.title,
+                "speakerId": source.speaker_key,
+                "speaker": source.speaker,
+                "metadata": dict(source.user_metadata),
+            }
+            for source in selected_sources
+        ],
     }
 
 
@@ -546,13 +606,12 @@ def _discover_imported_speaker_labels(
         grouped.setdefault(speaker.speaker_id, []).append((label, path))
 
     selected: dict[str, str] = {}
-    known_ids = tuple(speaker.speaker_id for speaker in SPEAKERS)
-    ordered_ids = [speaker_id for speaker_id in known_ids if speaker_id in grouped]
-    ordered_ids.extend(
-        sorted(
-            (speaker_id for speaker_id in grouped if speaker_id not in known_ids),
-            key=lambda speaker_id: speakers[speaker_id].display_name.casefold(),
-        )
+    ordered_ids = sorted(
+        grouped,
+        key=lambda speaker_id: (
+            speakers[speaker_id].display_name.casefold(),
+            speaker_id,
+        ),
     )
     for speaker_id in ordered_ids:
         speaker = speakers[speaker_id]
@@ -2606,7 +2665,7 @@ def build_analysis_command(
         module,
         str(request.source_path.expanduser().resolve()),
         "--output-root",
-        str(request.output_root.expanduser().resolve()),
+        str(Path(os.path.abspath(request.output_root.expanduser()))),
     ]
     if not request.write_graphs:
         command.append("--no-graphs")
@@ -2635,10 +2694,24 @@ def build_analysis_workflow_command(
     modalities = tuple(request.modalities)
     if not modalities:
         raise ValueError("Choose at least one Video / iMotions, Audio, or Text modality.")
-    if request.write_combined_workbook and not request.speaker_groups:
-        raise ValueError("Choose at least one speaker group for the combined workbook.")
-    if len(request.speaker_groups) > 4:
-        raise ValueError("The combined workbook supports at most four speaker groups.")
+    if request.write_combined_workbook and not request.speaker_groups and request.analysis_profile is None:
+        raise ValueError("Choose an output profile or at least one speaker group for the combined workbook.")
+    if request.analysis_profile is not None and request.speaker_groups:
+        raise ValueError("Use either an output profile or legacy speaker groups, not both.")
+    profile_metadata = None
+    resolved_profile = None
+    if request.analysis_profile is not None:
+        try:
+            profile_metadata = load_source_metadata(
+                request.analysis_profile.source_manifest,
+                expected_sha256=request.analysis_profile.source_manifest_sha256,
+            )
+            resolved_profile = resolve_analysis_profile(
+                profile_metadata,
+                request.analysis_profile,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid Analysis output profile: {exc}") from exc
     confidence_level = require_finite_number(request.confidence_level, "Confidence level")
     if not 0.0 < confidence_level < 1.0:
         raise ValueError("Confidence level must be between 0 and 1.")
@@ -2651,7 +2724,7 @@ def build_analysis_workflow_command(
         "-m",
         "analysis.workflow",
         "--output-root",
-        str(request.output_root.expanduser().resolve()),
+        str(Path(os.path.abspath(request.output_root.expanduser()))),
     ]
     seen_modalities: set[str] = set()
     for modality in modalities:
@@ -2675,6 +2748,23 @@ def build_analysis_workflow_command(
             ]
         )
 
+    if request.analysis_profile is not None:
+        try:
+            validate_source_manifest_associations(
+                tuple(modality.source_path for modality in modalities),
+                request.analysis_profile.source_manifest,
+                request.analysis_profile.source_manifest_sha256,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "Analysis output profile is not associated with the selected modality folders."
+            ) from exc
+        if "text" in seen_modalities:
+            try:
+                validate_text_profile_grouping(profile_metadata, resolved_profile)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+
     groups_payload: list[dict[str, object]] = []
     group_ids: set[str] = set()
     group_names: set[str] = set()
@@ -2685,8 +2775,6 @@ def build_analysis_workflow_command(
         speaker_ids = canonical_analysis_speaker_ids(group.speaker_ids)
         if not group_id or not group_name or not speaker_ids or any(not speaker for speaker in speaker_ids):
             raise ValueError("Each speaker group needs a nonblank id, name, and at least one speaker.")
-        if len(speaker_ids) > 3:
-            raise ValueError("Each speaker group may contain at most three speakers.")
         if group_id in group_ids or group_name in group_names:
             raise ValueError("Speaker group ids and names must be unique.")
         if len(set(speaker_ids)) != len(speaker_ids) or assigned_speakers.intersection(speaker_ids):
@@ -2703,10 +2791,22 @@ def build_analysis_workflow_command(
         if not clean_key:
             raise ValueError("Reference override names must be nonblank.")
         overrides[clean_key] = require_finite_number(value, "Reference overrides")
+    if request.analysis_profile is not None:
+        command.extend(
+            [
+                "--analysis-profile-json",
+                json.dumps(profile_payload(request.analysis_profile), sort_keys=True),
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "--speaker-groups-json",
+                json.dumps(groups_payload, sort_keys=True),
+            ]
+        )
     command.extend(
         [
-            "--speaker-groups-json",
-            json.dumps(groups_payload, sort_keys=True),
             "--default-reference",
             str(default_reference),
             "--reference-overrides-json",

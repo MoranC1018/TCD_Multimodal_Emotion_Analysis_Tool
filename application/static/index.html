@@ -6,6 +6,7 @@
     <title>Multimodal Emotion Analysis Tool</title>
     <meta name="theme-color" content="#002147">
     <meta name="launcher-token" content="__LAUNCHER_TOKEN__">
+    <link rel="icon" type="image/png" href="/static/trinity-shield.png">
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
@@ -16,6 +17,13 @@
           Settings
         </button>
         <div class="mode-home-head">
+          <img
+            class="trinity-main-logo"
+            src="/static/trinity-main-logo.jpg"
+            alt="Trinity College Dublin, the University of Dublin"
+            width="1713"
+            height="591"
+          >
           <div>
             <h1>Multimodal Emotion Analysis Tool</h1>
             <p>Choose the stage of the video processing stack.</p>
@@ -482,20 +490,17 @@
               </div>
             </section>
 
-            <section id="analysisSpeakerPanel" class="analysis-speaker-panel" aria-labelledby="analysisGroupsTitle">
+            <section id="analysisProfileSummaryPanel" class="analysis-speaker-panel" aria-labelledby="analysisProfileSummaryTitle">
               <div class="analysis-section-head">
                 <div>
-                  <h3 id="analysisGroupsTitle">Speaker groups</h3>
-                  <p>Each speaker can belong to one group. Groups keep related speakers together; Overall combines all selected speakers.</p>
+                  <h3 id="analysisProfileSummaryTitle">Output customization</h3>
+                  <p>Reuse source metadata to order, filter, and group the final workbook without changing procurement sidecars.</p>
                 </div>
                 <div class="analysis-section-actions">
-                  <button id="discoverAnalysisSpeakersButton" type="button" class="secondary-button">Discover speakers</button>
-                  <button id="addAnalysisSpeakerGroupButton" type="button" class="ghost-button" disabled>Add group</button>
+                  <button id="openAnalysisCustomizeButton" type="button" class="secondary-button">Customize output</button>
                 </div>
               </div>
-              <p id="analysisSpeakerDiscoveryStatus" class="analysis-discovery-status" role="status" aria-live="polite">Choose source folders, then discover speakers.</p>
-              <div id="analysisGroupWarningStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
-              <div id="analysisSpeakerGroups" class="analysis-speaker-groups"></div>
+              <p id="analysisProfileSummary" class="analysis-discovery-status" role="status" aria-live="polite">Open Customize output after choosing source folders.</p>
             </section>
 
             <div class="analysis-common-grid">
@@ -584,6 +589,69 @@
                 <button id="runAnalysisButton" type="button" class="primary-wide" disabled>Complete sources and groups to run</button>
               </section>
             </div>
+          </div>
+        </section>
+
+        <section id="analysisCustomizeScreen" class="screen" data-screen="analysis-customize">
+          <div class="screen-head analysis-customize-head">
+            <div>
+              <p class="eyebrow">Analysis output</p>
+              <h2>Customize output</h2>
+              <p>Choose reusable ordering and grouping. These choices are saved with the Analysis output, never into source metadata.</p>
+            </div>
+            <button id="backFromAnalysisCustomizeButton" type="button" class="secondary-button">Back to Analysis</button>
+          </div>
+          <div class="analysis-customize-layout">
+            <section class="input-panel analysis-profile-source" aria-labelledby="analysisProfileSourceTitle">
+              <div class="analysis-section-head">
+                <div>
+                  <h3 id="analysisProfileSourceTitle">Source metadata</h3>
+                  <p>Load the source manifest associated with the selected modality folders.</p>
+                </div>
+                <button id="discoverAnalysisSpeakersButton" type="button" class="secondary-button">Load source metadata</button>
+              </div>
+              <label for="analysisSourceManifestInput">Procurement source manifest (optional)</label>
+              <div class="path-row">
+                <input id="analysisSourceManifestInput" type="text" placeholder="Choose source_manifest.json for legacy report folders">
+                <button id="browseAnalysisSourceManifestButton" type="button" class="secondary-button">Browse</button>
+              </div>
+              <small class="analysis-source-help">Leave blank when a selected source folder already contains the sidecars. Choose the procurement run's source_manifest.json when all selected results are legacy sidecarless folders.</small>
+              <p id="analysisSpeakerDiscoveryStatus" class="analysis-discovery-status" role="status" aria-live="polite">Choose source folders, then load source metadata.</p>
+            </section>
+
+            <section class="input-panel" aria-labelledby="analysisOrderTitle">
+              <h3 id="analysisOrderTitle">Order and automatic grouping</h3>
+              <p class="analysis-source-help">Enable sort fields in priority order. Use the arrow buttons to change that priority.</p>
+              <div id="analysisSortFields" class="analysis-profile-fields"></div>
+              <label for="analysisAutomaticGroupField">Automatically group remaining sources by</label>
+              <select id="analysisAutomaticGroupField">
+                <option value="">No metadata grouping</option>
+              </select>
+            </section>
+
+            <section class="input-panel" aria-labelledby="analysisFilterTitle">
+              <h3 id="analysisFilterTitle">Visible metadata values</h3>
+              <p class="analysis-source-help">Clear a value to leave those sources out of this Analysis run. The source files remain unchanged.</p>
+              <div id="analysisMetadataFilters" class="analysis-metadata-filters"></div>
+            </section>
+
+            <section id="analysisSpeakerPanel" class="analysis-speaker-panel" aria-labelledby="analysisGroupsTitle">
+              <div class="analysis-section-head">
+                <div>
+                  <h3 id="analysisGroupsTitle">Manual groups</h3>
+                  <p>Add a whole speaker or individual source. A source can appear in only one manual group; unassigned sources use automatic grouping. With Text enabled, keep all sources for one speaker together.</p>
+                </div>
+                <button id="addAnalysisSpeakerGroupButton" type="button" class="ghost-button" disabled>Add manual group</button>
+              </div>
+              <div id="analysisGroupWarningStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+              <div id="analysisSpeakerGroups" class="analysis-speaker-groups"></div>
+            </section>
+
+            <section class="input-panel analysis-profile-preview-panel" aria-labelledby="analysisPreviewTitle">
+              <h3 id="analysisPreviewTitle">Preview</h3>
+              <div id="analysisProfilePreview" class="analysis-profile-preview">Load source metadata to preview the output.</div>
+              <button id="saveAnalysisCustomizationButton" type="button" class="primary-wide">Use this customization</button>
+            </section>
           </div>
         </section>
 

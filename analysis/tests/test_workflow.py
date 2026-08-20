@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -450,6 +451,344 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(archived_metadata["workbook_sha256"], expected_workbook_hash)
         return payload
 
+    def _write_complete_fixed_output(self, *, include_profile: bool = True) -> tuple[bytes, bytes, bytes]:
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        workbook = self.output_root / "combined_analysis.xlsx"
+        profile = self.output_root / "analysis_profile.json"
+        manifest = self.output_root / "combined_analysis_manifest.json"
+        workbook.write_bytes(b"previous workbook")
+        if include_profile:
+            profile.write_bytes(b'{"profile":"previous"}\n')
+        payload = {
+            "status": "complete",
+            "started_at": "2026-08-20T10:00:00Z",
+            "workbook_path": str(workbook.resolve()),
+            **(
+                {"analysis_profile_path": str(profile.resolve())}
+                if include_profile
+                else {}
+            ),
+        }
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        return workbook.read_bytes(), profile.read_bytes() if include_profile else b"", manifest.read_bytes()
+
+    def test_archive_preflight_preserves_fixed_output_when_profile_copy_fails(self) -> None:
+        from analysis.workflow import _archive_fixed_outputs
+
+        before = self._write_complete_fixed_output()
+        real_copy = shutil.copyfile
+
+        def fail_open_profile(source: Path, destination: Path) -> None:
+            if Path(source).name == "analysis_profile.json":
+                raise PermissionError("profile is open")
+            real_copy(source, destination)
+
+        with patch("analysis.workflow._copy_archive_file", side_effect=fail_open_profile):
+            with self.assertRaisesRegex(PermissionError, "profile is open"):
+                _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+
+        self.assertEqual((self.output_root / "combined_analysis.xlsx").read_bytes(), before[0])
+        self.assertEqual((self.output_root / "analysis_profile.json").read_bytes(), before[1])
+        self.assertEqual((self.output_root / "combined_analysis_manifest.json").read_bytes(), before[2])
+        history = self.output_root / "combined_analysis_history"
+        self.assertFalse(history.exists() and any(history.iterdir()))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows open-file regression")
+    def test_archive_preflight_preserves_fixed_output_when_profile_is_open(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        from analysis.workflow import _archive_fixed_outputs
+
+        before = self._write_complete_fixed_output()
+        profile = self.output_root / "analysis_profile.json"
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(str(profile), 0x80000000, 0, None, 3, 0x80, None)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            self.skipTest("Could not open the profile with delete/read sharing disabled")
+        try:
+            with self.assertRaises(OSError):
+                _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+        self.assertEqual((self.output_root / "combined_analysis.xlsx").read_bytes(), before[0])
+        self.assertEqual(profile.read_bytes(), before[1])
+        self.assertEqual((self.output_root / "combined_analysis_manifest.json").read_bytes(), before[2])
+        history = self.output_root / "combined_analysis_history"
+        self.assertFalse(history.exists() and any(history.iterdir()))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows open-file regression")
+    def test_archive_cleanup_rolls_back_when_workbook_disallows_delete_sharing(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        from analysis.workflow import _archive_fixed_outputs
+
+        before = self._write_complete_fixed_output()
+        workbook = self.output_root / "combined_analysis.xlsx"
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(str(workbook), 0x80000000, 0x1, None, 3, 0x80, None)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            self.skipTest("Could not open the workbook with read sharing but delete sharing disabled")
+        try:
+            with self.assertRaises(OSError):
+                _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+        self.assertEqual(workbook.read_bytes(), before[0])
+        self.assertEqual((self.output_root / "analysis_profile.json").read_bytes(), before[1])
+        self.assertEqual((self.output_root / "combined_analysis_manifest.json").read_bytes(), before[2])
+        history = self.output_root / "combined_analysis_history"
+        self.assertFalse(history.exists() and any(history.iterdir()))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows open-file regression")
+    def test_archive_cleanup_rolls_back_after_workbook_move_when_profile_disallows_delete_sharing(
+        self,
+    ) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        from analysis.workflow import _archive_fixed_outputs
+
+        before = self._write_complete_fixed_output()
+        profile = self.output_root / "analysis_profile.json"
+        create_file = ctypes.windll.kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(str(profile), 0x80000000, 0x1, None, 3, 0x80, None)
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            self.skipTest("Could not open the profile with read sharing but delete sharing disabled")
+        try:
+            with self.assertRaises(OSError):
+                _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+        self.assertEqual((self.output_root / "combined_analysis.xlsx").read_bytes(), before[0])
+        self.assertEqual(profile.read_bytes(), before[1])
+        self.assertEqual((self.output_root / "combined_analysis_manifest.json").read_bytes(), before[2])
+        history = self.output_root / "combined_analysis_history"
+        self.assertFalse(history.exists() and any(history.iterdir()))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_archive_preflight_rejects_a_history_junction_redirect(self) -> None:
+        from analysis.workflow import WorkflowError, _archive_fixed_outputs
+
+        self._write_complete_fixed_output()
+        redirect = self.root / "redirect-target"
+        redirect.mkdir()
+        history = self.output_root / "combined_analysis_history"
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(history), str(redirect)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+
+        with self.assertRaisesRegex(WorkflowError, "reparse|junction"):
+            _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        self.assertEqual(tuple(redirect.iterdir()), ())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_archive_preflight_rejects_a_history_junction_without_fixed_outputs(self) -> None:
+        from analysis.workflow import WorkflowError, _archive_fixed_outputs
+
+        self.output_root.mkdir(parents=True)
+        redirect = self.root / "empty-redirect-target"
+        redirect.mkdir()
+        history = self.output_root / "combined_analysis_history"
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(history), str(redirect)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+
+        with self.assertRaisesRegex(WorkflowError, "reparse|junction"):
+            _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        self.assertEqual(tuple(redirect.iterdir()), ())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_workflow_rejects_an_output_root_junction_before_writing(self) -> None:
+        from analysis.workflow import WorkflowError, run_workflow
+
+        redirect = self.root / "output-redirect-target"
+        redirect.mkdir()
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(self.output_root), str(redirect)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+
+        with self.assertRaisesRegex(WorkflowError, "reparse|junction"):
+            run_workflow(self._request("import"))
+
+        self.assertEqual(tuple(redirect.iterdir()), ())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_workflow_rejects_an_output_parent_junction_before_creating_the_root(self) -> None:
+        from analysis.workflow import WorkflowError, run_workflow
+
+        redirect = self.root / "output-parent-redirect-target"
+        redirect.mkdir()
+        parent_junction = self.root / "output-parent-junction"
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(parent_junction), str(redirect)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+        self.output_root = parent_junction / "workflow-output"
+
+        with self.assertRaisesRegex(WorkflowError, "reparse|junction"):
+            run_workflow(self._request("import"))
+
+        self.assertEqual(tuple(redirect.iterdir()), ())
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_failed_workbook_archive_rechecks_the_preflighted_history_boundary(self) -> None:
+        from analysis.workflow import (
+            WorkflowError,
+            _archive_failed_workbook,
+            _archive_fixed_outputs,
+        )
+
+        self.output_root.mkdir(parents=True)
+        history = self.output_root / "combined_analysis_history"
+        _archive_fixed_outputs(self.output_root, "2026-08-20T11:00:00Z")
+        redirect = self.root / "late-redirect-target"
+        redirect.mkdir()
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(history), str(redirect)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+        workbook = self.output_root / "combined_analysis.xlsx"
+        workbook.write_bytes(b"partial workbook")
+
+        with self.assertRaisesRegex(WorkflowError, "reparse|junction"):
+            _archive_failed_workbook(
+                self.output_root,
+                "2026-08-20T11:00:00Z",
+                history,
+            )
+
+        self.assertEqual(workbook.read_bytes(), b"partial workbook")
+        self.assertEqual(tuple(redirect.iterdir()), ())
+
+    def test_failed_workflow_can_be_retried_without_manual_cleanup(self) -> None:
+        from analysis.workflow import WorkflowError, run_workflow
+
+        request = self._request("import", "import")
+
+        def fail_after_partial_output(*args, **kwargs):
+            destination = Path(args[1])
+            destination.write_bytes(b"partial workbook")
+            raise RuntimeError("deliberate first-run failure")
+
+        with patch("analysis.workflow.build_combined_workbook", side_effect=fail_after_partial_output):
+            with self.assertRaisesRegex(WorkflowError, "deliberate first-run failure"):
+                run_workflow(request)
+
+        failed_manifest = json.loads(
+            (self.output_root / "combined_analysis_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(failed_manifest["status"], "failed")
+
+        result = run_workflow(request)
+
+        self.assertTrue(result.workbook_path and result.workbook_path.is_file())
+        complete_manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(complete_manifest["status"], "complete")
+        quarantined = list(
+            (self.output_root / "combined_analysis_history").rglob(
+                "combined_analysis_manifest.json"
+            )
+        )
+        self.assertTrue(
+            any(json.loads(path.read_text(encoding="utf-8"))["status"] == "failed" for path in quarantined)
+        )
+
+    def test_failed_fixed_manifest_profile_and_partial_workbook_are_quarantined_together(
+        self,
+    ) -> None:
+        from analysis.workflow import _archive_fixed_outputs
+
+        before = self._write_complete_fixed_output()
+        manifest = self.output_root / "combined_analysis_manifest.json"
+        failed_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        failed_payload["status"] = "failed"
+        manifest.write_text(json.dumps(failed_payload), encoding="utf-8")
+
+        policy = _archive_fixed_outputs(
+            self.output_root,
+            "2026-08-20T11:00:00Z",
+        )
+
+        quarantine = Path(str(policy["quarantined_failed_directory"]))
+        self.assertEqual(
+            (quarantine / "combined_analysis.xlsx").read_bytes(),
+            before[0],
+        )
+        self.assertEqual(
+            (quarantine / "analysis_profile.json").read_bytes(),
+            before[1],
+        )
+        self.assertEqual(
+            json.loads((quarantine / "combined_analysis_manifest.json").read_text(encoding="utf-8"))[
+                "status"
+            ],
+            "failed",
+        )
+        self.assertFalse((self.output_root / "combined_analysis.xlsx").exists())
+        self.assertFalse((self.output_root / "analysis_profile.json").exists())
+        self.assertFalse(manifest.exists())
+
     @patch("analysis.workflow.add_probability_mirrors")
     @patch("analysis.workflow.analyse_audio_folder")
     @patch("analysis.workflow.analyse_imotions_folder")
@@ -609,7 +948,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("git_revision", manifest["software"])
         accepted = manifest["accepted_reports"][0]
         self.assertEqual(accepted["modality"], "audio")
-        self.assertEqual(accepted["normalized_speaker"], "andy_burnham")
+        self.assertEqual(accepted["normalized_speaker"], "andyburnham")
         self.assertEqual(accepted["display_speaker"], "Andy Burnham")
         self.assertEqual(accepted["reason"], "accepted speaker-level combined report")
         rejected_entry = next(item for item in manifest["rejected_reports"] if item["path"] == str(rejected.resolve()))
@@ -675,7 +1014,7 @@ class WorkflowTests(unittest.TestCase):
             / "combined"
             / "other_findings"
             / "descriptive_statistics.csv"
-            for speaker in ("Andy Burnham Copy", "Andy Burnham Second")
+            for speaker in ("Andy-Burnham", "Andy Burnham")
         )
         for candidate in ambiguous_paths:
             write_sectioned_report(candidate, AUDIO_METRICS)
@@ -1024,7 +1363,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
             details.cell(row, 1).value: row
             for row in range(2, details.max_row + 1)
         }
-        speaker_targets = ((4, "marine_le_pen"), (5, "andy_burnham"), (8, "nigel_farage"))
+        speaker_targets = ((4, "marinelepen"), (5, "andyburnham"), (8, "nigelfarage"))
         for modality, metrics in (("Audio", AUDIO_METRICS), ("Video", VIDEO_METRICS)):
             source = book[modality]
             mirror = book[f"{modality} Prob"]
@@ -1089,7 +1428,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
             for row in range(2, inputs.max_row + 1)
         }
         expected_keys: list[str] = []
-        speaker_targets = ("marine_le_pen", "andy_burnham", "nigel_farage")
+        speaker_targets = ("marinelepen", "andyburnham", "nigelfarage")
         configurations = (("Audio", AUDIO_METRICS), ("Video", VIDEO_METRICS))
         for source_name, metrics in configurations:
             for metric in metrics:
@@ -1350,9 +1689,9 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
             }
             for root, modality in ((self.video_root, "video"), (self.audio_root, "audio"))
             for speaker, speaker_id in (
-                ("Andy Burnham", "andy_burnham"),
-                ("Nigel Farage", "nigel_farage"),
-                ("Marine Le Pen", "marine_le_pen"),
+                ("Andy Burnham", "andyburnham"),
+                ("Marine Le Pen", "marinelepen"),
+                ("Nigel Farage", "nigelfarage"),
             )
         ]
         self.assertEqual(manifest["accepted_reports"], expected_reports)
@@ -1437,7 +1776,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
             source = book[modality]
             self.assertEqual(
                 [source[coordinate].value for coordinate in ("B1", "D1", "E1", "G1", "H1", "S1")],
-                ["Pair", "Le Pen", "Burnham", "Singleton", "Farrage", "Overall"],
+                ["Pair", "Marine Le Pen", "Andy Burnham", "Singleton", "Nigel Farage", "Overall"],
             )
 
             for metric_index, metric in enumerate(metrics, start=2):
@@ -1448,7 +1787,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
                 self.assertEqual(source.cell(metric_index, 5).value, expected_andy)
                 self.assertEqual(source.cell(metric_index, 8).value, expected_nigel)
 
-            marine_anger_row = detail_rows[f"{modality}|Anger|marine_le_pen"]
+            marine_anger_row = detail_rows[f"{modality}|Anger|marinelepen"]
             overall_anger_row = detail_rows[f"{modality}|Anger|overall"]
             overall_joy_row = detail_rows[f"{modality}|Joy|overall"]
             self.assertIn("'Inference Inputs'!C", details[f"B{marine_anger_row}"].value)

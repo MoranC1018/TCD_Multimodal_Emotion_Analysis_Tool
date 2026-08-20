@@ -467,9 +467,9 @@ class InferenceTests(unittest.TestCase):
             details[f"A{row}"].value: row
             for row in range(2, details.max_row + 1)
         }
-        uk_speaker_row = detail_rows["Video|Anger|andy_burnham"]
+        uk_speaker_row = detail_rows["Video|Anger|andyburnham"]
         overall_row = detail_rows["Video|Anger|overall"]
-        france_speaker_row = detail_rows["Video|Anger|marine_le_pen"]
+        france_speaker_row = detail_rows["Video|Anger|marinelepen"]
         self.assertEqual(
             book["Video Prob"]["D2"].value,
             f"='Inference Details'!M{uk_speaker_row}",
@@ -491,7 +491,7 @@ class InferenceTests(unittest.TestCase):
             for cell in row
             if cell.value is not None
         )
-        self.assertIn("per-video means", outline_text)
+        self.assertIn("per-source means", outline_text)
         self.assertIn("speaker means", outline_text)
         self.assertIn("Default reference", outline_text)
         self.assertIn("bounded nonnegative", outline_text)

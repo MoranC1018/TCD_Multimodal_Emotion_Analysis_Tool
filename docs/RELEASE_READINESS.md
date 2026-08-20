@@ -33,9 +33,10 @@ is not a diagnostic system.
   credentials without returning raw secrets to browser state.
 - Added CPU, NVIDIA GPU, and RAM controls with process-tree pause/resume,
   hysteresis, and sustained-RAM-pressure termination.
-- Replaced the former generic shield graphic with institutional identification.
-  Branding and trademark permissions are outside the project MIT License and
-  must be verified independently before redistribution.
+- Restored the official Trinity College Dublin horizontal mark on the home
+  screen after the project confirmed that this official tool is authorised to
+  use it. The original shield assets are used for the browser and native app
+  icons; none of the supplied identity artwork is redrawn or modified.
 - Renamed the analysis output from
   `descriptor_statistics.csv` to `descriptive_statistics.csv`; stale legacy
   files are removed on rerun.
@@ -210,8 +211,8 @@ playhead, and long-segment acceptance.
 ## Affiliation And Branding Boundary
 
 The project affiliation is the School of Computer Science, Trinity College
-Dublin, the University of Dublin. Institutional names, logos, and marks are not
-licensed by the root MIT License. Their inclusion does not establish permission
-for reuse and does not imply institutional endorsement of research findings.
-Confirm the applicable permission and current identity guidance before public
-release packaging.
+Dublin, the University of Dublin. Project authority has confirmed use of the
+supplied Trinity identity assets for this official tool. Institutional names,
+logos, and marks are not licensed by the root MIT License, so downstream forks
+must obtain their own permission before reusing them. Their inclusion does not
+imply institutional endorsement of research findings produced with the tool.

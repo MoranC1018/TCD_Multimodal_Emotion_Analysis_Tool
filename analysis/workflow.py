@@ -8,12 +8,14 @@ import json
 import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Callable, Literal, Mapping, Sequence
 
 from analysis.audio import analyse_audio_folder
 from analysis.combined_summary import (
@@ -25,6 +27,18 @@ from analysis.combined_summary import (
 )
 from analysis.imotions import analyse_imotions_folder
 from analysis.inference import ReferenceResolution, add_probability_mirrors
+from analysis.metadata import (
+    load_source_metadata,
+    resolve_analysis_profile,
+    validate_source_manifest_associations,
+    validate_text_profile_grouping,
+)
+from analysis.profile import (
+    AnalysisProfile,
+    profile_from_payload,
+    profile_payload,
+    write_analysis_profile,
+)
 from analysis.text_results import TextResultsError, discover_text_results
 from analysis import __version__
 from procurement.input_limits import (
@@ -69,6 +83,7 @@ class WorkflowRequest:
     headline_policy: Literal["weighted", "equal"] = "weighted"
     default_reference: float = 0.0
     reference_overrides: Mapping[str, float] = field(default_factory=dict)
+    analysis_profile: AnalysisProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +93,7 @@ class WorkflowResult:
     manifest_path: Path
     modality_roots: Mapping[str, Path]
     warnings: tuple[str, ...]
+    analysis_profile_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -97,8 +113,11 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
     """Run requested modalities in a fixed order, then build one combined workbook."""
 
     requested = _validate_request(request)
-    output_root = Path(request.output_root).expanduser().resolve()
+    output_root = Path(os.path.abspath(Path(request.output_root).expanduser()))
+    _require_path_components_no_reparse(output_root, "Analysis output root")
     output_root.mkdir(parents=True, exist_ok=True)
+    _require_no_reparse(output_root, "Analysis output root")
+    history = output_root / "combined_analysis_history"
     manifest_path = output_root / "combined_analysis_manifest.json"
     started_at = _timestamp()
     modality_roots: dict[str, Path] = {}
@@ -108,6 +127,7 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
     sources_by_modality = {}
     text_summaries = ()
     workbook_path: Path | None = None
+    analysis_profile_path: Path | None = None
     reference_resolutions: tuple[ReferenceResolution, ...] = ()
     current_stage = "initialization"
     stale_artifact_policy: dict[str, object] = {
@@ -116,10 +136,15 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
         "archived_previous_workbook": None,
         "archived_previous_manifest": None,
         "archived_previous_workbook_sha256": None,
+        "archived_previous_profile": None,
     }
+    archive_preflight_complete = False
 
     try:
         stale_artifact_policy = _archive_fixed_outputs(output_root, started_at)
+        archive_preflight_complete = True
+        if request.analysis_profile is not None:
+            analysis_profile_path = write_analysis_profile(request.analysis_profile, output_root)
         for name, combined_name, label in _MODALITIES:
             modality = requested.get(name)
             if modality is None:
@@ -165,8 +190,9 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
                 workbook_result = build_combined_workbook(
                     sources_by_modality,
                     output_root / "combined_analysis.xlsx",
-                    speaker_groups=request.speaker_groups,
                     headline_policy=request.headline_policy,
+                    analysis_profile=request.analysis_profile,
+                    speaker_groups=None if request.analysis_profile is not None else request.speaker_groups,
                     include_construct_comparison=request.include_construct_comparison,
                     text_summaries=text_summaries,
                 )
@@ -191,7 +217,14 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
             _emit(progress, "Completed combined workbook")
         current_stage = "complete"
 
-        result = WorkflowResult(output_root, workbook_path, manifest_path, dict(modality_roots), tuple(warnings))
+        result = WorkflowResult(
+            output_root,
+            workbook_path,
+            manifest_path,
+            dict(modality_roots),
+            tuple(warnings),
+            analysis_profile_path,
+        )
         _write_manifest(
             manifest_path,
             status="complete",
@@ -208,9 +241,14 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
         return result
     except Exception as exc:
         error = _sanitize_error(exc)
+        if not archive_preflight_complete:
+            raise WorkflowError(
+                f"Archive preflight failed: {error}", stage="initialization"
+            ) from exc
         stale_artifact_policy["archived_failed_workbook"] = _archive_failed_workbook(
             output_root,
             started_at,
+            history,
         )
         _write_manifest(
             manifest_path,
@@ -234,10 +272,28 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
 
 def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
     modalities = tuple(request.modalities)
+    profile_metadata = None
+    resolved_profile = None
     if not modalities:
         raise WorkflowError("At least one Video / iMotions, Audio, or Text modality is required")
-    if request.write_combined_workbook and not request.speaker_groups:
-        raise WorkflowError("At least one speaker group is required for a combined workbook")
+    if request.write_combined_workbook and not request.speaker_groups and request.analysis_profile is None:
+        raise WorkflowError("A profile or at least one speaker group is required for a combined workbook")
+    if request.analysis_profile is not None:
+        if request.speaker_groups:
+            raise WorkflowError("Use either an Analysis profile or legacy speaker groups, not both")
+        if not request.write_combined_workbook:
+            raise WorkflowError("An Analysis profile requires the combined workbook")
+        try:
+            profile_metadata = load_source_metadata(
+                request.analysis_profile.source_manifest,
+                expected_sha256=request.analysis_profile.source_manifest_sha256,
+            )
+            resolved_profile = resolve_analysis_profile(
+                profile_metadata,
+                request.analysis_profile,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise WorkflowError(f"Analysis profile source manifest is invalid: {exc}") from exc
     if request.headline_policy not in {"weighted", "equal"}:
         raise WorkflowError("Headline policy must be weighted or equal")
     try:
@@ -275,12 +331,29 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
             raise WorkflowError(f"{modality.name} source folder does not exist: {source}")
         requested[modality.name] = modality
 
-    output_root = Path(request.output_root).expanduser().resolve()
+    output_root = Path(os.path.abspath(Path(request.output_root).expanduser()))
     for modality in requested.values():
         source = Path(modality.source_path).expanduser().resolve()
         if modality.source_method == "import":
             if _is_within(output_root, source):
                 raise WorkflowError("Output root must not be inside an imported report folder")
+    if request.analysis_profile is not None:
+        try:
+            validate_source_manifest_associations(
+                tuple(modality.source_path for modality in requested.values()),
+                request.analysis_profile.source_manifest,
+                request.analysis_profile.source_manifest_sha256,
+            )
+        except (OSError, ValueError) as exc:
+            raise WorkflowError(
+                "Analysis profile source manifest is not associated with the selected "
+                "modality folders"
+            ) from exc
+        if "text" in requested:
+            try:
+                validate_text_profile_grouping(profile_metadata, resolved_profile)
+            except ValueError as exc:
+                raise WorkflowError(str(exc)) from exc
     return requested
 
 
@@ -375,11 +448,21 @@ def _write_manifest(
             "headline_policy": request.headline_policy,
             "default_reference": request.default_reference,
             "reference_overrides": dict(request.reference_overrides),
+            **(
+                {"analysis_profile": profile_payload(request.analysis_profile)}
+                if request.analysis_profile is not None
+                else {}
+            ),
         },
         "modality_roots": {name: str(root) for name, root in modality_roots.items()},
         "accepted_reports": [_discovery_payload(entry) for entry in accepted_reports],
         "rejected_reports": [_discovery_payload(entry) for entry in rejected_reports],
         "workbook_path": str(workbook_path) if workbook_path else None,
+        **(
+            {"analysis_profile_path": str(path.parent / "analysis_profile.json")}
+            if request.analysis_profile is not None
+            else {}
+        ),
         "warnings": warnings,
         "reference_resolutions": [
             {
@@ -404,79 +487,314 @@ def _timestamp() -> str:
 
 
 def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, object]:
-    """Move a prior fixed-name result into one self-contained history directory."""
+    """Stage and verify a complete prior result before changing fixed paths."""
 
+    output_root = Path(os.path.abspath(Path(output_root).expanduser()))
+    history = _validated_history_directory(output_root)
     workbook = output_root / "combined_analysis.xlsx"
     manifest = output_root / "combined_analysis_manifest.json"
+    profile = output_root / "analysis_profile.json"
     result: dict[str, object] = {
         "policy": "archive_fixed_outputs_before_run",
         "archive_directory": None,
         "archived_previous_workbook": None,
         "archived_previous_manifest": None,
         "archived_previous_workbook_sha256": None,
+        "archived_previous_profile": None,
+        "quarantined_failed_directory": None,
+        "quarantined_failed_workbook": None,
+        "quarantined_failed_manifest": None,
+        "quarantined_failed_profile": None,
     }
-    if not workbook.exists() and not manifest.exists():
+    if not workbook.exists() and not manifest.exists() and not profile.exists():
         return result
+    history = _validated_history_directory(output_root, history, create=True)
 
-    previous_manifest: dict[str, object] | None = None
-    if manifest.exists():
-        try:
-            loaded = read_control_json(
-                manifest,
-                label="workflow manifest",
-                max_bytes=MAX_WORKFLOW_MANIFEST_JSON_BYTES,
-                max_items=MAX_WORKFLOW_MANIFEST_JSON_ITEMS,
-            )
-        except (OSError, json.JSONDecodeError):
-            loaded = None
-        if isinstance(loaded, dict):
-            previous_manifest = loaded
+    for path in (workbook, manifest, profile):
+        if path.exists():
+            _require_regular_archive_file(path)
+    if not manifest.exists():
+        raise WorkflowError(
+            "A prior Analysis result must contain both combined_analysis.xlsx and its manifest."
+        )
+    try:
+        loaded = read_control_json(
+            manifest,
+            label="workflow manifest",
+            max_bytes=MAX_WORKFLOW_MANIFEST_JSON_BYTES,
+            max_items=MAX_WORKFLOW_MANIFEST_JSON_ITEMS,
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError("The prior Analysis manifest cannot be archived safely.") from exc
+    if not isinstance(loaded, dict) or loaded.get("status") not in {"complete", "failed"}:
+        raise WorkflowError("The prior Analysis manifest has an unsupported status.")
+    if loaded.get("status") == "failed":
+        return _quarantine_failed_fixed_outputs(
+            history,
+            started_at,
+            workbook=workbook,
+            manifest=manifest,
+            profile=profile,
+            result=result,
+            previous_manifest=loaded,
+        )
+    if not workbook.exists():
+        raise WorkflowError(
+            "A prior Analysis result must contain both combined_analysis.xlsx and its manifest."
+        )
+    previous_manifest = dict(loaded)
+    recorded_workbook = Path(
+        str(previous_manifest.get("workbook_path") or "")
+    ).expanduser().resolve()
+    if recorded_workbook != workbook.resolve():
+        raise WorkflowError("The prior Analysis manifest does not identify the fixed workbook.")
+    profile_expected = "analysis_profile_path" in previous_manifest
+    if profile_expected != profile.exists():
+        raise WorkflowError("The prior Analysis profile and manifest are incomplete.")
+    if profile_expected and (
+        Path(str(previous_manifest["analysis_profile_path"])).expanduser().resolve()
+        != profile.resolve()
+    ):
+        raise WorkflowError("The prior Analysis manifest does not identify the fixed profile.")
 
-    history = output_root / "combined_analysis_history"
-    history.mkdir(parents=True, exist_ok=True)
     previous_started_at = (
         str(previous_manifest.get("started_at"))
-        if previous_manifest and previous_manifest.get("started_at")
+        if previous_manifest.get("started_at")
         else started_at
     )
     run_stamp = re.sub(r"[^0-9]", "", previous_started_at)[:20] or "unknown"
-    archive_directory = history / f"run_{run_stamp}"
-    suffix = 2
-    while archive_directory.exists():
-        archive_directory = history / f"run_{run_stamp}_{suffix}"
-        suffix += 1
-    archive_directory.mkdir()
-    result["archive_directory"] = str(archive_directory.resolve())
+    archive_directory = _unused_history_path(history, f"run_{run_stamp}")
+    staging = _unused_history_path(
+        history,
+        f".{archive_directory.name}.staging-{os.getpid()}",
+    )
+    staging.mkdir()
+    _require_no_reparse(staging, "Analysis history staging directory")
 
     archived_workbook = archive_directory / workbook.name
+    archived_profile = archive_directory / profile.name
+    archived_manifest = archive_directory / manifest.name
+    staged_workbook = staging / workbook.name
+    staged_profile = staging / profile.name
+    staged_manifest = staging / manifest.name
     workbook_hash: str | None = None
-    if workbook.exists():
+    profile_hash: str | None = None
+    committed = False
+    try:
         workbook_hash = _file_sha256(workbook)
-        os.replace(workbook, archived_workbook)
-        result["archived_previous_workbook"] = str(archived_workbook.resolve())
-        result["archived_previous_workbook_sha256"] = workbook_hash
+        profile_hash = _file_sha256(profile) if profile_expected else None
+        _copy_archive_file(workbook, staged_workbook)
+        if _file_sha256(staged_workbook) != workbook_hash:
+            raise WorkflowError("Staged Analysis workbook verification failed.")
+        if profile_expected:
+            _copy_archive_file(profile, staged_profile)
+            if _file_sha256(staged_profile) != profile_hash:
+                raise WorkflowError("Staged Analysis profile verification failed.")
 
-    if manifest.exists():
-        archived_manifest = archive_directory / manifest.name
-        os.replace(manifest, archived_manifest)
-        if previous_manifest is not None:
-            previous_manifest["workbook_path"] = (
-                str(archived_workbook.resolve()) if archived_workbook.exists() else None
+        previous_manifest["workbook_path"] = str(archived_workbook.resolve())
+        if profile_expected:
+            previous_manifest["analysis_profile_path"] = str(archived_profile.resolve())
+        archive_metadata: dict[str, object] = {
+            "archived_at": started_at,
+            "archive_directory": str(archive_directory.resolve()),
+            "original_workbook_path": str(workbook.resolve()),
+            "workbook_sha256": workbook_hash,
+        }
+        if profile_hash is not None:
+            archive_metadata.update(
+                {
+                    "original_analysis_profile_path": str(profile.resolve()),
+                    "analysis_profile_sha256": profile_hash,
+                }
             )
-            previous_manifest["archive"] = {
-                "archived_at": started_at,
-                "archive_directory": str(archive_directory.resolve()),
-                "original_workbook_path": str(workbook.resolve()),
-                "workbook_sha256": workbook_hash,
-            }
-            temporary = archived_manifest.with_name(f".{archived_manifest.name}.tmp")
-            temporary.write_text(
-                json.dumps(previous_manifest, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, archived_manifest)
-        result["archived_previous_manifest"] = str(archived_manifest.resolve())
+        previous_manifest["archive"] = archive_metadata
+        staged_manifest.write_text(
+            json.dumps(previous_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        verified_manifest = read_control_json(
+            staged_manifest,
+            label="staged workflow manifest",
+            max_bytes=MAX_WORKFLOW_MANIFEST_JSON_BYTES,
+            max_items=MAX_WORKFLOW_MANIFEST_JSON_ITEMS,
+        )
+        if (
+            not isinstance(verified_manifest, dict)
+            or verified_manifest.get("archive") != archive_metadata
+        ):
+            raise WorkflowError("Staged Analysis manifest verification failed.")
+
+        os.replace(staging, archive_directory)
+        committed = True
+    finally:
+        if not committed and staging.exists():
+            shutil.rmtree(staging)
+
+    if workbook_hash is None:
+        raise WorkflowError("Staged Analysis workbook verification failed.")
+
+    # The verified archive is durable before the fixed trio changes. Move the
+    # whole trio into one retirement directory with rollback so a Windows
+    # delete-sharing lock cannot split the root result.
+    retirement = _unused_history_path(
+        history,
+        f".{archive_directory.name}.retiring-{os.getpid()}",
+    )
+    retirement.mkdir()
+    _require_no_reparse(retirement, "Analysis history retirement directory")
+    fixed_moves = [(workbook, retirement / workbook.name)]
+    if profile_expected:
+        fixed_moves.append((profile, retirement / profile.name))
+    fixed_moves.append((manifest, retirement / manifest.name))
+    try:
+        _move_files_with_rollback(fixed_moves)
+    except Exception:
+        if retirement.exists():
+            shutil.rmtree(retirement)
+        if archive_directory.exists():
+            shutil.rmtree(archive_directory)
+        raise
+    try:
+        shutil.rmtree(retirement)
+    except OSError:
+        result["retained_originals_directory"] = str(retirement)
+
+    result["archive_directory"] = str(archive_directory.resolve())
+    result["archived_previous_workbook"] = str(archived_workbook.resolve())
+    result["archived_previous_workbook_sha256"] = workbook_hash
+    result["archived_previous_manifest"] = str(archived_manifest.resolve())
+    if profile_expected:
+        result["archived_previous_profile"] = str(archived_profile.resolve())
     return result
+
+
+def _quarantine_failed_fixed_outputs(
+    history: Path,
+    started_at: str,
+    *,
+    workbook: Path,
+    manifest: Path,
+    profile: Path,
+    result: dict[str, object],
+    previous_manifest: Mapping[str, object],
+) -> dict[str, object]:
+    """Move a failed fixed state aside as one rollback-safe set for retry."""
+
+    previous_started_at = str(previous_manifest.get("started_at") or started_at)
+    run_stamp = re.sub(r"[^0-9]", "", previous_started_at)[:20] or "unknown"
+    quarantine = _unused_history_path(history, f"failed_run_{run_stamp}")
+    quarantine.mkdir()
+    _require_no_reparse(quarantine, "Failed Analysis quarantine directory")
+    existing = tuple(path for path in (workbook, profile, manifest) if path.exists())
+    moves = tuple((path, quarantine / path.name) for path in existing)
+    try:
+        _move_files_with_rollback(moves)
+    except Exception:
+        if quarantine.exists():
+            shutil.rmtree(quarantine)
+        raise
+    result["quarantined_failed_directory"] = str(quarantine)
+    if workbook in existing:
+        result["quarantined_failed_workbook"] = str(quarantine / workbook.name)
+    if manifest in existing:
+        result["quarantined_failed_manifest"] = str(quarantine / manifest.name)
+    if profile in existing:
+        result["quarantined_failed_profile"] = str(quarantine / profile.name)
+    return result
+
+
+def _validated_history_directory(
+    output_root: Path,
+    expected: Path | None = None,
+    *,
+    create: bool = False,
+) -> Path:
+    """Return the lexical in-root history directory after reparse checks."""
+
+    output_root = Path(os.path.abspath(Path(output_root).expanduser()))
+    _require_no_reparse(output_root, "Analysis output root")
+    history = output_root / "combined_analysis_history"
+    if expected is not None and Path(os.path.abspath(expected)) != history:
+        raise WorkflowError("Analysis history directory does not match the validated output root.")
+    if history.exists():
+        _require_no_reparse(history, "Analysis history directory")
+    elif create:
+        history.mkdir()
+        _require_no_reparse(history, "Analysis history directory")
+    return history
+
+
+def _unused_history_path(history: Path, base_name: str) -> Path:
+    candidate = history / base_name
+    suffix = 2
+    while candidate.exists():
+        if _is_reparse_point(candidate):
+            raise WorkflowError(f"Analysis history entry is a junction or reparse point: {candidate.name}")
+        candidate = history / f"{base_name}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _move_files_with_rollback(moves: Sequence[tuple[Path, Path]]) -> None:
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source, destination in moves:
+            os.replace(source, destination)
+            moved.append((source, destination))
+    except Exception as exc:
+        rollback_error: OSError | None = None
+        for source, destination in reversed(moved):
+            try:
+                os.replace(destination, source)
+            except OSError as rollback_exc:
+                rollback_error = rollback_exc
+        if rollback_error is not None:
+            raise WorkflowError(
+                "Analysis fixed-output cleanup failed and could not restore the prior complete set."
+            ) from rollback_error
+        raise exc
+
+
+def _copy_archive_file(source: Path, destination: Path) -> None:
+    """Copy one preflight-validated artifact into the private staging directory."""
+
+    shutil.copyfile(source, destination)
+
+
+def _require_regular_archive_file(path: Path) -> None:
+    if _is_reparse_point(path) or not path.is_file():
+        raise WorkflowError(f"Analysis archive source must be a regular non-reparse file: {path.name}")
+
+
+def _require_no_reparse(path: Path, label: str) -> None:
+    lexical = Path(os.path.abspath(path))
+    _require_path_components_no_reparse(lexical, label)
+    if not lexical.is_dir():
+        raise WorkflowError(f"{label} must be a regular directory without junctions or reparse points.")
+
+
+def _require_path_components_no_reparse(path: Path, label: str) -> None:
+    """Reject a reparse point in an existing or not-yet-created path boundary."""
+
+    lexical = Path(os.path.abspath(path))
+    for component in (lexical, *lexical.parents):
+        if _is_reparse_point(component):
+            raise WorkflowError(
+                f"{label} must not pass through a junction or reparse point: {component}"
+            )
+
+
+def _is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction) and is_junction():
+        return True
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
 def _file_sha256(path: Path) -> str:
@@ -487,18 +805,25 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _archive_failed_workbook(output_root: Path, started_at: str) -> str | None:
+def _archive_failed_workbook(
+    output_root: Path,
+    started_at: str,
+    history: Path | None = None,
+) -> str | None:
     """Move a partial workbook out of the fixed success location after failure."""
 
+    output_root = Path(os.path.abspath(Path(output_root).expanduser()))
+    history = _validated_history_directory(output_root, history, create=True)
     workbook = output_root / "combined_analysis.xlsx"
     if not workbook.exists():
         return None
-    history = output_root / "combined_analysis_history"
-    history.mkdir(parents=True, exist_ok=True)
+    _require_regular_archive_file(workbook)
     run_stamp = re.sub(r"[^0-9]", "", started_at)[:20]
     destination = history / f"combined_analysis_failed_{run_stamp}.xlsx"
     suffix = 2
     while destination.exists():
+        if _is_reparse_point(destination):
+            raise WorkflowError("Failed-workbook history entry is a junction or reparse point.")
         destination = history / f"combined_analysis_failed_{run_stamp}_{suffix}.xlsx"
         suffix += 1
     os.replace(workbook, destination)
@@ -634,6 +959,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--default-reference", default="0.0")
     parser.add_argument("--reference-overrides-json", default="{}")
     parser.add_argument("--speaker-groups-json", default="[]")
+    parser.add_argument("--analysis-profile-json", default="")
     parser.add_argument("--no-graphs", action="store_true")
     parser.add_argument("--logscale", action="store_true")
     parser.add_argument("--include-landmarks", action="store_true")
@@ -675,6 +1001,13 @@ def main(argv: list[str] | None = None) -> int:
             headline_policy=args.headline_policy,
             default_reference=_finite_cli_number(args.default_reference, "--default-reference"),
             reference_overrides=_mapping_from_json(args.reference_overrides_json),
+            analysis_profile=(
+                profile_from_payload(
+                    _parse_json(args.analysis_profile_json, "--analysis-profile-json")
+                )
+                if args.analysis_profile_json
+                else None
+            ),
         )
         run_workflow(request)
     except Exception as exc:

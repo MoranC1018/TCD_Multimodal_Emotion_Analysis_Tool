@@ -4,7 +4,7 @@ const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
 
-const sourcePath = process.argv[1] || process.argv[2];
+const sourcePath = process.argv[2] || process.argv[1];
 if (!sourcePath) {
   throw new Error("Pass the production app.js path to this harness.");
 }
@@ -32,6 +32,10 @@ vm.runInContext(`${logic}\nthis.analysisTestApi = {
   invalidateAnalysisAsyncOperation,
   finishAnalysisAsyncOperation,
   buildAnalysisWorkflowRequest,
+  createAnalysisProfileDraft,
+  analysisProfileIssues,
+  buildAnalysisProfilePayload,
+  resolveAnalysisProfilePreview,
 };`, context);
 
 const {
@@ -47,7 +51,106 @@ const {
   invalidateAnalysisAsyncOperation,
   finishAnalysisAsyncOperation,
   buildAnalysisWorkflowRequest,
+  createAnalysisProfileDraft,
+  analysisProfileIssues,
+  buildAnalysisProfilePayload,
+  resolveAnalysisProfilePreview,
 } = context.analysisTestApi;
+
+const profileContext = {
+  sourceManifest: "C:\\run\\source_manifest.json",
+  sourceManifestSha256: "a".repeat(64),
+  metadataFields: [
+    { name: "Country", values: ["Ireland", "Japan"] },
+    { name: "Wave", values: ["First", "Second"] },
+  ],
+  speakers: [
+    { id: "researcher-alpha", name: "Researcher Alpha", sourceIds: ["source-0001", "source-0002"] },
+    { id: "researcher-beta", name: "Researcher Beta", sourceIds: ["source-0003"] },
+  ],
+  sources: [
+    { id: "source-0001", title: "First", speakerId: "researcher-alpha", speaker: "Researcher Alpha", metadata: { Country: "Japan", Wave: "Second" } },
+    { id: "source-0002", title: "Second", speakerId: "researcher-alpha", speaker: "Researcher Alpha", metadata: { Country: "Ireland", Wave: "First" } },
+    { id: "source-0003", title: "Third", speakerId: "researcher-beta", speaker: "Researcher Beta", metadata: { Country: "Ireland", Wave: "Second" } },
+  ],
+};
+const profileDraft = createAnalysisProfileDraft(profileContext);
+profileDraft.sortFields = ["Country", "Wave"];
+profileDraft.automaticGroupField = "Country";
+profileDraft.manualGroups = [
+  { id: "manual-1", name: "Interview set", members: [
+    { type: "speaker", id: "researcher-alpha" },
+    { type: "source", id: "source-0003" },
+  ] },
+];
+assert.deepStrictEqual(Array.from(analysisProfileIssues(profileContext, profileDraft)), []);
+const profilePayload = buildAnalysisProfilePayload(profileContext, profileDraft);
+assert.deepStrictEqual(Array.from(profilePayload.sort_fields), ["Country", "Wave"]);
+assert.strictEqual(profilePayload.automatic_group_field, "Country");
+assert.strictEqual(profilePayload.manual_groups[0].members[0].type, "speaker");
+const preview = resolveAnalysisProfilePreview(profileContext, profileDraft);
+assert.deepStrictEqual(Array.from(preview.orderedSourceIds), ["source-0002", "source-0003", "source-0001"]);
+assert.strictEqual(preview.groups[0].sourceIds.length, 3);
+const duplicateDraft = createAnalysisProfileDraft(profileContext);
+duplicateDraft.manualGroups = [
+  { id: "one", name: "One", members: [{ type: "speaker", id: "researcher-alpha" }] },
+  { id: "two", name: "Two", members: [{ type: "source", id: "source-0002" }] },
+];
+assert.ok(analysisProfileIssues(profileContext, duplicateDraft).some((message) => message.includes("source-0002") && message.includes("more than one")));
+const automaticTextSplitDraft = createAnalysisProfileDraft(profileContext);
+automaticTextSplitDraft.automaticGroupField = "Country";
+assert.ok(
+  analysisProfileIssues(profileContext, automaticTextSplitDraft, true)
+    .some((message) => message.includes("Text is speaker-level") && message.includes("Researcher Alpha")),
+);
+assert.deepStrictEqual(
+  Array.from(analysisProfileIssues(profileContext, automaticTextSplitDraft, false)),
+  [],
+  "Source-level automatic grouping remains valid when Text is disabled.",
+);
+const manualTextSplitDraft = createAnalysisProfileDraft(profileContext);
+manualTextSplitDraft.manualGroups = [
+  { id: "first-video", name: "First video", members: [{ type: "source", id: "source-0001" }] },
+];
+assert.ok(
+  analysisProfileIssues(profileContext, manualTextSplitDraft, true)
+    .some((message) => message.includes("Text is speaker-level") && message.includes("Researcher Alpha")),
+);
+const hiddenMemberDraft = createAnalysisProfileDraft(profileContext);
+hiddenMemberDraft.metadataFilters.Country = ["Ireland"];
+hiddenMemberDraft.manualGroups = [
+  { id: "hidden", name: "Hidden", members: [{ type: "source", id: "source-0001" }] },
+];
+assert.ok(analysisProfileIssues(profileContext, hiddenMemberDraft).some((message) => message.includes("unknown source") && message.includes("source-0001")));
+const blankMetadataContext = {
+  ...profileContext,
+  metadataFields: [...profileContext.metadataFields, { name: "Optional note", values: [] }],
+};
+const blankMetadataDraft = createAnalysisProfileDraft(blankMetadataContext);
+assert.deepStrictEqual(
+  Array.from(analysisProfileIssues(blankMetadataContext, blankMetadataDraft)),
+  [],
+  "An entirely blank optional metadata column must not block the default profile.",
+);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(buildAnalysisProfilePayload(blankMetadataContext, blankMetadataDraft).metadata_filters)),
+  {},
+);
+const exactValueContext = {
+  ...profileContext,
+  metadataFields: [{ name: "Country", values: ["ireland", "Ireland"] }],
+  sources: [
+    { ...profileContext.sources[0], metadata: { Country: "ireland" } },
+    { ...profileContext.sources[1], metadata: { Country: "Ireland" } },
+  ],
+  speakers: [{ id: "researcher-alpha", name: "Researcher Alpha", sourceIds: ["source-0001", "source-0002"] }],
+};
+const exactValueDraft = createAnalysisProfileDraft(exactValueContext);
+exactValueDraft.sortFields = ["Country"];
+exactValueDraft.automaticGroupField = "Country";
+const exactValuePreview = resolveAnalysisProfilePreview(exactValueContext, exactValueDraft);
+assert.deepStrictEqual(Array.from(exactValuePreview.orderedSourceIds), ["source-0002", "source-0001"]);
+assert.deepStrictEqual(Array.from(exactValuePreview.groups, (group) => group.name), ["Ireland", "ireland"]);
 
 const speakers = [
   { key: "speaker_a", name: "Speaker A" },
@@ -91,10 +194,27 @@ const workbookOnReasons = Array.from(analysisRunGateReasons({
   defaultReferenceText: "not-a-number",
   referenceOverridesText: '{"bad": false}',
 }));
-assert.ok(workbookOnReasons.some((message) => message.includes("Discover speakers")));
+assert.ok(workbookOnReasons.some((message) => message.includes("Load source metadata")));
 assert.ok(workbookOnReasons.some((message) => message.includes("Unassigned")));
 assert.ok(workbookOnReasons.some((message) => message.includes("Default reference")));
 assert.ok(workbookOnReasons.some((message) => message.includes("JSON numbers")));
+
+const textSplitModalities = [
+  importModality[0],
+  { name: "text", sourceMethod: "import", sourcePath: "C:\\text-results" },
+];
+const textSplitReasons = Array.from(analysisRunGateReasons({
+  modalities: textSplitModalities,
+  outputRoot: "C:\\output",
+  writeCombinedWorkbook: true,
+  discoverySignature: "current",
+  currentSignature: "current",
+  profileContext,
+  profileDraft: automaticTextSplitDraft,
+  defaultReferenceText: "0",
+  referenceOverridesText: "{}",
+}));
+assert.ok(textSplitReasons.some((message) => message.includes("Text is speaker-level")));
 
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(resolveAnalysisHydration("C:\\old", "C:\\new", true))),
@@ -185,5 +305,22 @@ assert.strictEqual(mixedRequest.includeLogscale, true);
 assert.strictEqual(mixedRequest.speakerGroups.length, 1);
 assert.strictEqual(mixedRequest.modalities[2].name, "text");
 assert.strictEqual(mixedRequest.modalities[2].sourceMethod, "import");
+
+const profiledRequest = buildAnalysisWorkflowRequest({
+  modalities: importModality,
+  outputRoot: "C:\\output",
+  writeCombinedWorkbook: true,
+  defaultReference: 0,
+  referenceOverrides: {},
+  speakerGroups: incompleteGroups,
+  analysisProfile: profilePayload,
+  writeGraphs: false,
+  includeLogscale: false,
+  includeLandmarks: false,
+  includeTiming: false,
+  excludeGeometry: false,
+});
+assert.deepStrictEqual(Array.from(profiledRequest.speakerGroups), []);
+assert.strictEqual(profiledRequest.analysisProfile.source_manifest.sha256, "a".repeat(64));
 
 console.log("analysis UI behavior checks passed");

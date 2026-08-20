@@ -85,6 +85,7 @@ function contentType(filePath) {
   if (filePath.endsWith(".html")) return "text/html; charset=utf-8";
   if (filePath.endsWith(".js")) return "text/javascript; charset=utf-8";
   if (filePath.endsWith(".css")) return "text/css; charset=utf-8";
+  if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
   if (filePath.endsWith(".png")) return "image/png";
   if (filePath.endsWith(".ico")) return "image/x-icon";
   return "application/octet-stream";
@@ -109,6 +110,38 @@ function speakerPayload(prefix = "Speaker") {
   };
 }
 
+function profileContextPayload(prefix = "Researcher") {
+  return {
+    sourceManifest: "C:\\run\\source_manifest.json",
+    sourceManifestSha256: "a".repeat(64),
+    metadataFields: [
+      { name: "Country", values: ["Ireland", "Japan"] },
+      { name: "Wave", values: ["First", "Second"] },
+    ],
+    speakers: [
+      { id: `${prefix.toLowerCase()}_a`, name: `${prefix} A`, sourceIds: ["source-0001"] },
+      { id: `${prefix.toLowerCase()}_b`, name: `${prefix} B`, sourceIds: ["source-0002"] },
+    ],
+    sources: [
+      { id: "source-0001", title: `${prefix} interview A`, speakerId: `${prefix.toLowerCase()}_a`, speaker: `${prefix} A`, metadata: { Country: "Ireland", Wave: "First" } },
+      { id: "source-0002", title: `${prefix} interview B`, speakerId: `${prefix.toLowerCase()}_b`, speaker: `${prefix} B`, metadata: { Country: "Japan", Wave: "Second" } },
+    ],
+  };
+}
+
+function sharedSpeakerProfileContext() {
+  const payload = profileContextPayload("Researcher");
+  payload.speakers = [
+    { id: "researcher_a", name: "Researcher A", sourceIds: ["source-0001", "source-0002"] },
+  ];
+  payload.sources[1] = {
+    ...payload.sources[1],
+    speakerId: "researcher_a",
+    speaker: "Researcher A",
+  };
+  return payload;
+}
+
 async function createTestPage(browser, origin, viewport) {
   const page = await browser.newPage({ viewport });
   const backend = {
@@ -119,6 +152,9 @@ async function createTestPage(browser, origin, viewport) {
     nextRunId: 70,
     discoveries: [],
     autoDiscoveryPayload: null,
+    autoProfileContext: null,
+    profileContextBodies: [],
+    requireSourceManifest: false,
     runBodies: [],
     holdStateOnNextRun: false,
     stateGate: null,
@@ -142,6 +178,20 @@ async function createTestPage(browser, origin, viewport) {
     if (pathname === "/api/analysis-speakers") {
       if (backend.autoDiscoveryPayload) {
         return responseJson(route, backend.autoDiscoveryPayload);
+      }
+      const pending = deferred();
+      backend.discoveries.push(pending);
+      const payload = await pending.promise;
+      return responseJson(route, payload);
+    }
+    if (pathname === "/api/analysis-profile-context") {
+      const body = request.postDataJSON();
+      backend.profileContextBodies.push(body);
+      if (backend.requireSourceManifest && !body.sourceManifest) {
+        return responseJson(route, { error: "Choose a procurement source manifest for sidecarless results." }, 400);
+      }
+      if (backend.autoProfileContext) {
+        return responseJson(route, backend.autoProfileContext);
       }
       const pending = deferred();
       backend.discoveries.push(pending);
@@ -178,36 +228,36 @@ async function staleDiscoveryAndGroupAccessibility(browser, origin) {
   const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
   try {
     await page.fill("#analysisImotionsSourcePath", "C:\\source-a");
-    await page.click("#discoverAnalysisSpeakersButton");
+    await page.click("#openAnalysisCustomizeButton");
     await waitFor(() => backend.discoveries.length === 1, "First discovery did not start.");
 
+    await page.click("#backFromAnalysisCustomizeButton");
     await page.fill("#analysisImotionsSourcePath", "C:\\source-b");
-    await page.click("#discoverAnalysisSpeakersButton");
+    await page.click("#openAnalysisCustomizeButton");
     await waitFor(() => backend.discoveries.length === 2, "Second discovery did not start.");
-    backend.discoveries[1].resolve(speakerPayload("Speaker"));
-    await page.waitForFunction(() => document.querySelectorAll(".analysis-speaker-choice").length === 2);
-    backend.discoveries[0].resolve(speakerPayload("Stale"));
+    backend.discoveries[1].resolve(profileContextPayload("Researcher"));
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
+    backend.discoveries[0].resolve(profileContextPayload("Stale"));
     await page.waitForTimeout(50);
-    assert.strictEqual(await page.locator(".analysis-speaker-choice").first().textContent(), "Speaker A");
+    assert.ok((await page.locator("#analysisSpeakerDiscoveryStatus").textContent()).includes("2 sources"));
 
     const liveStatus = page.locator("#analysisGroupWarningStatus");
     await liveStatus.evaluate((element) => { element.dataset.stabilityProbe = "stable"; });
     await page.click("#addAnalysisSpeakerGroupButton");
-    assert.strictEqual(await page.evaluate(() => document.activeElement.value), "Group 2");
-
-    const firstAssignment = page.getByLabel("Assign Speaker B to Group 1");
-    await firstAssignment.uncheck();
-    assert.strictEqual(await page.evaluate(() => document.activeElement.getAttribute("aria-label")), "Assign Speaker B to Group 1");
-    await page.waitForFunction(() => document.querySelector("#analysisGroupWarningStatus").textContent.includes("fewer than two"));
+    assert.strictEqual(await page.evaluate(() => document.activeElement.value), "Manual group 1");
+    await page.getByLabel("Assign Researcher A to Manual group 1").check();
+    await page.click("#addAnalysisSpeakerGroupButton");
+    assert.strictEqual(await page.evaluate(() => document.activeElement.value), "Manual group 2");
+    assert.strictEqual(await page.getByLabel("Assign Researcher interview A, Researcher A to Manual group 2").isDisabled(), true);
     assert.strictEqual(await liveStatus.getAttribute("data-stability-probe"), "stable");
 
-    await page.getByLabel("Assign Speaker B to Group 2").check();
-    const groupNames = page.getByLabel("Speaker group name");
+    await page.getByLabel("Assign Researcher interview B, Researcher B to Manual group 2").check();
+    const groupNames = page.getByLabel("Manual group name");
     await groupNames.nth(1).fill("Renamed group");
     assert.strictEqual(await page.getByRole("button", { name: "Remove Renamed group" }).count(), 1);
-    assert.strictEqual(await page.getByLabel("Assign Speaker B to Renamed group").count(), 1);
+    assert.strictEqual(await page.getByLabel("Assign Researcher interview B, Researcher B to Renamed group").count(), 1);
 
-    await page.getByRole("button", { name: "Remove Group 1" }).click();
+    await page.getByRole("button", { name: "Remove Manual group 1" }).click();
     assert.strictEqual(await page.evaluate(() => document.activeElement.value), "Renamed group");
     await page.getByRole("button", { name: "Remove Renamed group" }).click();
     assert.strictEqual(await page.evaluate(() => document.activeElement.id), "addAnalysisSpeakerGroupButton");
@@ -241,6 +291,7 @@ async function submissionLockAndPayloads(browser, origin) {
     const importPayload = backend.runBodies[0];
     assert.strictEqual(importPayload.writeCombinedWorkbook, false);
     assert.deepStrictEqual(importPayload.speakerGroups, []);
+    assert.strictEqual(importPayload.analysisProfile, null);
     assert.deepStrictEqual(importPayload.referenceOverrides, {});
     assert.strictEqual(importPayload.defaultReference, 0);
     assert.strictEqual(importPayload.writeGraphs, false);
@@ -263,9 +314,14 @@ async function submissionLockAndPayloads(browser, origin) {
 
     await page.check("#analysisImotionsRunMethod");
     await page.check("#analysisWriteCombinedToggle");
-    backend.autoDiscoveryPayload = speakerPayload("Speaker");
-    await page.click("#discoverAnalysisSpeakersButton");
-    await page.waitForFunction(() => document.querySelectorAll(".analysis-speaker-choice").length === 2);
+    backend.autoProfileContext = profileContextPayload("Researcher");
+    await page.click("#openAnalysisCustomizeButton");
+    await page.waitForSelector("#analysisCustomizeScreen.active");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
+    await page.getByRole("checkbox", { name: "Country", exact: true }).check();
+    await page.selectOption("#analysisAutomaticGroupField", "Country");
+    await page.click("#saveAnalysisCustomizationButton");
+    await page.waitForSelector("#analysisInputScreen.active");
     await page.locator("#analysisStatisticalAdvanced").evaluate((details) => { details.open = true; });
     await page.fill("#analysisDefaultReferenceInput", "1.5");
     await page.fill("#analysisReferenceOverridesInput", '{"Video|Anger": 2}');
@@ -274,8 +330,9 @@ async function submissionLockAndPayloads(browser, origin) {
     await waitFor(() => backend.runBodies.length === 2, "Combined Analysis request was not sent.");
     const combinedPayload = backend.runBodies[1];
     assert.strictEqual(combinedPayload.writeCombinedWorkbook, true);
-    assert.strictEqual(combinedPayload.speakerGroups.length, 1);
-    assert.deepStrictEqual(combinedPayload.speakerGroups[0].speakerKeys, ["speaker_a", "speaker_b"]);
+    assert.deepStrictEqual(combinedPayload.speakerGroups, []);
+    assert.deepStrictEqual(combinedPayload.analysisProfile.sort_fields, ["Country"]);
+    assert.strictEqual(combinedPayload.analysisProfile.automatic_group_field, "Country");
     assert.strictEqual(combinedPayload.defaultReference, 1.5);
     assert.deepStrictEqual(combinedPayload.referenceOverrides, { "Video|Anger": 2 });
     assert.strictEqual(combinedPayload.includeConstructComparison, true);
@@ -290,26 +347,215 @@ async function submissionLockAndPayloads(browser, origin) {
 }
 
 async function responsiveSmoke(browser, origin) {
-  const { page } = await createTestPage(browser, origin, { width: 1440, height: 1000 });
+  const { page, backend } = await createTestPage(browser, origin, { width: 1440, height: 1000 });
   try {
     const desktopBoxes = await page.locator(".analysis-modality-card").evaluateAll((cards) =>
       cards.map((card) => card.getBoundingClientRect().toJSON()),
     );
     assert.ok(desktopBoxes.every((box) => Math.abs(box.y - desktopBoxes[0].y) < 2));
+    backend.autoProfileContext = profileContextPayload("Researcher");
+    await page.fill("#analysisImotionsSourcePath", "C:\\source");
+    await page.click("#openAnalysisCustomizeButton");
+    await page.waitForSelector("#analysisCustomizeScreen.active");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
     assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-    const desktopPath = path.join(screenshotDir, "analysis-desktop.png");
+    const desktopPath = path.join(screenshotDir, "analysis-customize-desktop.png");
     await page.screenshot({ path: desktopPath, fullPage: true });
     assert.ok(fs.statSync(desktopPath).size > 10000);
 
     await page.setViewportSize({ width: 700, height: 1200 });
-    const narrowBoxes = await page.locator(".analysis-modality-card").evaluateAll((cards) =>
-      cards.map((card) => card.getBoundingClientRect().toJSON()),
+    const narrowBoxes = await page.locator(".analysis-customize-layout > .input-panel").evaluateAll((panels) =>
+      panels.slice(0, 3).map((panel) => panel.getBoundingClientRect().toJSON()),
     );
     assert.ok(narrowBoxes[1].y > narrowBoxes[0].y && narrowBoxes[2].y > narrowBoxes[1].y);
     assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-    const narrowPath = path.join(screenshotDir, "analysis-narrow.png");
+    const narrowPath = path.join(screenshotDir, "analysis-customize-narrow.png");
     await page.screenshot({ path: narrowPath, fullPage: true });
     assert.ok(fs.statSync(narrowPath).size > 10000);
+  } finally {
+    await page.close();
+  }
+}
+
+async function homeBrandingResponsive(browser, origin) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  try {
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    const logo = page.locator(".trinity-main-logo");
+    await logo.waitFor({ state: "visible" });
+    await page.waitForFunction(() => {
+      const image = document.querySelector(".trinity-main-logo");
+      return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
+    });
+    const desktop = await logo.evaluate((image) => {
+      const rect = image.getBoundingClientRect();
+      return {
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        width: rect.width,
+        height: rect.height,
+        right: rect.right,
+      };
+    });
+    assert.deepStrictEqual(
+      [desktop.naturalWidth, desktop.naturalHeight],
+      [1713, 591],
+      "The home screen must render the complete official horizontal Trinity logo.",
+    );
+    assert.ok(desktop.width >= 500);
+    assert.ok(Math.abs(desktop.width / desktop.height - 1713 / 591) < 0.02);
+    assert.ok(desktop.right <= 1440);
+    assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    const narrow = await logo.evaluate((image) => {
+      const rect = image.getBoundingClientRect();
+      return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+    });
+    assert.ok(narrow.width >= 300);
+    assert.ok(Math.abs(narrow.width / narrow.height - 1713 / 591) < 0.02);
+    assert.ok(narrow.left >= 0 && narrow.right <= 390);
+    assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  } finally {
+    await page.close();
+  }
+}
+
+async function invalidSourceErrorStaysContained(browser, origin) {
+  const invalidSource = "https://www.youtube.com/watch?v=";
+  const scanError = "Folder does not exist: C:\\ResearchWorkspace\\MultimodalEmotionAnalysisTool\\ProcurementRuns\\CandidateOne\\https:\\www.youtube.com\\watch?v=";
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    const page = await browser.newPage({ viewport });
+    try {
+      const backend = { running: false, status: "idle", runId: 0, progress: {} };
+      await page.route(`${origin}/api/**`, async (route) => {
+        const pathname = new URL(route.request().url()).pathname;
+        if (pathname === "/api/state") {
+          return responseJson(route, statePayload(backend));
+        }
+        if (pathname === "/api/scan") {
+          return responseJson(route, { error: scanError }, 400);
+        }
+        return responseJson(route, {});
+      });
+
+      await page.goto(origin, { waitUntil: "domcontentloaded" });
+      await page.click("#openProcurementButton");
+      await page.fill("#sourcePathInput", invalidSource);
+      await page.click("#scanButton");
+      await page.waitForFunction(
+        (expected) => document.querySelector("#statusLabel")?.textContent === expected,
+        scanError,
+      );
+
+      const geometry = await page.evaluate(() => {
+        const bounds = (selector) => {
+          const element = document.querySelector(selector);
+          const rect = element.getBoundingClientRect();
+          return {
+            clientWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            left: rect.left,
+            right: rect.right,
+          };
+        };
+        return {
+          viewportWidth: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          status: bounds("#statusLabel"),
+          rail: bounds(".step-rail"),
+          inputPanel: bounds("#inputScreen .input-panel"),
+        };
+      });
+
+      assert.ok(
+        geometry.status.right <= geometry.rail.right,
+        `The status escaped the step rail at ${viewport.width}px.`,
+      );
+      assert.ok(
+        geometry.status.scrollWidth <= geometry.status.clientWidth,
+        `The status text overflowed its own box at ${viewport.width}px.`,
+      );
+      assert.ok(
+        geometry.rail.scrollWidth <= geometry.rail.clientWidth,
+        `The step rail overflowed at ${viewport.width}px.`,
+      );
+      assert.ok(
+        geometry.documentWidth <= geometry.viewportWidth,
+        `The document widened beyond the ${viewport.width}px viewport.`,
+      );
+      assert.ok(
+        geometry.inputPanel.left >= 0 && geometry.inputPanel.right <= geometry.viewportWidth,
+        `The input panel escaped the ${viewport.width}px viewport.`,
+      );
+    } finally {
+      await page.close();
+    }
+  }
+}
+
+async function textGroupingPreflight(browser, origin) {
+  const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
+  try {
+    await page.fill("#analysisImotionsSourcePath", "C:\\video-reports");
+    await page.check("#analysisTextEnabled");
+    await page.fill("#analysisTextSourcePath", "C:\\text-results");
+    backend.autoProfileContext = sharedSpeakerProfileContext();
+    await page.click("#openAnalysisCustomizeButton");
+    await page.waitForSelector("#analysisCustomizeScreen.active");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
+    await page.selectOption("#analysisAutomaticGroupField", "Country");
+    assert.strictEqual(await page.locator("#saveAnalysisCustomizationButton").isDisabled(), true);
+    await page.waitForFunction(() => document.querySelector("#analysisGroupWarningStatus").textContent.includes("Text is speaker-level"));
+    assert.ok((await page.locator("#analysisGroupWarningStatus").textContent()).includes("Researcher A"));
+  } finally {
+    await page.close();
+  }
+}
+
+async function sidecarlessManifestSelection(browser, origin) {
+  const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
+  try {
+    backend.requireSourceManifest = true;
+    backend.autoProfileContext = profileContextPayload("Legacy");
+    await page.uncheck("#analysisImotionsEnabled");
+    await page.check("#analysisTextEnabled");
+    await page.fill("#analysisTextSourcePath", "C:\\ordinary-text-results");
+    await page.click("#openAnalysisCustomizeButton");
+    await page.waitForSelector("#analysisCustomizeScreen.active");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("Choose a procurement source manifest"));
+    assert.deepStrictEqual(
+      backend.profileContextBodies[0].modalities.map((item) => item.name),
+      ["text"],
+    );
+    assert.strictEqual(backend.profileContextBodies[0].sourceManifest, undefined);
+
+    await page.fill("#analysisSourceManifestInput", "C:\\procurement-run\\source_manifest.json");
+    await page.click("#discoverAnalysisSpeakersButton");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
+    assert.strictEqual(
+      backend.profileContextBodies.at(-1).sourceManifest,
+      "C:\\procurement-run\\source_manifest.json",
+    );
+
+    await page.click("#backFromAnalysisCustomizeButton");
+    await page.check("#analysisImotionsEnabled");
+    await page.check("#analysisImotionsImportMethod");
+    await page.fill("#analysisImotionsSourcePath", "C:\\ordinary-imotions-results");
+    await page.click("#openAnalysisCustomizeButton");
+    await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
+    assert.deepStrictEqual(
+      backend.profileContextBodies.at(-1).modalities.map((item) => item.name).sort(),
+      ["imotions", "text"],
+    );
+    assert.strictEqual(
+      backend.profileContextBodies.at(-1).sourceManifest,
+      "C:\\procurement-run\\source_manifest.json",
+    );
   } finally {
     await page.close();
   }
@@ -362,10 +608,14 @@ async function main() {
   const browser = await launchBrowser();
   const failures = [];
   for (const [name, scenario] of [
+    ["home branding responsive", homeBrandingResponsive],
+    ["invalid source error remains contained", invalidSourceErrorStaysContained],
     ["discovery and accessibility", staleDiscoveryAndGroupAccessibility],
     ["submission lock and payloads", submissionLockAndPayloads],
     ["workflow failure detail", workflowFailureDetail],
     ["responsive rendering", responsiveSmoke],
+    ["text grouping preflight", textGroupingPreflight],
+    ["sidecarless manifest selection", sidecarlessManifestSelection],
   ]) {
     try {
       await scenario(browser, origin);

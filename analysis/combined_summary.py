@@ -18,6 +18,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from analysis.metadata import (
+    ManifestSource,
+    SourceMetadata,
+    load_source_metadata,
+    map_report_source_ids,
+    resolve_analysis_profile,
+)
+from analysis.profile import AnalysisProfile
 from spreadsheet_safety import neutralize_spreadsheet_value
 
 
@@ -77,16 +85,18 @@ def _measure_layout(
     *,
     count_gap: int,
     count_rows: int,
+    count_starts_at_heading: bool,
+    source_count: int = EXPECTED_VIDEO_COUNT,
     kurtosis_metrics: Sequence[str] = (),
 ) -> MeasureLayout:
     headline_start = 2
     headline_end = headline_start + len(metrics) - 1
     count_heading = headline_end + count_gap + 1
-    count_start = count_heading if count_rows == 9 else count_heading + 1
+    count_start = count_heading if count_starts_at_heading else count_heading + 1
     count_end = count_start + count_rows - 1
     detail_heading = count_end + 1
     detail_start = detail_heading + 1
-    detail_end = detail_start + len(metrics) * EXPECTED_VIDEO_COUNT - 1
+    detail_end = detail_start + len(metrics) * source_count - 1
     kurtosis_heading = detail_end + 1 if kurtosis_metrics else None
     kurtosis_start = kurtosis_heading + 1 if kurtosis_heading is not None else None
     kurtosis_end = (
@@ -110,11 +120,17 @@ def _measure_layout(
     )
 
 
-AUDIO_LAYOUT = _measure_layout(AUDIO_METRICS, count_gap=0, count_rows=8)
+AUDIO_LAYOUT = _measure_layout(
+    AUDIO_METRICS,
+    count_gap=0,
+    count_rows=8,
+    count_starts_at_heading=False,
+)
 VIDEO_LAYOUT = _measure_layout(
     VIDEO_METRICS,
     count_gap=1,
     count_rows=9,
+    count_starts_at_heading=True,
     kurtosis_metrics=VIDEO_KURTOSIS_METRICS,
 )
 
@@ -163,6 +179,7 @@ class CombinedMetricCells:
     speaker_observations: tuple[tuple[float | None, ...], ...] = ()
     speaker_observation_labels: tuple[tuple[str, ...], ...] = ()
     speaker_groups: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    speaker_display_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,20 +226,11 @@ class _ResolvedSpeakerGroup:
     speakers: tuple[Speaker, ...]
 
 
-SPEAKERS = (
-    Speaker("zack_polanski", "Zack Polanski", "Polanski", "United Kingdom", "D", ("zack polanski", "jack polanski", "jack polanksi", "polanski", "polanksi")),
-    Speaker("andy_burnham", "Andy Burnham", "Burnham", "United Kingdom", "E", ("andy burnham", "burnham")),
-    Speaker("nigel_farage", "Nigel Farage", "Farrage", "United Kingdom", "F", ("nigel farage", "nigel farrage", "farage", "farrage")),
-    Speaker("jean_luc_melenchon", "Jean-Luc Melenchon", "Melanchon", "France", "H", ("jean luc melenchon", "jean luc melanchon", "melenchon", "melanchon")),
-    Speaker("emmanuel_macron", "Emmanuel Macron", "Macron", "France", "I", ("emmanuel macron", "emanuel macron", "macron")),
-    Speaker("marine_le_pen", "Marine Le Pen", "Le Pen", "France", "J", ("marine le pen", "le pen", "lepen")),
-    Speaker("adrian_zandberg", "Adrian Zandberg", "Zandberg", "Poland", "L", ("adrian zandberg", "adrian zanberg", "zandberg", "zanberg")),
-    Speaker("szymon_holownia", "Szymon Holownia", "Holownia", "Poland", "M", ("szymon holownia", "syzmon holownia", "syzmon holowni", "holownia", "holowina")),
-    Speaker("jaroslaw_kaczynski", "Jaroslaw Kaczynski", "Jaroslaw_Kaczynski", "Poland", "N", ("jaroslaw kaczynski", "jaroslaw_kaczynski", "kaczynski", "jk poland")),
-    Speaker("maurizio_acerbo", "Maurizio Acerbo", "Acerbo", "Italy", "P", ("maurizio acerbo", "maurizio acerbi", "acerbo", "acerbi")),
-    Speaker("matteo_renzi", "Matteo Renzi", "Renzi", "Italy", "Q", ("matteo renzi", "renzi")),
-    Speaker("giorgia_meloni", "Giorgia Meloni", "Meloni", "Italy", "R", ("giorgia meloni", "giorgio meloni", "meloni")),
-)
+@dataclass(frozen=True)
+class _LinkedLayout:
+    label_columns: tuple[int, ...]
+    speaker_columns: tuple[tuple[int, ...], ...]
+    overall_column: int
 
 
 @dataclass(frozen=True)
@@ -254,25 +262,12 @@ def canonical_metric(value: str) -> str:
 
 
 def resolve_speaker(value: str) -> Speaker:
-    """Resolve a known alias or create a stable identity for a supplied speaker."""
+    """Create an exact, project-neutral identity for a supplied speaker."""
 
-    display_name = " ".join(str(value).strip().split())
+    display_name = " ".join(str(value).strip().replace("_", " ").split())
     key = normalized(display_name)
     if not key:
         raise InputError("Speaker name must contain letters or numbers")
-    exact = [speaker for speaker in SPEAKERS if key in {normalized(speaker.speaker_id), normalized(speaker.display_name)}]
-    if len(exact) == 1:
-        return exact[0]
-    matches = {
-        speaker.speaker_id: speaker
-        for speaker in SPEAKERS
-        if any(normalized(alias) in key for alias in speaker.aliases)
-    }
-    if len(matches) > 1:
-        names = ", ".join(sorted(matches)) or "none"
-        raise InputError(f"Could not uniquely identify speaker from {value!r}; matches: {names}")
-    if matches:
-        return next(iter(matches.values()))
     return Speaker(key, display_name, display_name, "", "", (display_name,))
 
 
@@ -321,8 +316,6 @@ def _default_speaker_groups(
     speakers = tuple(
         sorted(speaker_catalog.values(), key=lambda speaker: speaker.display_name.casefold())
     )
-    if len(speakers) > len(GROUP_SPEAKER_COLUMNS) * len(GROUP_SPEAKER_COLUMNS[0]):
-        raise InputError("The combined workbook supports at most twelve speakers")
     chunks = tuple(
         speakers[index : index + len(GROUP_SPEAKER_COLUMNS[0])]
         for index in range(0, len(speakers), len(GROUP_SPEAKER_COLUMNS[0]))
@@ -361,17 +354,15 @@ def _parse_optional_number(value: str) -> float | None:
 
 
 def _source_slots(path: Path, metric: str, sources: Sequence[str]) -> tuple[int, ...]:
-    """Map available report sources onto the fixed 001-005 workbook rows."""
+    """Map legacy 001-005 labels while allowing arbitrary ordered SourceIDs."""
 
-    if not sources or len(sources) > EXPECTED_VIDEO_COUNT or len(set(sources)) != len(sources):
-        raise InputError(f"{path}: {metric} must contain 1-{EXPECTED_VIDEO_COUNT} unique sources")
+    if not sources or len(set(sources)) != len(sources):
+        raise InputError(f"{path}: {metric} must contain one or more unique sources")
     slots: list[int] = []
     for source in sources:
         match = re.match(r"^0*([1-5])(?:\D|$)", source)
         if match is None:
-            if len(sources) == EXPECTED_VIDEO_COUNT and not slots:
-                return tuple(range(EXPECTED_VIDEO_COUNT))
-            raise InputError(f"{path}: {metric} source lacks a 001-005 ordinal: {source!r}")
+            return tuple(range(len(sources)))
         slot = int(match.group(1)) - 1
         if slot in slots:
             raise InputError(f"{path}: {metric} contains duplicate source ordinal {slot + 1:03d}")
@@ -382,7 +373,8 @@ def _source_slots(path: Path, metric: str, sources: Sequence[str]) -> tuple[int,
 
 
 def _slot_values(values: Sequence[object], slots: Sequence[int], missing: object) -> tuple[object, ...]:
-    padded = [missing] * EXPECTED_VIDEO_COUNT
+    target_size = max(EXPECTED_VIDEO_COUNT, max(slots, default=-1) + 1)
+    padded = [missing] * target_size
     for slot, value in zip(slots, values):
         padded[slot] = value
     return tuple(padded)
@@ -420,7 +412,8 @@ def parse_sectioned_csv(path: Path) -> dict[str, MetricSeries]:
                 raise InputError(f"{path}: {metric} is missing a complete {name!r} row")
             return values[:source_count]
 
-        available = tuple(index in slots for index in range(EXPECTED_VIDEO_COUNT))
+        target_size = max(EXPECTED_VIDEO_COUNT, max(slots, default=-1) + 1)
+        available = tuple(index in slots for index in range(target_size))
         sources = _slot_values(source_row, slots, "")
         counts = _slot_values(
             tuple(_parse_count(value, f"{path}:{metric}:count") for value in required("count")),
@@ -602,13 +595,12 @@ def discover_combined_sources_audited(root: str | Path, modality: str) -> Combin
                 "accepted speaker-level combined report",
             )
         )
-    known_ids = tuple(speaker.speaker_id for speaker in SPEAKERS)
-    ordered_ids = [speaker_id for speaker_id in known_ids if speaker_id in selected]
-    ordered_ids.extend(
-        sorted(
-            (speaker_id for speaker_id in selected if speaker_id not in known_ids),
-            key=lambda speaker_id: selected[speaker_id].display_name.casefold(),
-        )
+    ordered_ids = sorted(
+        selected,
+        key=lambda speaker_id: (
+            selected[speaker_id].display_name.casefold(),
+            speaker_id,
+        ),
     )
     ordered_sources = tuple(selected[speaker_id] for speaker_id in ordered_ids)
     accepted_by_path = {entry.path: entry for entry in accepted}
@@ -667,6 +659,26 @@ def _observed_counts(series: MetricSeries) -> list[int]:
     return [count for count, available in zip(series.counts, series.available) if available]
 
 
+def _report_source_count(reports: Mapping[str, Mapping[str, MetricSeries]]) -> int:
+    return max(
+        (
+            len(series.sources)
+            for report in reports.values()
+            for series in report.values()
+        ),
+        default=EXPECTED_VIDEO_COUNT,
+    )
+
+
+def _ordinal_label(index: int) -> str:
+    number = index + 1
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
 def _append_coverage_warning(
     sheet_title: str,
     speaker: Speaker,
@@ -678,14 +690,15 @@ def _append_coverage_warning(
         return
     series = next(iter(report.values()))
     available_count = sum(series.available)
-    if available_count == EXPECTED_VIDEO_COUNT:
+    expected_count = max(EXPECTED_VIDEO_COUNT, len(series.available))
+    if available_count == expected_count:
         return
     missing = ", ".join(
         f"{index:03d}" for index, available in enumerate(series.available, start=1) if not available
     )
     warnings.append(
         f"Partial {sheet_title.lower()} report for {speaker.display_name}: "
-        f"{available_count} of {EXPECTED_VIDEO_COUNT} source videos available; missing {missing}."
+        f"{available_count} of {expected_count} source videos available; missing {missing}."
     )
 
 
@@ -715,29 +728,55 @@ def _set_default_font(
 def _linked_speaker_positions(
     groups: Sequence[_ResolvedSpeakerGroup],
 ) -> tuple[tuple[_ResolvedSpeakerGroup, Speaker, int], ...]:
-    """Map up to four linked three-speaker groups onto the historical columns."""
+    """Map participants to historical columns when possible, then extend dynamically."""
 
-    if len(groups) > len(GROUP_SPEAKER_COLUMNS):
-        raise InputError("The combined workbook supports at most four linked speaker groups")
+    layout = _linked_layout(groups)
     positions: list[tuple[_ResolvedSpeakerGroup, Speaker, int]] = []
-    for group_index, group in enumerate(groups):
-        columns = GROUP_SPEAKER_COLUMNS[group_index]
-        if len(group.speakers) > len(columns):
-            raise InputError(f"Speaker group {group.group_id} may contain at most three speakers")
+    for group, columns in zip(groups, layout.speaker_columns):
         positions.extend((group, speaker, column) for speaker, column in zip(group.speakers, columns))
     return tuple(positions)
 
 
-def _set_linked_column_widths(sheet: object) -> None:
-    """Keep the historical blocks readable without changing their coordinates."""
+def _linked_layout(groups: Sequence[_ResolvedSpeakerGroup]) -> _LinkedLayout:
+    legacy = len(groups) <= len(GROUP_SPEAKER_COLUMNS) and all(
+        len(group.speakers) <= len(GROUP_SPEAKER_COLUMNS[0]) for group in groups
+    )
+    if legacy:
+        speaker_columns = tuple(
+            tuple(GROUP_SPEAKER_COLUMNS[index][: len(group.speakers)])
+            for index, group in enumerate(groups)
+        )
+        return _LinkedLayout(
+            tuple(GROUP_LABEL_COLUMNS[: len(groups)]),
+            speaker_columns,
+            GROUP_OVERALL_COLUMN,
+        )
 
-    for column in GROUP_LABEL_COLUMNS:
+    label_columns: list[int] = []
+    speaker_columns: list[tuple[int, ...]] = []
+    next_label = 2
+    for index, group in enumerate(groups):
+        label_columns.append(next_label)
+        first_speaker = 4 if index == 0 else next_label + 1
+        columns = tuple(range(first_speaker, first_speaker + len(group.speakers)))
+        speaker_columns.append(columns)
+        next_label = (columns[-1] if columns else first_speaker) + 1
+    overall_column = max(
+        [3, *label_columns, *(column for columns in speaker_columns for column in columns)]
+    ) + 1
+    return _LinkedLayout(tuple(label_columns), tuple(speaker_columns), overall_column)
+
+
+def _set_linked_column_widths(sheet: object, layout: _LinkedLayout) -> None:
+    """Keep both historical and expanded participant blocks readable."""
+
+    for column in dict.fromkeys((*GROUP_LABEL_COLUMNS, *layout.label_columns)):
         sheet.column_dimensions[get_column_letter(column)].width = 18
     sheet.column_dimensions["C"].width = 10
-    for columns in GROUP_SPEAKER_COLUMNS:
+    for columns in (*GROUP_SPEAKER_COLUMNS, *layout.speaker_columns):
         for column in columns:
             sheet.column_dimensions[get_column_letter(column)].width = 20
-    sheet.column_dimensions["S"].width = 14
+    sheet.column_dimensions[get_column_letter(layout.overall_column)].width = 14
 
 
 def _write_linked_headlines(
@@ -748,13 +787,14 @@ def _write_linked_headlines(
     warnings: list[str],
     headline_policy: str,
 ) -> dict[str, CombinedMetricCells]:
+    layout = _linked_layout(groups)
     positions = _linked_speaker_positions(groups)
     group_metadata = tuple(
         (group.group_id, group.name, tuple(speaker.speaker_id for speaker in group.speakers))
         for group in groups
     )
     for group_index, group in enumerate(groups):
-        label_column = GROUP_LABEL_COLUMNS[group_index]
+        label_column = layout.label_columns[group_index]
         sheet.cell(1, label_column, neutralize_spreadsheet_value(group.name))
         sheet.cell(1, label_column).font = Font(name="Aptos Narrow", size=11, bold=True)
         for row, metric in enumerate(metrics, start=2):
@@ -763,8 +803,8 @@ def _write_linked_headlines(
     for _, speaker, column in positions:
         sheet.cell(1, column, neutralize_spreadsheet_value(speaker.workbook_header))
         sheet.cell(1, column).font = Font(name="Aptos Narrow", size=11)
-    sheet.cell(1, GROUP_OVERALL_COLUMN, "Overall")
-    sheet.cell(1, GROUP_OVERALL_COLUMN).font = Font(name="Aptos Narrow", size=11, bold=True)
+    sheet.cell(1, layout.overall_column, "Overall")
+    sheet.cell(1, layout.overall_column).font = Font(name="Aptos Narrow", size=11, bold=True)
 
     source_cells: dict[str, CombinedMetricCells] = {}
     for row, metric in enumerate(metrics, start=2):
@@ -798,7 +838,7 @@ def _write_linked_headlines(
             observation_labels.append(
                 tuple(source or f"{index:03d}" for index, source in enumerate(series.sources, start=1))
             )
-        overall = f"{get_column_letter(GROUP_OVERALL_COLUMN)}{row}"
+        overall = f"{get_column_letter(layout.overall_column)}{row}"
         sheet[overall] = f"=AVERAGE({','.join(valid_cells)})" if valid_cells else ""
         sheet[overall].number_format = "0.00"
         source_cells[metric] = CombinedMetricCells(
@@ -810,6 +850,7 @@ def _write_linked_headlines(
             tuple(observations),
             tuple(observation_labels),
             group_metadata,
+            tuple(speaker.display_name for _, speaker, _ in positions),
         )
     for _, speaker, _ in positions:
         _append_coverage_warning(sheet.title, speaker, reports.get(speaker.speaker_id), warnings)
@@ -826,15 +867,28 @@ def _write_linked_audio_sheet(
     headline_policy: str,
 ) -> dict[str, CombinedMetricCells]:
     positions = _linked_speaker_positions(groups)
-    layout = AUDIO_LAYOUT
-    _set_default_font(sheet, layout.max_row, 20, 9, min_column=2)
-    _set_linked_column_widths(sheet)
+    linked_layout = _linked_layout(groups)
+    source_count = _report_source_count(reports)
+    layout = (
+        AUDIO_LAYOUT
+        if source_count == EXPECTED_VIDEO_COUNT
+        else _measure_layout(
+            AUDIO_METRICS,
+            count_gap=0,
+            count_rows=3 + source_count,
+            count_starts_at_heading=False,
+            source_count=source_count,
+        )
+    )
+    _set_default_font(sheet, layout.max_row, linked_layout.overall_column, 9, min_column=2)
+    _set_linked_column_widths(sheet, linked_layout)
     source_cells = _write_linked_headlines(
         sheet, AUDIO_METRICS, reports, groups, warnings, headline_policy
     )
     sheet.cell(layout.count_heading, 2, "COUNT")
     for row, label in enumerate(
-        ("Total", "Average", "Std Dev", *ORDINAL_LABELS), start=layout.count_start
+        ("Total", "Average", "Std Dev", *(_ordinal_label(index) for index in range(source_count))),
+        start=layout.count_start,
     ):
         sheet[f"C{row}"] = label
     for _, speaker, column in positions:
@@ -854,15 +908,19 @@ def _write_linked_audio_sheet(
                 sheet.cell(source_index, column, count)
     sheet.cell(layout.detail_heading, 2, "Measures")
     for metric_index, metric in enumerate(AUDIO_METRICS):
-        start_row = layout.detail_start + metric_index * EXPECTED_VIDEO_COUNT
+        start_row = layout.detail_start + metric_index * source_count
         sheet[f"B{start_row}"] = metric
-        for source_index, ordinal in enumerate(ORDINAL_LABELS):
+        for source_index in range(source_count):
             row = start_row + source_index
-            sheet[f"C{row}"] = ordinal
+            sheet[f"C{row}"] = _ordinal_label(source_index)
             for _, speaker, column in positions:
                 report = reports.get(speaker.speaker_id)
                 series = report.get(metric) if report is not None else None
-                if series is not None and series.available[source_index]:
+                if (
+                    series is not None
+                    and source_index < len(series.available)
+                    and series.available[source_index]
+                ):
                     sheet.cell(row, column, _display_mean_sd(series.means[source_index], series.stddevs[source_index], True))
     return source_cells
 
@@ -875,16 +933,35 @@ def _write_linked_video_sheet(
     headline_policy: str,
 ) -> dict[str, CombinedMetricCells]:
     positions = _linked_speaker_positions(groups)
-    layout = VIDEO_LAYOUT
-    _set_default_font(sheet, layout.max_row, 19, 9, min_column=2)
-    _set_linked_column_widths(sheet)
+    linked_layout = _linked_layout(groups)
+    source_count = _report_source_count(reports)
+    layout = (
+        VIDEO_LAYOUT
+        if source_count == EXPECTED_VIDEO_COUNT
+        else _measure_layout(
+            VIDEO_METRICS,
+            count_gap=1,
+            count_rows=4 + source_count,
+            count_starts_at_heading=True,
+            source_count=source_count,
+            kurtosis_metrics=VIDEO_KURTOSIS_METRICS,
+        )
+    )
+    _set_default_font(sheet, layout.max_row, linked_layout.overall_column, 9, min_column=2)
+    _set_linked_column_widths(sheet, linked_layout)
     sheet.freeze_panes = "B2"
     source_cells = _write_linked_headlines(
         sheet, VIDEO_METRICS, reports, groups, warnings, headline_policy
     )
     sheet.cell(layout.count_heading, 2, "COUNT")
     for row, label in enumerate(
-        ("Total", "Average", "Std Dev", "Missing to Count", *ORDINAL_LABELS),
+        (
+            "Total",
+            "Average",
+            "Std Dev",
+            "Missing to Count",
+            *(_ordinal_label(index) for index in range(source_count)),
+        ),
         start=layout.count_start,
     ):
         sheet[f"C{row}"] = label
@@ -907,14 +984,18 @@ def _write_linked_video_sheet(
     sheet.cell(layout.detail_heading, 2, "Measures")
     parenthesized = {"Anger", "Joy", "Sadness", "Contempt", "Disgust", "Fear", "Surprise"}
     for metric_index, metric in enumerate(VIDEO_DETAIL_METRICS):
-        start_row = layout.detail_start + metric_index * EXPECTED_VIDEO_COUNT
+        start_row = layout.detail_start + metric_index * source_count
         sheet[f"B{start_row}"] = metric
-        for source_index, ordinal in enumerate(ORDINAL_LABELS):
+        for source_index in range(source_count):
             row = start_row + source_index
-            sheet[f"C{row}"] = ordinal
+            sheet[f"C{row}"] = _ordinal_label(source_index)
             for _, speaker, column in positions:
                 report = reports.get(speaker.speaker_id)
-                if report is not None and report[metric].available[source_index]:
+                if (
+                    report is not None
+                    and source_index < len(report[metric].available)
+                    and report[metric].available[source_index]
+                ):
                     series = report[metric]
                     sheet.cell(
                         row,
@@ -1070,11 +1151,10 @@ def _write_measure_guide(book: Workbook) -> None:
 
 
 def _source_speaker(source: CombinedSource) -> Speaker:
-    resolved = resolve_speaker(source.display_name)
-    if resolved.speaker_id in {speaker.speaker_id for speaker in SPEAKERS}:
-        return resolved
     speaker_id = normalized(source.speaker_key) or normalized(source.display_name)
     display_name = " ".join(source.display_name.strip().split())
+    if not speaker_id or not display_name:
+        raise InputError("Combined report speaker identity must be nonblank")
     return Speaker(speaker_id, display_name, display_name, "", "", (display_name,))
 
 
@@ -1088,6 +1168,205 @@ def _reports_for_sources(sources: Sequence[CombinedSource], modality: str) -> di
             raise InputError(f"Duplicate {modality} report for {speaker.display_name}")
         reports[speaker.speaker_id] = _validate_report(source.report_path, modality)
     return reports
+
+
+def _profile_workbook_groups(
+    profile: AnalysisProfile,
+    metadata: SourceMetadata,
+) -> tuple[tuple[_ResolvedSpeakerGroup, ...], dict[str, Speaker]]:
+    resolved = resolve_analysis_profile(metadata, profile)
+    source_by_id = {source.source_id: source for source in metadata.sources}
+    participants = {
+        source_id: Speaker(
+            source_id,
+            source_by_id[source_id].title,
+            source_by_id[source_id].title,
+            str(source_by_id[source_id].user_metadata.get("Country", "")),
+            "",
+            (source_id, source_by_id[source_id].title),
+        )
+        for source_id in resolved.ordered_source_ids
+    }
+    groups = tuple(
+        _ResolvedSpeakerGroup(
+            group.group_id,
+            group.name,
+            tuple(participants[source_id] for source_id in group.source_ids),
+        )
+        for group in resolved.groups
+        if group.source_ids
+    )
+    if not groups:
+        raise InputError("The Analysis profile selects no sources for the combined workbook")
+    return groups, participants
+
+
+def _profile_reports(
+    reports: Mapping[str, Mapping[str, MetricSeries]],
+    metadata: SourceMetadata,
+    required_source_ids: Sequence[str],
+    modality: str,
+) -> dict[str, Mapping[str, MetricSeries]]:
+    """Split reports by SourceID and reject incomplete profile coverage."""
+
+    if not reports:
+        return {}
+
+    sources_by_speaker: dict[str, list[ManifestSource]] = {}
+    for source in metadata.sources:
+        if source.selected:
+            sources_by_speaker.setdefault(source.speaker_key, []).append(source)
+    required = set(required_source_ids)
+    split: dict[str, Mapping[str, MetricSeries]] = {}
+    for speaker_id, report in reports.items():
+        speaker_sources = sources_by_speaker.get(normalized(speaker_id), [])
+        if not speaker_sources:
+            raise InputError(
+                f"{modality} report for {speaker_id!r} does not match any selected "
+                "manifest speaker."
+            )
+        first_series = next(iter(report.values()))
+        available_indexes = [
+            index for index, available in enumerate(first_series.available) if available
+        ]
+        labels = tuple(first_series.sources[index] for index in available_indexes)
+        try:
+            source_ids = map_report_source_ids(metadata, speaker_sources[0].speaker, labels)
+        except ValueError as exc:
+            raise InputError(str(exc)) from exc
+        for source_id, source_index in zip(source_ids, available_indexes):
+            if source_id not in required:
+                continue
+            if source_id in split:
+                raise InputError(
+                    f"{modality} reports map profiled source more than once: {source_id}"
+                )
+            split[source_id] = {
+                metric: _single_source_series(series, source_id, source_index)
+                for metric, series in report.items()
+            }
+    missing = [source_id for source_id in required_source_ids if source_id not in split]
+    if missing:
+        raise InputError(
+            f"{modality} reports are missing profiled source(s): {', '.join(missing)}"
+        )
+    return split
+
+
+def _single_source_series(
+    series: MetricSeries,
+    source_id: str,
+    source_index: int,
+) -> MetricSeries:
+    if source_index >= len(series.available) or not series.available[source_index]:
+        raise InputError(f"Metric report is missing {source_id} at its established source position")
+    return MetricSeries(
+        sources=(source_id,),
+        available=(True,),
+        counts=(series.counts[source_index],),
+        missing=(series.missing[source_index],),
+        means=(series.means[source_index],),
+        stddevs=(series.stddevs[source_index],),
+        kurtoses=(series.kurtoses[source_index],),
+    )
+
+
+def _profile_text_reports(
+    summaries: Mapping[str, TextConstructSummary],
+    metadata: SourceMetadata,
+    required_source_ids: Sequence[str],
+) -> dict[str, TextConstructSummary]:
+    """Match text summaries once per visible speaker, never once per source."""
+
+    if not summaries:
+        return {}
+
+    profiled: dict[str, TextConstructSummary] = {}
+    required = set(required_source_ids)
+    selected_by_speaker: dict[str, list[ManifestSource]] = {}
+    visible_by_speaker: dict[str, list[ManifestSource]] = {}
+    for source in metadata.sources:
+        if source.selected:
+            selected_by_speaker.setdefault(source.speaker_key, []).append(source)
+        if source.source_id in required:
+            visible_by_speaker.setdefault(source.speaker_key, []).append(source)
+
+    for speaker_id, summary in summaries.items():
+        speaker_key = normalized(speaker_id)
+        selected_sources = selected_by_speaker.get(speaker_key, [])
+        if not selected_sources:
+            raise InputError(
+                f"Text summary for {summary.display_name!r} does not match any selected "
+                "manifest speaker."
+            )
+        visible_sources = visible_by_speaker.get(speaker_key, [])
+        if not visible_sources:
+            continue
+        source = visible_sources[0]
+        profiled[speaker_key] = TextConstructSummary(
+            speaker_id=speaker_key,
+            display_name=source.speaker,
+            country=str(source.user_metadata.get("Country", summary.country)),
+            constructs=summary.constructs,
+            source_path=summary.source_path,
+        )
+    missing = [
+        sources[0].speaker
+        for speaker_key, sources in visible_by_speaker.items()
+        if speaker_key not in profiled
+    ]
+    if missing:
+        raise InputError(
+            f"Text summaries are missing profiled speaker(s): {', '.join(missing)}"
+        )
+    return profiled
+
+
+def _profile_speaker_groups(
+    source_groups: Sequence[_ResolvedSpeakerGroup],
+    metadata: SourceMetadata,
+    *,
+    require_unique_membership: bool,
+) -> tuple[_ResolvedSpeakerGroup, ...]:
+    """Collapse SourceID groups to speaker grain for text and comparison views."""
+
+    source_by_id = {source.source_id: source for source in metadata.sources}
+    memberships: dict[str, str] = {}
+    groups: list[_ResolvedSpeakerGroup] = []
+    for group in source_groups:
+        source_ids_by_speaker: dict[str, list[str]] = {}
+        speaker_order: list[str] = []
+        for participant in group.speakers:
+            source = source_by_id[participant.speaker_id]
+            if source.speaker_key not in source_ids_by_speaker:
+                speaker_order.append(source.speaker_key)
+                source_ids_by_speaker[source.speaker_key] = []
+            source_ids_by_speaker[source.speaker_key].append(source.source_id)
+        speakers: list[Speaker] = []
+        for speaker_key in speaker_order:
+            previous_group = memberships.get(speaker_key)
+            if require_unique_membership and previous_group is not None:
+                display_name = source_by_id[source_ids_by_speaker[speaker_key][0]].speaker
+                raise InputError(
+                    f"Speaker-level text for {display_name} cannot be split across "
+                    f"Analysis groups {previous_group!r} and {group.name!r}."
+                )
+            memberships.setdefault(speaker_key, group.name)
+            source_ids = tuple(source_ids_by_speaker[speaker_key])
+            source = source_by_id[source_ids[0]]
+            speakers.append(
+                Speaker(
+                    speaker_key,
+                    source.speaker,
+                    source.speaker,
+                    str(source.user_metadata.get("Country", "")),
+                    "",
+                    source_ids,
+                )
+            )
+        if speakers:
+            groups.append(_ResolvedSpeakerGroup(group.group_id, group.name, tuple(speakers)))
+    return tuple(groups)
 
 
 def protected_manual_discovery_directories(
@@ -1130,16 +1409,18 @@ def _validated_text_summaries(
 ) -> dict[str, TextConstructSummary]:
     validated: dict[str, TextConstructSummary] = {}
     for summary in summaries:
-        speaker = resolve_speaker(summary.speaker_id)
-        if speaker.speaker_id not in {item.speaker_id for item in SPEAKERS}:
-            speaker = Speaker(
-                normalized(summary.speaker_id),
-                summary.display_name,
-                summary.display_name,
-                summary.country,
-                "",
-                (summary.display_name,),
-            )
+        speaker_id = normalized(summary.speaker_id) or normalized(summary.display_name)
+        display_name = " ".join(summary.display_name.strip().split())
+        if not speaker_id or not display_name:
+            raise InputError("Text summary speaker identity must be nonblank")
+        speaker = Speaker(
+            speaker_id,
+            display_name,
+            display_name,
+            summary.country,
+            "",
+            (display_name,),
+        )
         if speaker.speaker_id in validated:
             raise InputError(f"Duplicate text summary for {speaker.display_name}")
         missing = [construct for construct in TEXT_CONSTRUCTS if construct not in summary.constructs]
@@ -1178,14 +1459,15 @@ def _write_text_construct_sheet(
     """Write imported lexical constructs while keeping them out of inference inputs."""
 
     positions = _linked_speaker_positions(groups)
-    _set_default_font(sheet, 10, 19, 10, min_column=2)
-    _set_linked_column_widths(sheet)
+    layout = _linked_layout(groups)
+    _set_default_font(sheet, 10, layout.overall_column, 10, min_column=2)
+    _set_linked_column_widths(sheet, layout)
     group_metadata = tuple(
         (group.group_id, group.name, tuple(speaker.speaker_id for speaker in group.speakers))
         for group in groups
     )
     for group_index, group in enumerate(groups):
-        label_column = GROUP_LABEL_COLUMNS[group_index]
+        label_column = layout.label_columns[group_index]
         sheet.cell(1, label_column, neutralize_spreadsheet_value(group.name)).font = Font(
             name="Aptos Narrow", size=11, bold=True
         )
@@ -1193,7 +1475,7 @@ def _write_text_construct_sheet(
             sheet.cell(row, label_column, construct)
     for _, speaker, column in positions:
         sheet.cell(1, column, neutralize_spreadsheet_value(speaker.workbook_header))
-    sheet.cell(1, GROUP_OVERALL_COLUMN, "Overall").font = Font(
+    sheet.cell(1, layout.overall_column, "Overall").font = Font(
         name="Aptos Narrow", size=11, bold=True
     )
     sheet["B8"] = (
@@ -1201,7 +1483,12 @@ def _write_text_construct_sheet(
         "they are not calibrated facial or audio emotion measurements."
     )
     sheet["B8"].alignment = Alignment(wrap_text=True, vertical="top")
-    sheet.merge_cells("B8:S9")
+    sheet.merge_cells(
+        start_row=8,
+        start_column=2,
+        end_row=9,
+        end_column=layout.overall_column,
+    )
 
     text_cells: dict[str, CombinedMetricCells] = {}
     speaker_ids = tuple(speaker.speaker_id for _, speaker, _ in positions)
@@ -1218,7 +1505,7 @@ def _write_text_construct_sheet(
             if value is not None:
                 cell.value = value
                 valid_cells.append(coordinate)
-        overall = f"{get_column_letter(GROUP_OVERALL_COLUMN)}{row}"
+        overall = f"{get_column_letter(layout.overall_column)}{row}"
         sheet[overall] = f"=AVERAGE({','.join(valid_cells)})" if valid_cells else ""
         sheet[overall].number_format = "0.000"
         text_cells[f"Text|{construct}"] = CombinedMetricCells(
@@ -1228,6 +1515,9 @@ def _write_text_construct_sheet(
             tuple(speaker_cells),
             speaker_ids,
             speaker_groups=group_metadata,
+            speaker_display_names=tuple(
+                speaker.display_name for _, speaker, _ in positions
+            ),
         )
     for _, speaker, _ in positions:
         if speaker.speaker_id not in summaries:
@@ -1262,31 +1552,41 @@ _COMPARISON_ROWS = (
 )
 
 
-def _speaker_metric_reference(
+def _speaker_metric_references(
     source_cells: Mapping[str, CombinedMetricCells],
     modality: str,
     metric: str,
-    speaker_id: str,
-) -> str | None:
+    speaker: Speaker,
+) -> tuple[str, ...]:
     cells = source_cells.get(f"{modality}|{metric}")
-    if cells is None or speaker_id not in cells.speaker_ids:
-        return None
-    coordinate = cells.speaker_cells[cells.speaker_ids.index(speaker_id)]
-    return f"'{cells.sheet.replace(chr(39), chr(39) * 2)}'!{coordinate}"
+    if cells is None:
+        return ()
+    candidate_ids = tuple(dict.fromkeys((speaker.speaker_id, *speaker.aliases)))
+    coordinates = tuple(
+        cells.speaker_cells[index]
+        for index, speaker_id in enumerate(cells.speaker_ids)
+        if speaker_id in candidate_ids
+    )
+    sheet = cells.sheet.replace(chr(39), chr(39) * 2)
+    return tuple(f"'{sheet}'!{coordinate}" for coordinate in coordinates)
 
 
 def _comparison_metric_formula(
     source_cells: Mapping[str, CombinedMetricCells],
     modality: str,
     metric: str | None,
-    speaker_id: str,
+    speaker: Speaker,
 ) -> str | None:
     if metric is None:
         return None
-    reference = _speaker_metric_reference(source_cells, modality, metric, speaker_id)
-    if reference is None:
+    references = _speaker_metric_references(source_cells, modality, metric, speaker)
+    if not references:
         return None
-    return f'=IF(ISNUMBER({reference}),{reference},"Unavailable")'
+    if len(references) == 1:
+        reference = references[0]
+        return f'=IF(ISNUMBER({reference}),{reference},"Unavailable")'
+    joined = ",".join(references)
+    return f'=IF(COUNT({joined})>0,AVERAGE({joined}),"Unavailable")'
 
 
 def _write_construct_comparison_sheet(
@@ -1297,8 +1597,10 @@ def _write_construct_comparison_sheet(
     """Create the at-a-glance construct tables using formula-linked source means."""
 
     sheet = book.create_sheet("Construct Comparison")
-    table_starts = (1, 6, 11)
-    last_column = 14
+    largest_group = max((len(group.speakers) for group in groups), default=0)
+    table_count = max(3, largest_group)
+    table_starts = tuple(1 + (index * 5) for index in range(table_count))
+    last_column = table_starts[-1] + 3
     thin_border = Border(
         left=Side(style="thin", color="B8B8B8"),
         right=Side(style="thin", color="B8B8B8"),
@@ -1379,13 +1681,13 @@ def _write_construct_comparison_sheet(
                 row = first_data_row + row_offset
                 sheet.cell(row, table_start, f"{section}: {label}")
                 sheet.cell(row, table_start + 1).value = _comparison_metric_formula(
-                    source_cells, "Video", video_metric, speaker.speaker_id
+                    source_cells, "Video", video_metric, speaker
                 )
                 sheet.cell(row, table_start + 2).value = _comparison_metric_formula(
-                    source_cells, "Audio", audio_metric, speaker.speaker_id
+                    source_cells, "Audio", audio_metric, speaker
                 )
                 sheet.cell(row, table_start + 3).value = _comparison_metric_formula(
-                    source_cells, "Text", text_metric, speaker.speaker_id
+                    source_cells, "Text", text_metric, speaker
                 )
                 for column in range(table_start, table_end + 1):
                     cell = sheet.cell(row, column)
@@ -1404,8 +1706,8 @@ def _write_construct_comparison_sheet(
         sheet.column_dimensions[get_column_letter(table_start + 1)].width = 27
         sheet.column_dimensions[get_column_letter(table_start + 2)].width = 25
         sheet.column_dimensions[get_column_letter(table_start + 3)].width = 15
-    sheet.column_dimensions["E"].width = 3
-    sheet.column_dimensions["J"].width = 3
+    for table_start in table_starts[:-1]:
+        sheet.column_dimensions[get_column_letter(table_start + 4)].width = 3
     sheet.freeze_panes = "A3"
     sheet.sheet_view.showGridLines = False
 
@@ -1416,6 +1718,7 @@ def build_combined_workbook(
     *,
     headline_policy: str = "weighted",
     speaker_groups: Sequence[SpeakerGroupDefinition] | None = None,
+    analysis_profile: AnalysisProfile | None = None,
     include_construct_comparison: bool = False,
     text_summaries: Sequence[TextConstructSummary] = (),
 ) -> CombinedWorkbookResult:
@@ -1428,6 +1731,8 @@ def build_combined_workbook(
         raise InputError(f"Unsupported modalities: {', '.join(sorted(unexpected))}")
     if speaker_groups is not None and not speaker_groups:
         raise InputError("At least one speaker group is required when groups are supplied")
+    if analysis_profile is not None and speaker_groups is not None:
+        raise InputError("Use either an Analysis profile or legacy speaker groups, not both")
     destination = Path(output_path).expanduser().resolve()
     _validate_output_destination(destination, sources_by_modality)
     text_reports = _validated_text_summaries(text_summaries)
@@ -1437,28 +1742,53 @@ def build_combined_workbook(
     video_reports = _reports_for_sources(sources_by_modality.get("video", ()), "video")
     if not audio_reports and not video_reports and not text_reports:
         raise InputError("At least one Audio, Video, or Text source is required")
-    speaker_catalog: dict[str, Speaker] = {}
-    for sources in sources_by_modality.values():
-        for source in sources:
-            speaker = _source_speaker(source)
-            speaker_catalog[speaker.speaker_id] = speaker
-    for summary in text_reports.values():
-        speaker_catalog.setdefault(
-            summary.speaker_id,
-            Speaker(
-                summary.speaker_id,
-                summary.display_name,
-                summary.display_name,
-                summary.country,
-                "",
-                (summary.display_name,),
-            ),
+    if analysis_profile is not None:
+        profile_metadata = load_source_metadata(
+            analysis_profile.source_manifest,
+            expected_sha256=analysis_profile.source_manifest_sha256,
         )
-    groups = (
-        _resolve_speaker_groups(speaker_groups, speaker_catalog)
-        if speaker_groups is not None
-        else _default_speaker_groups(speaker_catalog)
-    )
+        groups, participants = _profile_workbook_groups(analysis_profile, profile_metadata)
+        required_source_ids = tuple(participants)
+        audio_reports = _profile_reports(
+            audio_reports, profile_metadata, required_source_ids, "Audio"
+        )
+        video_reports = _profile_reports(
+            video_reports, profile_metadata, required_source_ids, "Video"
+        )
+        text_reports = _profile_text_reports(
+            text_reports, profile_metadata, required_source_ids
+        )
+        comparison_groups = _profile_speaker_groups(
+            groups,
+            profile_metadata,
+            require_unique_membership=bool(text_reports),
+        )
+        text_groups = comparison_groups
+    else:
+        speaker_catalog: dict[str, Speaker] = {}
+        for sources in sources_by_modality.values():
+            for source in sources:
+                speaker = _source_speaker(source)
+                speaker_catalog[speaker.speaker_id] = speaker
+        for summary in text_reports.values():
+            speaker_catalog.setdefault(
+                summary.speaker_id,
+                Speaker(
+                    summary.speaker_id,
+                    summary.display_name,
+                    summary.display_name,
+                    summary.country,
+                    "",
+                    (summary.display_name,),
+                ),
+            )
+        groups = (
+            _resolve_speaker_groups(speaker_groups, speaker_catalog)
+            if speaker_groups is not None
+            else _default_speaker_groups(speaker_catalog)
+        )
+        text_groups = groups
+        comparison_groups = groups
     book = Workbook()
     book.remove(book.active)
     warnings: list[str] = []
@@ -1489,7 +1819,7 @@ def build_combined_workbook(
         quantitative_sheets.append("Video")
     text_sheet = book.create_sheet("Text sentiment")
     text_cells = (
-        _write_text_construct_sheet(text_sheet, text_reports, groups, warnings)
+        _write_text_construct_sheet(text_sheet, text_reports, text_groups, warnings)
         if text_reports
         else {}
     )
@@ -1497,7 +1827,7 @@ def build_combined_workbook(
         _write_construct_comparison_sheet(
             book,
             {**source_cells, **text_cells},
-            groups,
+            comparison_groups,
         )
     book.active = 0
     book.calculation.fullCalcOnLoad = True

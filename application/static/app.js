@@ -194,11 +194,21 @@ const analysisTextEnabled = document.querySelector("#analysisTextEnabled");
 const analysisTextSourcePath = document.querySelector("#analysisTextSourcePath");
 const analysisTextMethodInputs = Array.from(document.querySelectorAll("input[name='analysisTextSourceMethod']"));
 const browseAnalysisTextSource = document.querySelector("#browseAnalysisTextSource");
+const analysisSourceManifestInput = document.querySelector("#analysisSourceManifestInput");
+const browseAnalysisSourceManifestButton = document.querySelector("#browseAnalysisSourceManifestButton");
 const discoverAnalysisSpeakersButton = document.querySelector("#discoverAnalysisSpeakersButton");
 const analysisSpeakerDiscoveryStatus = document.querySelector("#analysisSpeakerDiscoveryStatus");
 const analysisGroupWarningStatus = document.querySelector("#analysisGroupWarningStatus");
 const analysisSpeakerGroups = document.querySelector("#analysisSpeakerGroups");
 const addAnalysisSpeakerGroupButton = document.querySelector("#addAnalysisSpeakerGroupButton");
+const openAnalysisCustomizeButton = document.querySelector("#openAnalysisCustomizeButton");
+const backFromAnalysisCustomizeButton = document.querySelector("#backFromAnalysisCustomizeButton");
+const saveAnalysisCustomizationButton = document.querySelector("#saveAnalysisCustomizationButton");
+const analysisProfileSummary = document.querySelector("#analysisProfileSummary");
+const analysisSortFields = document.querySelector("#analysisSortFields");
+const analysisAutomaticGroupField = document.querySelector("#analysisAutomaticGroupField");
+const analysisMetadataFilters = document.querySelector("#analysisMetadataFilters");
+const analysisProfilePreview = document.querySelector("#analysisProfilePreview");
 const analysisWriteCombinedToggle = document.querySelector("#analysisWriteCombinedToggle");
 const analysisConstructComparisonToggle = document.querySelector("#analysisConstructComparisonToggle");
 const analysisProbabilitySheetsToggle = document.querySelector("#analysisProbabilitySheetsToggle");
@@ -318,9 +328,6 @@ function analysisSpeakerGroupIssues(speakers, groups) {
   if (!groups.length) {
     issues.push("Add at least one speaker group.");
   }
-  if (groups.length > 4) {
-    issues.push("The combined workbook supports at most four speaker groups.");
-  }
   groups.forEach((group, index) => {
     const displayName = String(group.name || "").trim();
     const normalizedName = displayName.toLocaleLowerCase();
@@ -334,9 +341,6 @@ function analysisSpeakerGroupIssues(speakers, groups) {
     if (!Array.isArray(group.speakerKeys) || !group.speakerKeys.length) {
       issues.push(`${displayName || `Group ${index + 1}`} needs at least one speaker.`);
       return;
-    }
-    if (group.speakerKeys.length > 3) {
-      issues.push(`${displayName || `Group ${index + 1}`} may contain at most three speakers.`);
     }
     group.speakerKeys.forEach((speakerKey) => {
       if (!discoveredNames.has(speakerKey)) {
@@ -362,6 +366,202 @@ function analysisSpeakerGroupIssues(speakers, groups) {
   return issues;
 }
 
+function createAnalysisProfileDraft(context) {
+  const fields = Array.isArray(context?.metadataFields) ? context.metadataFields : [];
+  return {
+    sortFields: [],
+    automaticGroupField: "",
+    metadataFilters: Object.fromEntries(
+      fields.map((field) => [String(field.name || ""), [...(field.values || [])]]),
+    ),
+    manualGroups: [],
+  };
+}
+
+function analysisProfileIssues(context, draft, textEnabled = false) {
+  const issues = [];
+  if (!context || typeof context.sourceManifest !== "string" || !/^[0-9a-f]{64}$/i.test(context.sourceManifestSha256 || "")) {
+    return ["Load source metadata before customizing the output."];
+  }
+  const fields = new Map((context.metadataFields || []).map((field) => [field.name, field]));
+  const sortFields = Array.isArray(draft?.sortFields) ? draft.sortFields : [];
+  if (new Set(sortFields).size !== sortFields.length) {
+    issues.push("Each metadata sort field can be used only once.");
+  }
+  sortFields.forEach((field) => {
+    if (!fields.has(field)) issues.push(`Unknown metadata sort field: ${field}.`);
+  });
+  if (draft?.automaticGroupField && !fields.has(draft.automaticGroupField)) {
+    issues.push(`Unknown automatic grouping field: ${draft.automaticGroupField}.`);
+  }
+  const filters = draft?.metadataFilters && typeof draft.metadataFilters === "object"
+    ? draft.metadataFilters
+    : {};
+  Object.entries(filters).forEach(([field, values]) => {
+    const available = new Set(fields.get(field)?.values || []);
+    if (
+      !fields.has(field)
+      || !Array.isArray(values)
+      || (available.size > 0 && !values.length)
+    ) {
+      issues.push(`${field || "Metadata"} must keep at least one value visible.`);
+      return;
+    }
+    values.forEach((value) => {
+      if (!available.has(value)) issues.push(`Unknown ${field} value: ${value}.`);
+    });
+  });
+
+  const preview = resolveAnalysisProfilePreview(context, draft);
+  const sourceIds = new Set(preview.orderedSourceIds);
+  const speakerSources = new Map(
+    (context.speakers || []).map((speaker) => [
+      speaker.id,
+      (speaker.sourceIds || []).filter((sourceId) => sourceIds.has(sourceId)),
+    ]),
+  );
+  const groupIds = new Set();
+  const groupNames = new Set();
+  const assignments = new Map();
+  (draft?.manualGroups || []).forEach((group, groupIndex) => {
+    const groupId = String(group.id || "").trim();
+    const groupName = String(group.name || "").trim();
+    const normalizedName = groupName.toLocaleLowerCase();
+    if (!groupId || !groupName) {
+      issues.push(`Manual group ${groupIndex + 1} needs an id and name.`);
+    } else if (groupIds.has(groupId) || groupNames.has(normalizedName)) {
+      issues.push(`Manual group ids and names must be unique; duplicate: ${groupName}.`);
+    }
+    groupIds.add(groupId);
+    groupNames.add(normalizedName);
+    if (!Array.isArray(group.members) || !group.members.length) {
+      issues.push(`${groupName || `Manual group ${groupIndex + 1}`} needs at least one speaker or source.`);
+      return;
+    }
+    group.members.forEach((member) => {
+      let matchedSources = [];
+      if (member?.type === "speaker" && (speakerSources.get(member.id) || []).length) {
+        matchedSources = speakerSources.get(member.id);
+      } else if (member?.type === "source" && sourceIds.has(member.id)) {
+        matchedSources = [member.id];
+      } else {
+        issues.push(`${groupName || `Manual group ${groupIndex + 1}`} contains an unknown ${member?.type || "member"}: ${member?.id || "(blank)"}.`);
+        return;
+      }
+      matchedSources.forEach((sourceId) => {
+        if (assignments.has(sourceId)) {
+          issues.push(`Source ${sourceId} belongs to more than one manual group or member selection.`);
+        } else {
+          assignments.set(sourceId, groupId);
+        }
+      });
+    });
+  });
+  if (!preview.orderedSourceIds.length) {
+    issues.push("Metadata filters hide every source.");
+  }
+  if (textEnabled) {
+    const sourceById = new Map((context.sources || []).map((source) => [source.id, source]));
+    const groupBySource = new Map();
+    preview.groups.forEach((group) => {
+      (group.sourceIds || []).forEach((sourceId) => groupBySource.set(sourceId, group.id));
+    });
+    const groupsBySpeaker = new Map();
+    const speakerNames = new Map();
+    preview.orderedSourceIds.forEach((sourceId) => {
+      const source = sourceById.get(sourceId);
+      if (!source) return;
+      const speakerId = source.speakerId;
+      if (!groupsBySpeaker.has(speakerId)) groupsBySpeaker.set(speakerId, new Set());
+      groupsBySpeaker.get(speakerId).add(groupBySource.get(sourceId));
+      speakerNames.set(speakerId, source.speaker || speakerId);
+    });
+    groupsBySpeaker.forEach((groupIds, speakerId) => {
+      if (groupIds.size > 1) {
+        issues.push(`Text is speaker-level, so every visible source for ${speakerNames.get(speakerId)} must stay in the same output group.`);
+      }
+    });
+  }
+  return issues;
+}
+
+function resolveAnalysisProfilePreview(context, draft) {
+  const fields = new Map((context?.metadataFields || []).map((field) => [field.name, field]));
+  const filters = draft?.metadataFilters || {};
+  const sourceOrder = new Map((context?.sources || []).map((source, index) => [source.id, index]));
+  const visible = (context?.sources || []).filter((source) => Object.entries(filters).every(
+    ([field, values]) => !fields.has(field)
+      || (values || []).length === (fields.get(field).values || []).length
+      || (values || []).includes(String(source.metadata?.[field] || "").trim()),
+  ));
+  const sortFields = draft?.sortFields || [];
+  visible.sort((left, right) => {
+    for (const field of sortFields) {
+      const leftValue = String(left.metadata?.[field] || "").trim();
+      const rightValue = String(right.metadata?.[field] || "").trim();
+      if (Boolean(leftValue) !== Boolean(rightValue)) return leftValue ? -1 : 1;
+      if (leftValue < rightValue) return -1;
+      if (leftValue > rightValue) return 1;
+    }
+    return sourceOrder.get(left.id) - sourceOrder.get(right.id);
+  });
+  const orderedSourceIds = visible.map((source) => source.id);
+  const visibleIds = new Set(orderedSourceIds);
+  const speakers = new Map((context?.speakers || []).map((speaker) => [speaker.id, speaker.sourceIds || []]));
+  const assigned = new Set();
+  const groups = [];
+  (draft?.manualGroups || []).forEach((group) => {
+    const memberIds = new Set();
+    (group.members || []).forEach((member) => {
+      const candidates = member.type === "speaker" ? speakers.get(member.id) || [] : [member.id];
+      candidates.forEach((sourceId) => {
+        if (visibleIds.has(sourceId)) memberIds.add(sourceId);
+      });
+    });
+    const groupSourceIds = orderedSourceIds.filter((sourceId) => memberIds.has(sourceId));
+    groupSourceIds.forEach((sourceId) => assigned.add(sourceId));
+    groups.push({ id: group.id, name: group.name, sourceIds: groupSourceIds });
+  });
+  const remaining = visible.filter((source) => !assigned.has(source.id));
+  if (draft?.automaticGroupField) {
+    const automatic = new Map();
+    remaining.forEach((source) => {
+      const name = String(source.metadata?.[draft.automaticGroupField] || "").trim() || "(blank)";
+      if (!automatic.has(name)) automatic.set(name, []);
+      automatic.get(name).push(source.id);
+    });
+    automatic.forEach((sourceIdsForGroup, name) => groups.push({ id: `metadata-${name}`, name, sourceIds: sourceIdsForGroup }));
+  } else if (remaining.length) {
+    groups.push({ id: "ungrouped", name: "All other sources", sourceIds: remaining.map((source) => source.id) });
+  }
+  return { orderedSourceIds, groups };
+}
+
+function buildAnalysisProfilePayload(context, draft) {
+  const filters = {};
+  const availableByField = new Map(
+    (context.metadataFields || []).map((field) => [field.name, field.values || []]),
+  );
+  Object.entries(draft.metadataFilters || {}).forEach(([field, values]) => {
+    if (values.length < (availableByField.get(field) || []).length) filters[field] = [...values];
+  });
+  return {
+    format_version: 1,
+    source_manifest: {
+      path: context.sourceManifest,
+      sha256: context.sourceManifestSha256,
+    },
+    sort_fields: [...(draft.sortFields || [])],
+    automatic_group_field: draft.automaticGroupField || null,
+    manual_groups: (draft.manualGroups || []).map((group) => ({
+      id: group.id,
+      name: String(group.name || "").trim(),
+      members: (group.members || []).map((member) => ({ type: member.type, id: member.id })),
+    })),
+    metadata_filters: filters,
+  };
+}
+
 function analysisRunGateReasons({
   modalities,
   outputRoot,
@@ -370,6 +570,8 @@ function analysisRunGateReasons({
   currentSignature,
   speakers,
   groups,
+  profileContext = null,
+  profileDraft = null,
   includeProbabilitySheets = true,
   confidenceLevelText = "95",
   headlinePolicy = "weighted",
@@ -395,12 +597,22 @@ function analysisRunGateReasons({
     return reasons;
   }
   if (!discoverySignature || discoverySignature !== currentSignature) {
-    reasons.push("Discover speakers from the current modality sources.");
+    reasons.push("Load source metadata from the current modality sources in Customize output.");
   }
-  if (!speakers.length) {
-    reasons.push("Discover at least one speaker for the combined workbook.");
+  if (profileContext) {
+    reasons.push(...analysisProfileIssues(
+      profileContext,
+      profileDraft,
+      modalities.some((modality) => modality.name === "text"),
+    ));
+  } else if (Array.isArray(speakers) && Array.isArray(groups)) {
+    if (!speakers.length) {
+      reasons.push("Discover at least one speaker for the combined workbook.");
+    }
+    reasons.push(...analysisSpeakerGroupIssues(speakers, groups));
+  } else {
+    reasons.push("Load and review source metadata in Customize output.");
   }
-  reasons.push(...analysisSpeakerGroupIssues(speakers, groups));
 
   if (!new Set(["weighted", "equal"]).has(String(headlinePolicy || "").trim())) {
     reasons.push("Choose a valid speaker mean method.");
@@ -502,6 +714,7 @@ function buildAnalysisWorkflowRequest({
   defaultReference,
   referenceOverrides,
   speakerGroups,
+  analysisProfile = null,
   writeGraphs,
   includeLogscale,
   includeLandmarks,
@@ -518,7 +731,8 @@ function buildAnalysisWorkflowRequest({
     headlinePolicy,
     defaultReference,
     referenceOverrides,
-    speakerGroups: writeCombinedWorkbook ? speakerGroups : [],
+    speakerGroups: writeCombinedWorkbook && !analysisProfile ? speakerGroups : [],
+    analysisProfile: writeCombinedWorkbook ? analysisProfile : null,
     writeGraphs: hasRunModality && writeGraphs,
     includeLogscale: hasRunModality && includeLogscale,
     includeLandmarks,
@@ -628,6 +842,8 @@ const state = {
   audioMode: "batch",
   analysisSpeakers: [],
   analysisSpeakerGroups: [],
+  analysisProfileContext: null,
+  analysisProfileDraft: null,
   analysisDiscoverySignature: "",
   analysisDiscoveryOperation: createAnalysisAsyncOperation(),
   analysisSubmissionOperation: createAnalysisAsyncOperation(),
@@ -1209,13 +1425,16 @@ function resetAnalysisForNewWorkflow() {
   });
   state.analysisSpeakers = [];
   state.analysisSpeakerGroups = [];
+  state.analysisProfileContext = null;
+  state.analysisProfileDraft = null;
   state.analysisDiscoverySignature = "";
+  analysisSourceManifestInput.value = "";
   state.nextAnalysisGroupId = 1;
   state.pendingAudioOutput = "";
   invalidateAnalysisAsyncOperation(state.analysisDiscoveryOperation);
   invalidateAnalysisAsyncOperation(state.analysisSubmissionOperation);
   analysisSpeakerDiscoveryStatus.textContent = "Choose source folders, then discover speakers.";
-  renderAnalysisSpeakerGroups();
+  renderAnalysisCustomization();
 }
 
 function showAudioAnalysis() {
@@ -2263,8 +2482,11 @@ function buildAnalysisSpeakerGroups() {
   }));
 }
 
-function analysisModalitiesSignature(modalities = buildAnalysisModalities()) {
-  return JSON.stringify(modalities);
+function analysisModalitiesSignature(
+  modalities = buildAnalysisModalities(),
+  sourceManifest = analysisSourceManifestInput.value.trim(),
+) {
+  return JSON.stringify({ modalities, sourceManifest });
 }
 
 function hasCompleteAnalysisModality(modalities = buildAnalysisModalities()) {
@@ -2291,8 +2513,8 @@ function analysisRunGateReasonsFromForm(modalities = buildAnalysisModalities()) 
     writeCombinedWorkbook: analysisWriteCombinedToggle.checked,
     discoverySignature: state.analysisDiscoverySignature,
     currentSignature,
-    speakers: state.analysisSpeakers,
-    groups: state.analysisSpeakerGroups,
+    profileContext: state.analysisProfileContext,
+    profileDraft: state.analysisProfileDraft,
     includeProbabilitySheets: analysisProbabilitySheetsToggle.checked,
     confidenceLevelText: analysisConfidenceLevelInput.value,
     headlinePolicy: analysisHeadlinePolicySelect.value,
@@ -2310,7 +2532,9 @@ function analysisSubmissionSignature() {
     includeProbabilitySheets: analysisProbabilitySheetsToggle.checked,
     confidenceLevel: String(analysisConfidenceLevelInput.value),
     headlinePolicy: analysisHeadlinePolicySelect.value,
-    speakerGroups: buildAnalysisSpeakerGroups(),
+    analysisProfile: state.analysisProfileContext && state.analysisProfileDraft
+      ? buildAnalysisProfilePayload(state.analysisProfileContext, state.analysisProfileDraft)
+      : null,
     defaultReference: String(analysisDefaultReferenceInput.value),
     referenceOverrides: analysisReferenceOverridesInput.value,
     writeGraphs: analysisGraphsToggle.checked,
@@ -2383,8 +2607,10 @@ function updateAnalysisForm() {
     state.analysisDiscoverySignature = "";
     state.analysisSpeakers = [];
     state.analysisSpeakerGroups = [];
-    analysisSpeakerDiscoveryStatus.textContent = "Sources changed. Discover speakers again.";
-    renderAnalysisSpeakerGroups();
+    state.analysisProfileContext = null;
+    state.analysisProfileDraft = null;
+    analysisSpeakerDiscoveryStatus.textContent = "Sources changed. Load source metadata again.";
+    renderAnalysisCustomization();
   }
 
   const completeSources = hasCompleteAnalysisModality(modalities);
@@ -2410,6 +2636,8 @@ function updateAnalysisForm() {
   analysisReferenceOverridesInput.disabled = !probabilityEnabled || analysisLocked;
   analysisOutputRootInput.disabled = analysisLocked;
   browseAnalysisOutputButton.disabled = analysisLocked;
+  analysisSourceManifestInput.disabled = !combinedEnabled || analysisLocked;
+  browseAnalysisSourceManifestButton.disabled = !combinedEnabled || analysisLocked;
   analysisLandmarksToggle.disabled = analysisLocked;
   analysisTimingToggle.disabled = analysisLocked;
   analysisExcludeGeometryToggle.disabled = analysisLocked;
@@ -2418,12 +2646,28 @@ function updateAnalysisForm() {
     || state.analysisDiscoveryOperation.pending
     || analysisLocked;
   addAnalysisSpeakerGroupButton.disabled = !combinedEnabled
-    || !state.analysisSpeakers.length
-    || state.analysisSpeakerGroups.length >= 4
+    || !state.analysisProfileContext
     || analysisLocked;
   analysisSpeakerGroups.querySelectorAll("input, button").forEach((control) => {
     control.disabled = !combinedEnabled || analysisLocked || control.dataset.assignmentLocked === "true";
   });
+  analysisSortFields.querySelectorAll("input, button").forEach((control) => {
+    control.disabled = !combinedEnabled
+      || analysisLocked
+      || control.dataset.analysisSortUnavailable === "true";
+  });
+  analysisMetadataFilters.querySelectorAll("input").forEach((control) => {
+    control.disabled = !combinedEnabled || analysisLocked;
+  });
+  analysisAutomaticGroupField.disabled = !combinedEnabled || !state.analysisProfileContext || analysisLocked;
+  openAnalysisCustomizeButton.disabled = !combinedEnabled || analysisLocked;
+  saveAnalysisCustomizationButton.disabled = !state.analysisProfileContext
+    || analysisProfileIssues(
+      state.analysisProfileContext,
+      state.analysisProfileDraft,
+      buildAnalysisModalities().some((modality) => modality.name === "text"),
+    ).length > 0
+    || analysisLocked;
 
   const reasons = analysisRunGateReasonsFromForm(modalities);
   if (state.analysisDiscoveryOperation.pending && combinedEnabled) {
@@ -2443,77 +2687,76 @@ function updateAnalysisForm() {
       : reasons.length
         ? "Review requirements"
         : "Run analysis";
+  renderAnalysisProfileSummary();
 }
 
 function createSensibleAnalysisGroups(speakers) {
   if (!speakers.length) {
     return [];
   }
-  const groups = [];
-  for (let index = 0; index < speakers.length; index += 3) {
-    groups.push({
-      id: `analysis-group-${state.nextAnalysisGroupId++}`,
-      name: `Group ${groups.length + 1}`,
-      speakerKeys: speakers.slice(index, index + 3).map((speaker) => speaker.key),
-    });
-  }
-  return groups;
+  return [{
+    id: `analysis-group-${state.nextAnalysisGroupId++}`,
+    name: "All speakers",
+    speakerKeys: speakers.map((speaker) => speaker.key),
+  }];
 }
 
-function speakerGroupAssignment(speakerKey) {
-  return state.analysisSpeakerGroups.find((group) => group.speakerKeys.includes(speakerKey))?.id || "";
+function analysisManualGroups() {
+  return state.analysisProfileDraft?.manualGroups || [];
 }
 
-function analysisGroupContributionWarning(group) {
-  const labels = { imotions: "Video / iMotions", audio: "Audio" };
-  const deficits = buildAnalysisModalities()
-    .filter((modality) => modality.name !== "text")
-    .map((modality) => {
-      const contributors = group.speakerKeys.filter((speakerKey) => {
-        const speaker = state.analysisSpeakers.find((candidate) => candidate.key === speakerKey);
-        return speaker && Array.isArray(speaker.availableIn) && speaker.availableIn.includes(modality.name);
-      }).length;
-      return contributors < 2 ? `${labels[modality.name]}: ${contributors}` : "";
-    })
-    .filter(Boolean);
-  return deficits.length
-    ? `Probability requires at least two contributing speakers per modality; fewer than two contributors were found (${deficits.join(", ")}).`
-    : "";
+function profileMemberSourceIds(member) {
+  if (!state.analysisProfileContext) return [];
+  if (member.type === "source") return [member.id];
+  return state.analysisProfileContext.speakers
+    .find((speaker) => speaker.id === member.id)?.sourceIds || [];
 }
 
-function assignAnalysisSpeaker(groupId, speakerKey, selected) {
-  const targetGroup = state.analysisSpeakerGroups.find((item) => item.id === groupId);
-  if (
-    selected
-    && targetGroup
-    && !targetGroup.speakerKeys.includes(speakerKey)
-    && targetGroup.speakerKeys.length >= 3
-  ) {
-    setStatus(`${targetGroup.name} already contains the maximum of three speakers.`);
-    renderAnalysisSpeakerGroups(`speaker:${groupId}:${speakerKey}`);
-    updateAnalysisForm();
-    return;
-  }
-  state.analysisSpeakerGroups.forEach((group) => {
-    group.speakerKeys = group.speakerKeys.filter((key) => key !== speakerKey);
-  });
-  if (selected) {
-    if (targetGroup) {
-      targetGroup.speakerKeys.push(speakerKey);
+function profileMemberConflict(groupId, type, id) {
+  const candidateIds = new Set(profileMemberSourceIds({ type, id }));
+  for (const group of analysisManualGroups()) {
+    for (const member of group.members || []) {
+      if (group.id === groupId && member.type === type && member.id === id) continue;
+      if (profileMemberSourceIds(member).some((sourceId) => candidateIds.has(sourceId))) {
+        return group.name || "another manual group";
+      }
     }
   }
-  renderAnalysisSpeakerGroups(`speaker:${groupId}:${speakerKey}`);
+  return "";
+}
+
+function assignAnalysisProfileMember(groupId, type, id, selected) {
+  const group = analysisManualGroups().find((candidate) => candidate.id === groupId);
+  if (!group) return;
+  group.members = (group.members || []).filter((member) => member.type !== type || member.id !== id);
+  if (selected) {
+    const conflict = profileMemberConflict(groupId, type, id);
+    if (conflict) {
+      setStatus(`This selection overlaps ${conflict}. A source can belong to only one manual group.`);
+      refreshAnalysisSpeakerGroupState();
+      updateAnalysisForm();
+      return;
+    }
+    group.members.push({ type, id });
+  }
+  refreshAnalysisSpeakerGroupState();
+  renderAnalysisProfilePreview();
   updateAnalysisForm();
 }
 
+function assignAnalysisSpeaker(groupId, speakerKey, selected) {
+  assignAnalysisProfileMember(groupId, "speaker", speakerKey, selected);
+}
+
 function removeAnalysisSpeakerGroup(groupId) {
-  const removedIndex = state.analysisSpeakerGroups.findIndex((group) => group.id === groupId);
+  const groups = analysisManualGroups();
+  const removedIndex = groups.findIndex((group) => group.id === groupId);
   if (removedIndex < 0) {
     return;
   }
-  state.analysisSpeakerGroups = state.analysisSpeakerGroups.filter((group) => group.id !== groupId);
-  const adjacentGroup = state.analysisSpeakerGroups[Math.min(removedIndex, state.analysisSpeakerGroups.length - 1)];
-  renderAnalysisSpeakerGroups(adjacentGroup ? `group-name:${adjacentGroup.id}` : "");
+  groups.splice(removedIndex, 1);
+  const adjacentGroup = groups[Math.min(removedIndex, groups.length - 1)];
+  renderAnalysisCustomization(adjacentGroup ? `group-name:${adjacentGroup.id}` : "");
   updateAnalysisForm();
   if (!adjacentGroup) {
     addAnalysisSpeakerGroupButton.focus();
@@ -2521,18 +2764,18 @@ function removeAnalysisSpeakerGroup(groupId) {
 }
 
 function addAnalysisSpeakerGroup() {
-  if (state.analysisSpeakerGroups.length >= 4) {
-    setStatus("The combined workbook supports at most four speaker groups.");
+  if (!state.analysisProfileDraft) {
+    setStatus("Load source metadata before adding a manual group.");
     return;
   }
   const number = state.nextAnalysisGroupId++;
   const groupId = `analysis-group-${number}`;
-  state.analysisSpeakerGroups.push({
+  state.analysisProfileDraft.manualGroups.push({
     id: groupId,
-    name: `Group ${state.analysisSpeakerGroups.length + 1}`,
-    speakerKeys: [],
+    name: `Manual group ${state.analysisProfileDraft.manualGroups.length + 1}`,
+    members: [],
   });
-  renderAnalysisSpeakerGroups(`group-name:${groupId}`);
+  renderAnalysisCustomization(`group-name:${groupId}`);
   updateAnalysisForm();
 }
 
@@ -2553,10 +2796,13 @@ function announceAnalysisGroupWarnings() {
   if (analysisWarningAnnouncementTimer !== null) {
     window.clearTimeout(analysisWarningAnnouncementTimer);
   }
-  const warningText = state.analysisSpeakerGroups
-    .map(analysisGroupContributionWarning)
-    .filter(Boolean)
-    .join(" ");
+  const warningText = state.analysisProfileContext
+    ? analysisProfileIssues(
+      state.analysisProfileContext,
+      state.analysisProfileDraft,
+      buildAnalysisModalities().some((modality) => modality.name === "text"),
+    ).join(" ")
+    : "";
   analysisGroupWarningStatus.textContent = "";
   if (!warningText) {
     analysisWarningAnnouncementTimer = null;
@@ -2574,17 +2820,19 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
     ? activeElement.getAttribute("data-analysis-focus") || ""
     : "";
   analysisSpeakerGroups.replaceChildren();
-  if (!state.analysisSpeakers.length) {
+  if (!state.analysisProfileContext) {
     const empty = document.createElement("p");
     empty.className = "analysis-group-empty";
-    empty.textContent = "No speakers discovered yet.";
+    empty.textContent = "No source metadata loaded yet.";
     analysisSpeakerGroups.appendChild(empty);
     announceAnalysisGroupWarnings();
     return;
   }
-  state.analysisSpeakerGroups.forEach((group, groupIndex) => {
+  const context = state.analysisProfileContext;
+  analysisManualGroups().forEach((group, groupIndex) => {
     const row = document.createElement("section");
     row.className = "analysis-speaker-group";
+    row.dataset.analysisGroupId = group.id;
     const warningId = `analysis-group-warning-${groupIndex + 1}`;
     row.setAttribute("aria-describedby", warningId);
 
@@ -2593,7 +2841,7 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.value = group.name;
-    nameInput.setAttribute("aria-label", "Speaker group name");
+    nameInput.setAttribute("aria-label", "Manual group name");
     nameInput.setAttribute("aria-describedby", warningId);
     nameInput.setAttribute("data-analysis-focus", `group-name:${group.id}`);
     nameInput.addEventListener("input", () => {
@@ -2613,21 +2861,49 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
 
     const choices = document.createElement("div");
     choices.className = "analysis-speaker-choices";
-    state.analysisSpeakers.forEach((speaker) => {
-      const assignment = speakerGroupAssignment(speaker.key);
+    const speakerHeading = document.createElement("strong");
+    speakerHeading.textContent = "Speakers";
+    choices.appendChild(speakerHeading);
+    context.speakers.forEach((speaker) => {
       const label = document.createElement("label");
       label.className = "analysis-speaker-choice";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = assignment === group.id;
-      checkbox.dataset.assignmentLocked = String(Boolean(assignment) && assignment !== group.id);
+      checkbox.checked = (group.members || []).some((member) => member.type === "speaker" && member.id === speaker.id);
+      checkbox.dataset.assignmentLocked = String(!checkbox.checked && Boolean(profileMemberConflict(group.id, "speaker", speaker.id)));
       checkbox.disabled = checkbox.dataset.assignmentLocked === "true";
       checkbox.setAttribute("aria-describedby", warningId);
       checkbox.setAttribute("data-analysis-speaker-name", speaker.name);
-      checkbox.setAttribute("data-analysis-focus", `speaker:${group.id}:${speaker.key}`);
-      checkbox.addEventListener("change", () => assignAnalysisSpeaker(group.id, speaker.key, checkbox.checked));
+      checkbox.setAttribute("data-analysis-focus", `member:${group.id}:speaker:${speaker.id}`);
+      checkbox.dataset.analysisGroupId = group.id;
+      checkbox.dataset.analysisMemberType = "speaker";
+      checkbox.dataset.analysisMemberId = speaker.id;
+      checkbox.addEventListener("change", () => assignAnalysisProfileMember(group.id, "speaker", speaker.id, checkbox.checked));
       const name = document.createElement("span");
-      name.textContent = speaker.name;
+      name.textContent = `${speaker.name} (${speaker.sourceIds.length} source${speaker.sourceIds.length === 1 ? "" : "s"})`;
+      label.append(checkbox, name);
+      choices.appendChild(label);
+    });
+
+    const sourceHeading = document.createElement("strong");
+    sourceHeading.textContent = "Individual sources";
+    choices.appendChild(sourceHeading);
+    context.sources.forEach((source) => {
+      const label = document.createElement("label");
+      label.className = "analysis-speaker-choice";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = (group.members || []).some((member) => member.type === "source" && member.id === source.id);
+      checkbox.dataset.assignmentLocked = String(!checkbox.checked && Boolean(profileMemberConflict(group.id, "source", source.id)));
+      checkbox.disabled = checkbox.dataset.assignmentLocked === "true";
+      checkbox.setAttribute("data-analysis-speaker-name", `${source.title}, ${source.speaker}`);
+      checkbox.setAttribute("data-analysis-focus", `member:${group.id}:source:${source.id}`);
+      checkbox.dataset.analysisGroupId = group.id;
+      checkbox.dataset.analysisMemberType = "source";
+      checkbox.dataset.analysisMemberId = source.id;
+      checkbox.addEventListener("change", () => assignAnalysisProfileMember(group.id, "source", source.id, checkbox.checked));
+      const name = document.createElement("span");
+      name.textContent = `${source.title} — ${source.speaker} (${source.id})`;
       label.append(checkbox, name);
       choices.appendChild(label);
     });
@@ -2635,7 +2911,7 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
     const warning = document.createElement("p");
     warning.className = "analysis-group-warning";
     warning.id = warningId;
-    const warningText = analysisGroupContributionWarning(group);
+    const warningText = !(group.members || []).length ? "Add at least one speaker or individual source." : "";
     warning.classList.toggle("hidden", !warningText);
     warning.textContent = warningText;
     row.append(header, choices, warning);
@@ -2654,10 +2930,198 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
   announceAnalysisGroupWarnings();
 }
 
+function refreshAnalysisSpeakerGroupState() {
+  analysisSpeakerGroups.querySelectorAll("[data-analysis-member-type]").forEach((checkbox) => {
+    const group = analysisManualGroups().find((candidate) => candidate.id === checkbox.dataset.analysisGroupId);
+    const checked = Boolean(group?.members?.some(
+      (member) => member.type === checkbox.dataset.analysisMemberType
+        && member.id === checkbox.dataset.analysisMemberId,
+    ));
+    checkbox.checked = checked;
+    checkbox.dataset.assignmentLocked = String(
+      !checked && Boolean(profileMemberConflict(
+        checkbox.dataset.analysisGroupId,
+        checkbox.dataset.analysisMemberType,
+        checkbox.dataset.analysisMemberId,
+      )),
+    );
+  });
+  analysisSpeakerGroups.querySelectorAll(".analysis-speaker-group").forEach((row) => {
+    const groupId = row.dataset.analysisGroupId;
+    const group = analysisManualGroups().find((candidate) => candidate.id === groupId);
+    const warning = row.querySelector(".analysis-group-warning");
+    if (!warning) return;
+    const warningText = group && !(group.members || []).length
+      ? "Add at least one speaker or individual source."
+      : "";
+    warning.classList.toggle("hidden", !warningText);
+    warning.textContent = warningText;
+  });
+  announceAnalysisGroupWarnings();
+}
+
+function refreshAnalysisProfileFieldRows() {
+  if (!state.analysisProfileDraft) return;
+  const draft = state.analysisProfileDraft;
+  analysisSortFields.querySelectorAll("[data-analysis-sort-field]").forEach((row) => {
+    const fieldName = row.dataset.analysisSortField;
+    const priority = draft.sortFields.indexOf(fieldName);
+    row.querySelector("input").checked = priority >= 0;
+    row.querySelector("span").textContent = priority >= 0 ? `${priority + 1}. ${fieldName}` : fieldName;
+    row.querySelectorAll("button").forEach((button) => {
+      const offset = Number(button.dataset.analysisSortOffset);
+      button.classList.toggle("hidden", priority < 0);
+      button.dataset.analysisSortUnavailable = String(
+        priority < 0 || priority + offset < 0 || priority + offset >= draft.sortFields.length,
+      );
+      button.disabled = button.dataset.analysisSortUnavailable === "true";
+    });
+  });
+}
+
+function renderAnalysisProfileFields() {
+  analysisSortFields.replaceChildren();
+  analysisAutomaticGroupField.replaceChildren();
+  const noGrouping = document.createElement("option");
+  noGrouping.value = "";
+  noGrouping.textContent = "No metadata grouping";
+  analysisAutomaticGroupField.appendChild(noGrouping);
+  if (!state.analysisProfileContext || !state.analysisProfileDraft) return;
+  const draft = state.analysisProfileDraft;
+  state.analysisProfileContext.metadataFields.forEach((field) => {
+    const row = document.createElement("div");
+    row.className = "analysis-profile-field-row";
+    row.dataset.analysisSortField = field.name;
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = draft.sortFields.includes(field.name);
+    checkbox.addEventListener("change", () => {
+      draft.sortFields = draft.sortFields.filter((name) => name !== field.name);
+      if (checkbox.checked) draft.sortFields.push(field.name);
+      refreshAnalysisProfileFieldRows();
+      renderAnalysisProfilePreview();
+      updateAnalysisForm();
+    });
+    const text = document.createElement("span");
+    text.textContent = field.name;
+    label.append(checkbox, text);
+    row.appendChild(label);
+    [["Move up", -1], ["Move down", 1]].forEach(([title, offset]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost-button compact-button";
+      button.textContent = offset < 0 ? "↑" : "↓";
+      button.dataset.analysisSortOffset = String(offset);
+      button.setAttribute("aria-label", `${title}: ${field.name}`);
+      button.addEventListener("click", () => {
+        const priority = draft.sortFields.indexOf(field.name);
+        const target = priority + offset;
+        if (priority < 0 || target < 0 || target >= draft.sortFields.length) return;
+        [draft.sortFields[priority], draft.sortFields[target]] = [draft.sortFields[target], draft.sortFields[priority]];
+        refreshAnalysisProfileFieldRows();
+        renderAnalysisProfilePreview();
+        updateAnalysisForm();
+      });
+      row.appendChild(button);
+    });
+    analysisSortFields.appendChild(row);
+    const option = document.createElement("option");
+    option.value = field.name;
+    option.textContent = field.name;
+    analysisAutomaticGroupField.appendChild(option);
+  });
+  refreshAnalysisProfileFieldRows();
+  analysisAutomaticGroupField.value = draft.automaticGroupField;
+}
+
+function renderAnalysisMetadataFilters() {
+  analysisMetadataFilters.replaceChildren();
+  if (!state.analysisProfileContext || !state.analysisProfileDraft) return;
+  state.analysisProfileContext.metadataFields.forEach((field) => {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    const selected = state.analysisProfileDraft.metadataFilters[field.name] || [];
+    summary.textContent = `${field.name}: ${selected.length} of ${field.values.length} visible`;
+    details.appendChild(summary);
+    const choices = document.createElement("div");
+    choices.className = "analysis-filter-values";
+    field.values.forEach((value) => {
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selected.includes(value);
+      checkbox.addEventListener("change", () => {
+        const values = new Set(state.analysisProfileDraft.metadataFilters[field.name] || []);
+        if (checkbox.checked) values.add(value); else values.delete(value);
+        state.analysisProfileDraft.metadataFilters[field.name] = field.values.filter((candidate) => values.has(candidate));
+        summary.textContent = `${field.name}: ${state.analysisProfileDraft.metadataFilters[field.name].length} of ${field.values.length} visible`;
+        renderAnalysisProfilePreview();
+        updateAnalysisForm();
+      });
+      const text = document.createElement("span");
+      text.textContent = value;
+      label.append(checkbox, text);
+      choices.appendChild(label);
+    });
+    details.appendChild(choices);
+    analysisMetadataFilters.appendChild(details);
+  });
+}
+
+function renderAnalysisProfilePreview() {
+  analysisProfilePreview.replaceChildren();
+  if (!state.analysisProfileContext || !state.analysisProfileDraft) {
+    analysisProfilePreview.textContent = "Load source metadata to preview the output.";
+    return;
+  }
+  const sourceById = new Map(state.analysisProfileContext.sources.map((source) => [source.id, source]));
+  const preview = resolveAnalysisProfilePreview(state.analysisProfileContext, state.analysisProfileDraft);
+  const summary = document.createElement("p");
+  summary.textContent = `${preview.orderedSourceIds.length} source${preview.orderedSourceIds.length === 1 ? "" : "s"} in ${preview.groups.filter((group) => group.sourceIds.length).length} output group${preview.groups.filter((group) => group.sourceIds.length).length === 1 ? "" : "s"}.`;
+  const list = document.createElement("ol");
+  preview.groups.filter((group) => group.sourceIds.length).forEach((group) => {
+    const item = document.createElement("li");
+    const heading = document.createElement("strong");
+    heading.textContent = group.name;
+    const sources = document.createElement("span");
+    sources.textContent = group.sourceIds.map((sourceId) => sourceById.get(sourceId)?.title || sourceId).join(" → ");
+    item.append(heading, sources);
+    list.appendChild(item);
+  });
+  analysisProfilePreview.append(summary, list);
+}
+
+function renderAnalysisProfileSummary() {
+  if (!state.analysisProfileContext || !state.analysisProfileDraft) {
+    analysisProfileSummary.textContent = "No output customization loaded. Open Customize output after choosing source folders.";
+    return;
+  }
+  const preview = resolveAnalysisProfilePreview(state.analysisProfileContext, state.analysisProfileDraft);
+  const groupCount = preview.groups.filter((group) => group.sourceIds.length).length;
+  const sortCopy = state.analysisProfileDraft.sortFields.length
+    ? `Sorted by ${state.analysisProfileDraft.sortFields.join(" then ")}.`
+    : "Source-manifest order retained.";
+  const issueCount = analysisProfileIssues(
+    state.analysisProfileContext,
+    state.analysisProfileDraft,
+    buildAnalysisModalities().some((modality) => modality.name === "text"),
+  ).length;
+  analysisProfileSummary.textContent = `${preview.orderedSourceIds.length} sources, ${groupCount} groups. ${sortCopy}${issueCount ? ` ${issueCount} item${issueCount === 1 ? "" : "s"} need review.` : " Ready."}`;
+}
+
+function renderAnalysisCustomization(preferredFocusKey = "") {
+  renderAnalysisProfileFields();
+  renderAnalysisMetadataFilters();
+  renderAnalysisSpeakerGroups(preferredFocusKey);
+  renderAnalysisProfilePreview();
+  renderAnalysisProfileSummary();
+}
+
 async function discoverAnalysisSpeakers() {
   const modalities = buildAnalysisModalities();
   if (!hasCompleteAnalysisModality(modalities)) {
-    setStatus("Complete at least one analysis source before discovering speakers.");
+    setStatus("Complete at least one analysis source before loading source metadata.");
     return;
   }
   const signature = analysisModalitiesSignature(modalities);
@@ -2665,12 +3129,13 @@ async function discoverAnalysisSpeakers() {
   if (!token) {
     return;
   }
-  analysisSpeakerDiscoveryStatus.textContent = "Discovering speakers...";
+  analysisSpeakerDiscoveryStatus.textContent = "Loading source metadata...";
   updateAnalysisForm();
   try {
-    const payload = await api("/api/analysis-speakers", {
+    const sourceManifest = analysisSourceManifestInput.value.trim();
+    const payload = await api("/api/analysis-profile-context", {
       method: "POST",
-      body: { modalities },
+      body: sourceManifest ? { modalities, sourceManifest } : { modalities },
     });
     if (!isAnalysisAsyncOperationCurrent(
       state.analysisDiscoveryOperation,
@@ -2679,23 +3144,28 @@ async function discoverAnalysisSpeakers() {
     )) {
       return;
     }
-    const seen = new Set();
-    state.analysisSpeakers = (payload.speakers || []).filter((speaker) => {
-      const valid = speaker && typeof speaker.key === "string" && typeof speaker.name === "string"
-        && speaker.key.trim() && speaker.name.trim() && !seen.has(speaker.key);
-      if (valid) {
-        seen.add(speaker.key);
-      }
-      return valid;
-    });
-    state.analysisSpeakerGroups = createSensibleAnalysisGroups(state.analysisSpeakers);
+    if (
+      !payload
+      || typeof payload.sourceManifest !== "string"
+      || !/^[0-9a-f]{64}$/i.test(payload.sourceManifestSha256 || "")
+      || !Array.isArray(payload.metadataFields)
+      || !Array.isArray(payload.speakers)
+      || !Array.isArray(payload.sources)
+    ) {
+      throw new Error("The launcher returned incomplete source metadata.");
+    }
+    state.analysisProfileContext = payload;
+    state.analysisProfileDraft = createAnalysisProfileDraft(payload);
+    state.analysisSpeakers = payload.speakers.map((speaker) => ({
+      key: speaker.id,
+      name: speaker.name,
+      availableIn: [],
+    }));
+    state.analysisSpeakerGroups = [];
     state.analysisDiscoverySignature = signature;
-    const warnings = Array.isArray(payload.warnings) ? payload.warnings.filter(Boolean) : [];
-    analysisSpeakerDiscoveryStatus.textContent = warnings.length
-      ? `${state.analysisSpeakers.length} speakers found. ${warnings.join(" ")}`
-      : `${state.analysisSpeakers.length} speakers found.`;
-    renderAnalysisSpeakerGroups();
-    setStatus("Speaker groups ready for review");
+    analysisSpeakerDiscoveryStatus.textContent = `${payload.sources.length} sources and ${payload.speakers.length} speakers loaded from ${payload.sourceManifest}.`;
+    renderAnalysisCustomization();
+    setStatus("Output customization ready for review");
   } catch (error) {
     if (!isAnalysisAsyncOperationCurrent(
       state.analysisDiscoveryOperation,
@@ -2707,7 +3177,9 @@ async function discoverAnalysisSpeakers() {
     state.analysisDiscoverySignature = "";
     state.analysisSpeakers = [];
     state.analysisSpeakerGroups = [];
-    renderAnalysisSpeakerGroups();
+    state.analysisProfileContext = null;
+    state.analysisProfileDraft = null;
+    renderAnalysisCustomization();
     analysisSpeakerDiscoveryStatus.textContent = error.message;
     setStatus(error.message);
   } finally {
@@ -2715,6 +3187,35 @@ async function discoverAnalysisSpeakers() {
       updateAnalysisForm();
     }
   }
+}
+
+async function openAnalysisCustomization() {
+  await showScreen("analysis-customize");
+  renderAnalysisCustomization();
+  const modalities = buildAnalysisModalities();
+  if (
+    hasCompleteAnalysisModality(modalities)
+    && (!state.analysisProfileContext || state.analysisDiscoverySignature !== analysisModalitiesSignature(modalities))
+  ) {
+    await discoverAnalysisSpeakers();
+  }
+}
+
+async function saveAnalysisCustomization() {
+  const issues = analysisProfileIssues(
+    state.analysisProfileContext,
+    state.analysisProfileDraft,
+    buildAnalysisModalities().some((modality) => modality.name === "text"),
+  );
+  if (issues.length) {
+    setStatus(issues[0]);
+    updateAnalysisForm();
+    return;
+  }
+  renderAnalysisProfileSummary();
+  await showScreen("analysis-input");
+  setStatus("Output customization saved for this Analysis run.");
+  updateAnalysisForm();
 }
 
 async function runAudioProcessing() {
@@ -2824,7 +3325,9 @@ async function runAnalysis() {
     ? Number(String(analysisDefaultReferenceInput.value).trim())
     : 0;
   const referenceOverrides = includeProbabilitySheets ? parseAnalysisReferenceOverrides() : {};
-  const speakerGroups = writeCombinedWorkbook ? buildAnalysisSpeakerGroups() : [];
+  const analysisProfile = writeCombinedWorkbook && state.analysisProfileContext && state.analysisProfileDraft
+    ? buildAnalysisProfilePayload(state.analysisProfileContext, state.analysisProfileDraft)
+    : null;
   const options = {
     writeGraphs: analysisGraphsToggle.checked,
     includeLogscale: analysisLogscaleToggle.checked,
@@ -2860,7 +3363,8 @@ async function runAnalysis() {
       headlinePolicy,
       defaultReference,
       referenceOverrides,
-      speakerGroups,
+      speakerGroups: [],
+      analysisProfile,
       ...options,
     });
     analysisProgressLabel.textContent = "Starting...";
@@ -3636,7 +4140,23 @@ analysisImplementedControls.forEach((controls) => {
   });
 });
 discoverAnalysisSpeakersButton.addEventListener("click", discoverAnalysisSpeakers);
+browseAnalysisSourceManifestButton.addEventListener("click", () => {
+  browseInto("source-manifest", analysisSourceManifestInput)
+    .then(updateAnalysisForm)
+    .catch((error) => setStatus(error.message));
+});
+analysisSourceManifestInput.addEventListener("input", updateAnalysisForm);
 addAnalysisSpeakerGroupButton.addEventListener("click", addAnalysisSpeakerGroup);
+openAnalysisCustomizeButton.addEventListener("click", () => openAnalysisCustomization().catch((error) => setStatus(error.message)));
+backFromAnalysisCustomizeButton.addEventListener("click", () => showScreen("analysis-input"));
+saveAnalysisCustomizationButton.addEventListener("click", () => saveAnalysisCustomization().catch((error) => setStatus(error.message)));
+analysisAutomaticGroupField.addEventListener("change", () => {
+  if (!state.analysisProfileDraft) return;
+  state.analysisProfileDraft.automaticGroupField = analysisAutomaticGroupField.value;
+  renderAnalysisProfilePreview();
+  announceAnalysisGroupWarnings();
+  updateAnalysisForm();
+});
 analysisOutputRootInput.addEventListener("input", updateAnalysisForm);
 analysisDefaultReferenceInput.addEventListener("input", updateAnalysisForm);
 analysisReferenceOverridesInput.addEventListener("input", updateAnalysisForm);
@@ -3833,7 +4353,7 @@ document.addEventListener("keydown", (event) => {
 
 updateMode();
 updateAudioMode();
-renderAnalysisSpeakerGroups();
+renderAnalysisCustomization();
 updateAnalysisForm();
 updateWorkflowPlanner();
 renderReview();

@@ -66,7 +66,7 @@ class TextResultsTests(unittest.TestCase):
             self.assertEqual(result.summary_path, summary_path.resolve())
             self.assertEqual(
                 [summary.speaker_id for summary in result.summaries],
-                ["andy_burnham", "marine_le_pen"],
+                ["andyburnham", "marinelepen"],
             )
             self.assertEqual(result.summaries[0].constructs["Positive Sentiment"], 0.2)
             self.assertIsNone(result.summaries[1].constructs["Arousal / Activation"])

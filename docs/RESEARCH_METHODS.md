@@ -243,6 +243,23 @@ Scaling contracts remain source-specific:
 
 These transformations should be stated when reporting values.
 
+## Reusable Analysis Profiles
+
+Postprocessing choices are stored in `analysis_profile.json`, separate from the
+procurement sidecars. The profile records the source-manifest path and digest,
+ordered metadata sort fields, optional metadata filters and automatic grouping,
+and manual groups whose members are stable speaker or SourceID identities.
+Manual membership is resolved to SourceIDs and duplicate assignment is rejected.
+This permits several ordered or grouped analyses of the same acquired sources
+without rewriting `source_manifest.json` or `source_metadata.csv`.
+The profile manifest remains authoritative when an ordinary legacy Text or
+iMotions export has no duplicate sidecars; exact speaker, SourceID, title, and
+output-folder identities provide the linkage. When every selected legacy
+folder is sidecarless, researchers select the procurement run's
+`source_manifest.json` explicitly in **Customize output**. Because imported
+Text is one observation per speaker, Text-enabled profiles must not split one
+speaker's visible sources across output groups.
+
 ## Statistical Outputs
 
 ### Histograms

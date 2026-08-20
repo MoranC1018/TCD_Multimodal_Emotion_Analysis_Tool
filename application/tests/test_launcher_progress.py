@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import os
+import subprocess
 import sys
 import unittest
 import tempfile
@@ -14,13 +17,6 @@ from application import backend
 from application import launcher
 from application import manual_segments
 from analysis.combined_summary import AUDIO_METRICS, AUDIO_REQUIRED_METRICS
-
-
-_Speaker = type(backend.SPEAKERS[0])
-NEUTRAL_SPEAKERS = tuple(
-    _Speaker(f"speaker_{letter.casefold()}", f"Speaker {letter}", f"Speaker {letter}", "Group", column, (f"speaker {letter.casefold()}",))
-    for letter, column in zip("ABCDE", "DEFGH")
-)
 
 
 def write_catalog_audio_run(
@@ -74,23 +70,7 @@ def write_catalog_audio_run(
     )
 
 
-def neutral_resolve_speaker(value: str):
-    key = backend.normalized(value)
-    for speaker in NEUTRAL_SPEAKERS:
-        if key in {backend.normalized(speaker.speaker_id), backend.normalized(speaker.display_name)}:
-            return speaker
-    raise backend.InputError(f"Could not uniquely identify speaker from {value!r}; matches: none")
-
-
 class LauncherProgressTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._speaker_registry = patch.object(backend, "SPEAKERS", NEUTRAL_SPEAKERS)
-        self._speaker_resolver = patch.object(backend, "resolve_speaker", side_effect=neutral_resolve_speaker)
-        self._speaker_registry.start()
-        self._speaker_resolver.start()
-        self.addCleanup(self._speaker_resolver.stop)
-        self.addCleanup(self._speaker_registry.stop)
-
     def test_analysis_speaker_discovery_payload_rejects_invalid_modalities_before_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -131,10 +111,85 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(
             responses[0],
             {
-                "speakers": [{"key": "speaker_b", "name": "Speaker B", "availableIn": ["audio"]}],
+                "speakers": [{"key": "speakerb", "name": "Speaker B", "availableIn": ["audio"]}],
                 "warnings": [],
             },
         )
+
+    def test_analysis_profile_context_handler_uses_explicit_manifest_for_sidecarless_legacy_sources(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            procurement_run = root / "procurement-run"
+            write_catalog_audio_run(
+                procurement_run,
+                catalog_sha256="a" * 64,
+                title="Interview",
+            )
+            manifest = procurement_run / "source_manifest.json"
+            text_source = root / "ordinary-text-results"
+            imotions_source = root / "ordinary-imotions-results"
+            text_source.mkdir()
+            imotions_source.mkdir()
+            selections = (
+                [
+                    {
+                        "name": "text",
+                        "sourceMethod": "import",
+                        "sourcePath": str(text_source),
+                    }
+                ],
+                [
+                    {
+                        "name": "text",
+                        "sourceMethod": "import",
+                        "sourcePath": str(text_source),
+                    },
+                    {
+                        "name": "imotions",
+                        "sourceMethod": "import",
+                        "sourcePath": str(imotions_source),
+                    },
+                ],
+            )
+
+            for modalities in selections:
+                with self.subTest(modalities=[item["name"] for item in modalities]):
+                    handler = object.__new__(launcher.VideoStackUiHandler)
+                    responses: list[dict[str, object]] = []
+                    handler.send_json = responses.append
+                    handler.handle_analysis_profile_context(
+                        {
+                            "modalities": modalities,
+                            "sourceManifest": str(manifest),
+                        }
+                    )
+
+                    self.assertEqual(responses[0]["sourceManifest"], str(manifest.resolve()))
+                    self.assertEqual(len(responses[0]["sources"]), 1)
+
+    def test_analysis_profile_context_payload_rejects_unknown_or_invalid_manifest_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "text"
+            source.mkdir()
+            base = {
+                "modalities": [
+                    {
+                        "name": "text",
+                        "sourceMethod": "import",
+                        "sourcePath": str(source),
+                    }
+                ]
+            }
+            invalid = (
+                {**base, "sourceManifest": 7},
+                {**base, "sourceManifest": "   "},
+                {**base, "unexpected": "value"},
+            )
+            for payload in invalid:
+                with self.subTest(payload=payload), self.assertRaises(ValueError):
+                    launcher.analysis_profile_context_request_from_payload(payload)
 
     def test_analysis_speaker_discovery_handler_accepts_legacy_audio_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -160,7 +215,7 @@ class LauncherProgressTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(responses[0]["speakers"][0]["key"], "speaker_b")
+        self.assertEqual(responses[0]["speakers"][0]["key"], "speakerb")
         self.assertEqual(responses[0]["warnings"], [])
 
     def test_analysis_speaker_discovery_handler_rejects_empty_and_malformed_sources_without_starting_process(self) -> None:
@@ -479,7 +534,7 @@ class LauncherProgressTests(unittest.TestCase):
 
         self.assertEqual(request.modalities[0], backend.AnalysisModalityRunRequest("audio", "run", Path(r"C:\audio")))
         self.assertEqual(request.modalities[1], backend.AnalysisModalityRunRequest("text", "import", Path(r"C:\text")))
-        self.assertEqual(request.speaker_groups[0].speaker_ids, ("speaker_b", "speaker_a"))
+        self.assertEqual(request.speaker_groups[0].speaker_ids, ("speakerb", "speakera"))
         self.assertEqual(request.reference_overrides, {"baseline": 1.5})
         self.assertTrue(request.include_construct_comparison)
         self.assertTrue(request.include_probability_sheets)
@@ -491,17 +546,10 @@ class LauncherProgressTests(unittest.TestCase):
             {**payload, "modalities": [{"name": "text", "sourceMethod": "run", "sourcePath": r"C:\text"}]},
             {**payload, "speakerGroups": [{"id": "group-1", "name": "Group 1", "speakerKeys": ["speaker_b"]}, {"id": "group-1", "name": "Group 2", "speakerKeys": ["speaker_a"]}]},
             {**payload, "speakerGroups": [{"id": "group-1", "name": "Group 1", "speakerKeys": ["speaker_b", "speaker_b"]}]},
-            {**payload, "speakerGroups": [{"id": "group-1", "name": "Group 1", "speakerKeys": ["not-a-known-speaker"]}]},
+            {**payload, "speakerGroups": [{"id": "group-1", "name": "Group 1", "speakerKeys": ["   "]}]},
             {**payload, "writeGraphs": "true"},
             {**payload, "confidenceLevel": 1.0},
             {**payload, "headlinePolicy": "mystery"},
-            {**payload, "speakerGroups": [
-                {"id": f"group-{index}", "name": f"Group {index}", "speakerKeys": [speaker]}
-                for index, speaker in enumerate(
-                    ("speaker_a", "speaker_b", "speaker_c", "speaker_d", "speaker_e"),
-                    start=1,
-                )
-            ]},
         )
         for invalid_payload in invalid_payloads:
             with self.subTest(payload=invalid_payload), self.assertRaises(ValueError):
@@ -515,6 +563,75 @@ class LauncherProgressTests(unittest.TestCase):
         )
         self.assertFalse(analysis_only.write_combined_workbook)
         self.assertEqual(analysis_only.speaker_groups, ())
+
+        five_groups = launcher.analysis_workflow_request_from_payload(
+            {
+                **payload,
+                "speakerGroups": [
+                    {"id": f"group-{index}", "name": f"Group {index}", "speakerKeys": [speaker]}
+                    for index, speaker in enumerate(
+                        ("speaker_a", "speaker_b", "speaker_c", "speaker_d", "speaker_e"),
+                        start=1,
+                    )
+                ],
+            }
+        )
+        self.assertEqual(len(five_groups.speaker_groups), 5)
+
+    def test_analysis_workflow_payload_accepts_a_valid_reusable_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run = Path(temp_dir) / "run"
+            write_catalog_audio_run(
+                run,
+                catalog_sha256="a" * 64,
+                title="Interview",
+                additional_source_ids=("source-0002",),
+            )
+            manifest = run / "source_manifest.json"
+            profile = {
+                "format_version": 1,
+                "source_manifest": {
+                    "path": str(manifest),
+                    "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                },
+                "sort_fields": ["Country"],
+                "automatic_group_field": "Country",
+                "manual_groups": [
+                    {
+                        "id": "selected",
+                        "name": "Selected source",
+                        "members": [{"type": "source", "id": "source-0001"}],
+                    }
+                ],
+                "metadata_filters": {},
+            }
+            payload = {
+                "outputRoot": str(Path(temp_dir) / "reports"),
+                "writeCombinedWorkbook": True,
+                "defaultReference": 0,
+                "referenceOverrides": {},
+                "includeConstructComparison": True,
+                "includeProbabilitySheets": True,
+                "confidenceLevel": 0.95,
+                "headlinePolicy": "weighted",
+                "speakerGroups": [],
+                "analysisProfile": profile,
+                "writeGraphs": True,
+                "includeLogscale": False,
+                "includeLandmarks": False,
+                "includeTiming": False,
+                "excludeGeometry": False,
+                "modalities": [
+                    {"name": "audio", "sourceMethod": "run", "sourcePath": str(run)}
+                ],
+            }
+
+            request = launcher.analysis_workflow_request_from_payload(payload)
+
+        self.assertEqual(request.speaker_groups, ())
+        self.assertIsNotNone(request.analysis_profile)
+        self.assertEqual(request.analysis_profile.sort_fields, ("Country",))
+        self.assertEqual(request.analysis_profile.manual_groups[0].members[0].value, "source-0001")
 
     def test_analysis_workflow_handler_starts_one_coordinator_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -552,6 +669,85 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(start_process.call_args.kwargs, {"mode": "analysis-workflow", "total": 0})
         self.assertTrue(responses[0]["started"])
         self.assertEqual(responses[0]["runId"], 37)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_analysis_workflow_handler_keeps_lexical_output_for_child_junction_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            text_source = root / "text-results"
+            text_source.mkdir()
+            redirect = root / "outside"
+            redirect.mkdir()
+            parent_junction = root / "selected-output-parent"
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(parent_junction), str(redirect)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if linked.returncode != 0:
+                self.skipTest(f"Could not create test junction: {linked.stderr.strip()}")
+            selected_output = parent_junction / "reports"
+            payload = {
+                "outputRoot": str(selected_output),
+                "writeCombinedWorkbook": False,
+                "defaultReference": 0,
+                "referenceOverrides": {},
+                "includeConstructComparison": True,
+                "includeProbabilitySheets": False,
+                "confidenceLevel": 0.95,
+                "headlinePolicy": "weighted",
+                "speakerGroups": [],
+                "writeGraphs": False,
+                "includeLogscale": False,
+                "includeLandmarks": False,
+                "includeTiming": False,
+                "excludeGeometry": False,
+                "modalities": [
+                    {
+                        "name": "text",
+                        "sourceMethod": "import",
+                        "sourcePath": str(text_source),
+                    }
+                ],
+            }
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+            child_results: list[subprocess.CompletedProcess[str]] = []
+
+            def run_child(command, **_kwargs):
+                completed = subprocess.run(
+                    command,
+                    cwd=Path(__file__).resolve().parents[2],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                child_results.append(completed)
+                return 41
+
+            with (
+                patch.object(launcher, "start_process", side_effect=run_child),
+                patch.object(launcher.APP_STATE, "log"),
+            ):
+                handler.handle_run_analysis_workflow(payload)
+
+            command = responses[0]["command"]
+            self.assertEqual(
+                command[command.index("--output-root") + 1],
+                str(Path(os.path.abspath(selected_output))),
+            )
+            self.assertEqual(len(child_results), 1)
+            self.assertNotEqual(child_results[0].returncode, 0)
+            self.assertRegex(
+                child_results[0].stderr + child_results[0].stdout,
+                "reparse|junction",
+            )
+            self.assertEqual(tuple(redirect.iterdir()), ())
 
     def test_analysis_workflow_handler_rejects_existing_file_output_before_starting_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -981,6 +1177,23 @@ class LauncherProgressTests(unittest.TestCase):
             ),
         )
 
+    def test_native_window_api_uses_json_picker_for_source_manifest(self) -> None:
+        window = Mock()
+        window.create_file_dialog.return_value = (r"C:\run\source_manifest.json",)
+        api = launcher.NativeWindowApi()
+        api.bind_window(window)
+
+        result = api.browse_for_path("source-manifest")
+
+        self.assertEqual(
+            result,
+            {"path": r"C:\run\source_manifest.json", "cancelled": False},
+        )
+        window.create_file_dialog.assert_called_once_with(
+            dialog_type=10,
+            file_types=("Source manifest (source_manifest.json)", "JSON files (*.json)"),
+        )
+
     def test_native_window_defaults_are_resizable_maximized_and_not_aspect_locked(self) -> None:
         options = launcher.native_window_options()
 
@@ -998,6 +1211,13 @@ class LauncherProgressTests(unittest.TestCase):
 
         self.assertFalse(options["private_mode"])
         self.assertEqual(options["storage_path"], str(launcher.WEBVIEW_STORAGE_ROOT))
+
+    def test_native_webview_uses_the_bundled_trinity_shield_icon(self) -> None:
+        options = launcher.native_webview_start_options()
+
+        self.assertEqual(launcher.APP_ICON.name, "trinity-shield.ico")
+        self.assertTrue(launcher.APP_ICON.is_file())
+        self.assertEqual(options["icon"], str(launcher.APP_ICON))
 
     def test_shutdown_request_prevents_new_process_reservations(self) -> None:
         state = launcher.LauncherState()

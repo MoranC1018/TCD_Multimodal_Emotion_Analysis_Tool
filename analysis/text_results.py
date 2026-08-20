@@ -8,10 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from analysis.combined_summary import (
-    SPEAKERS,
     TEXT_CONSTRUCTS,
     TextConstructSummary,
-    normalized,
     resolve_speaker,
 )
 
@@ -110,13 +108,6 @@ def _construct_value(
     return value
 
 
-def _country_matches(imported: str, canonical: str) -> bool:
-    aliases = {normalized(canonical)}
-    if canonical == "United Kingdom":
-        aliases.update({"uk", "greatbritain", "britain"})
-    return normalized(imported) in aliases
-
-
 def discover_text_results(root: str | Path) -> TextResultsDiscovery:
     """Validate and load the speaker-level five-construct transcript summary."""
 
@@ -136,18 +127,12 @@ def discover_text_results(root: str | Path) -> TextResultsDiscovery:
                 if not speaker_label or not speaker_reference:
                     raise TextResultsError(f"Row {row_number}: Speaker and Speaker ID are required")
                 try:
-                    speaker = resolve_speaker(f"{speaker_reference} {speaker_label}")
-                    if not speaker.country:
-                        speaker = resolve_speaker(speaker_label)
+                    speaker = resolve_speaker(speaker_label)
                 except ValueError as exc:
                     raise TextResultsError(f"Row {row_number}: {exc}") from exc
                 if speaker.speaker_id in summaries:
                     raise TextResultsError(f"Duplicate text summary for {speaker.display_name}")
                 country = str(row.get("Country", "")).strip()
-                if speaker.country and not _country_matches(country, speaker.country):
-                    raise TextResultsError(
-                        f"Row {row_number}: country {country!r} does not match {speaker.display_name}"
-                    )
                 _required_integer(row, "Videos", row_number)
                 _required_integer(row, "Valid segments", row_number)
                 _required_integer(row, "RockSteady terms", row_number)
@@ -165,7 +150,7 @@ def discover_text_results(root: str | Path) -> TextResultsDiscovery:
                 summaries[speaker.speaker_id] = TextConstructSummary(
                     speaker_id=speaker.speaker_id,
                     display_name=speaker.display_name,
-                    country=speaker.country or country,
+                    country=country,
                     constructs=constructs,
                     source_path=summary_path,
                 )
@@ -173,10 +158,5 @@ def discover_text_results(root: str | Path) -> TextResultsDiscovery:
         raise TextResultsError(f"Could not read text speaker summary: {summary_path}") from exc
     if not summaries:
         raise TextResultsError("Text speaker summary contains no speaker rows")
-    known_ids = tuple(speaker.speaker_id for speaker in SPEAKERS)
-    ordered_ids = [speaker_id for speaker_id in known_ids if speaker_id in summaries]
-    ordered_ids.extend(
-        speaker_id for speaker_id in summaries if speaker_id not in known_ids
-    )
-    ordered = tuple(summaries[speaker_id] for speaker_id in ordered_ids)
+    ordered = tuple(summaries.values())
     return TextResultsDiscovery(summary_path, ordered)

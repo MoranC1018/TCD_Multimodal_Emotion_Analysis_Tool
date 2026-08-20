@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from procurement.procurement_beta.readiness import build_readiness_report
 from procurement.external_tools import credential_free_media_environment, resolve_nvidia_smi
+from analysis.profile import profile_from_payload
 from application import backend
 
 
@@ -60,6 +61,7 @@ CONTENT_SECURITY_POLICY = "; ".join(
     )
 )
 APP_TITLE = backend.PRODUCT_NAME
+APP_ICON = STATIC_ROOT / "trinity-shield.ico"
 APP_USER_MODEL_ID = "TrinityCollegeDublin.MultimodalEmotionAnalysisTool"
 WEBVIEW_STORAGE_ROOT = (
     Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
@@ -105,7 +107,7 @@ class NativeWindowApi:
         return True
 
     def browse_for_path(self, kind: str) -> dict[str, object]:
-        """Use the WebView2-owned picker instead of starting Tk on a worker."""
+        """Use the WebView2-owned folder or file picker instead of worker-thread Tk."""
 
         if self._window is None:
             return {"path": "", "cancelled": True}
@@ -122,6 +124,14 @@ class NativeWindowApi:
                     "CSV files (*.csv)",
                     "DOCX files (*.docx)",
                     "Video files (*.mp4;*.mov;*.mkv;*.webm;*.avi)",
+                ),
+            )
+        elif normalized_kind == "source-manifest":
+            selection = self._window.create_file_dialog(
+                dialog_type=10,
+                file_types=(
+                    "Source manifest (source_manifest.json)",
+                    "JSON files (*.json)",
                 ),
             )
         elif normalized_kind == "docx":
@@ -639,6 +649,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.handle_run_analysis_workflow(payload)
             elif parsed.path == "/api/analysis-speakers":
                 self.handle_analysis_speakers(payload)
+            elif parsed.path == "/api/analysis-profile-context":
+                self.handle_analysis_profile_context(payload)
             elif parsed.path == "/api/settings":
                 self.handle_settings(payload)
             elif parsed.path == "/api/revoke-access":
@@ -967,6 +979,17 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
 
         modalities = analysis_speaker_discovery_modalities_from_payload(payload)
         self.send_json(backend.discover_analysis_speakers(modalities))
+
+    def handle_analysis_profile_context(self, payload: dict[str, object]) -> None:
+        """Return metadata fields and stable source identities for output customization."""
+
+        modalities, source_manifest = analysis_profile_context_request_from_payload(payload)
+        self.send_json(
+            backend.discover_analysis_profile_context(
+                modalities,
+                source_manifest=source_manifest,
+            )
+        )
 
     def handle_settings(self, payload: dict[str, object]) -> None:
         """Persist local launcher settings such as API keys."""
@@ -1327,9 +1350,10 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
         "modalities",
     }
     supplied_keys = set(payload)
-    if supplied_keys != expected_keys:
+    allowed_keys = expected_keys | {"analysisProfile"}
+    if not expected_keys.issubset(supplied_keys) or not supplied_keys.issubset(allowed_keys):
         missing = sorted(expected_keys - supplied_keys)
-        unknown = sorted(supplied_keys - expected_keys)
+        unknown = sorted(supplied_keys - allowed_keys)
         details = []
         if missing:
             details.append(f"missing: {', '.join(missing)}")
@@ -1348,8 +1372,6 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
     group_ids: set[str] = set()
     group_names: set[str] = set()
     assigned_speakers: set[str] = set()
-    if len(groups_value) > 4:
-        raise ValueError("The combined workbook supports at most four speaker groups.")
     for item in groups_value:
         if not isinstance(item, dict) or set(item) != {"id", "name", "speakerKeys"}:
             raise ValueError("Each speaker group must contain only id, name, and speakerKeys.")
@@ -1361,8 +1383,6 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
         clean_speaker_keys = backend.canonical_analysis_speaker_ids(
             _workflow_required_text(key, "speakerGroups.speakerKeys") for key in speaker_keys
         )
-        if len(clean_speaker_keys) > 3:
-            raise ValueError("Each speaker group may contain at most three speakers.")
         if group_id in group_ids or group_name in group_names:
             raise ValueError("Speaker group ids and names must be unique.")
         if len(set(clean_speaker_keys)) != len(clean_speaker_keys) or assigned_speakers.intersection(clean_speaker_keys):
@@ -1371,8 +1391,20 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
         group_ids.add(group_id)
         group_names.add(group_name)
         assigned_speakers.update(clean_speaker_keys)
-    if write_combined_workbook and not groups:
-        raise ValueError("Choose at least one speaker group for the combined workbook.")
+    profile_value = payload.get("analysisProfile")
+    if profile_value is None:
+        analysis_profile = None
+    elif isinstance(profile_value, dict):
+        try:
+            analysis_profile = profile_from_payload(profile_value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid analysisProfile: {exc}") from exc
+    else:
+        raise ValueError("analysisProfile must be an object or null.")
+    if groups and analysis_profile is not None:
+        raise ValueError("Use either analysisProfile or speakerGroups, not both.")
+    if write_combined_workbook and not groups and analysis_profile is None:
+        raise ValueError("Choose an output profile or at least one speaker group for the combined workbook.")
 
     overrides_value = payload["referenceOverrides"]
     if not isinstance(overrides_value, dict):
@@ -1391,6 +1423,7 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
         output_root=output_root,
         modalities=modalities,
         speaker_groups=tuple(groups),
+        analysis_profile=analysis_profile,
         write_combined_workbook=write_combined_workbook,
         include_construct_comparison=_workflow_bool(
             payload["includeConstructComparison"],
@@ -1427,6 +1460,28 @@ def analysis_speaker_discovery_modalities_from_payload(
         if not source_path.is_dir():
             raise ValueError(f"{modality.name} analysis speaker source must be a folder: {source_path}")
     return modalities
+
+
+def analysis_profile_context_request_from_payload(
+    payload: dict[str, object],
+) -> tuple[tuple[backend.AnalysisModalityRunRequest, ...], Path | None]:
+    """Parse profile discovery with an optional authoritative procurement manifest."""
+
+    if not {"modalities"}.issubset(payload) or not set(payload).issubset(
+        {"modalities", "sourceManifest"}
+    ):
+        raise ValueError(
+            "Analysis profile context must contain modalities and optional sourceManifest."
+        )
+    modalities = analysis_speaker_discovery_modalities_from_payload(
+        {"modalities": payload["modalities"]}
+    )
+    if "sourceManifest" not in payload:
+        return modalities, None
+    source_manifest = Path(
+        _workflow_required_text(payload["sourceManifest"], "sourceManifest")
+    ).expanduser()
+    return modalities, source_manifest
 
 
 def _analysis_modalities_from_payload(
@@ -2191,7 +2246,7 @@ def begin_shutdown_cleanup(reason: str, *, server=None) -> threading.Thread:
 
 
 def browse_for_path(kind: str) -> Path | None:
-    """Open a native Windows picker for folders, DOCX files, or videos."""
+    """Open a native Windows picker for folders or supported input files."""
 
     import tkinter as tk
     from tkinter import filedialog
@@ -2207,6 +2262,14 @@ def browse_for_path(kind: str) -> Path | None:
                     ("Supported sources", "*.docx *.mp4 *.mov *.mkv *.webm *.avi"),
                     ("DOCX files", "*.docx"),
                     ("Video files", "*.mp4 *.mov *.mkv *.webm *.avi"),
+                ],
+            )
+        elif kind == "source-manifest":
+            value = filedialog.askopenfilename(
+                title="Select procurement source manifest",
+                filetypes=[
+                    ("Source manifest", "source_manifest.json"),
+                    ("JSON files", "*.json"),
                 ],
             )
         elif kind == "docx":
@@ -2365,6 +2428,7 @@ def native_webview_start_options() -> dict[str, object]:
     return {
         "gui": "edgechromium",
         "debug": False,
+        "icon": str(APP_ICON) if APP_ICON.exists() else None,
         "private_mode": False,
         "storage_path": str(WEBVIEW_STORAGE_ROOT),
     }

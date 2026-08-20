@@ -12,12 +12,12 @@ from typing import Mapping, Sequence
 
 import openpyxl
 from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from analysis.combined_summary import (
     CombinedMetricCells,
-    SPEAKERS,
     protected_manual_discovery_directories,
 )
 from analysis.histograms import student_t_two_tailed_p
@@ -343,7 +343,7 @@ def _write_probability_outline(
         ("Result scope", "What is used"),
         (
             "Speaker probability",
-            "Available per-video means for that speaker and metric (normally five videos).",
+            "Available per-source means for that participant and metric.",
         ),
         (
             "Overall probability",
@@ -393,12 +393,28 @@ def _write_probability_outline(
             ("Modality", "Group id", "Group", "Linked speakers", "Expected observations")
         )
     )
-    display_names = {speaker.speaker_id: speaker.display_name for speaker in SPEAKERS}
+    display_names: dict[str, str] = {}
+    for _metric_key, cells in records:
+        for speaker_id, display_name in zip(
+            cells.speaker_ids, cells.speaker_display_names
+        ):
+            display_names.setdefault(speaker_id, display_name)
     modalities = tuple(dict.fromkeys(cells.sheet for _, cells in records))
     group_metadata = records[0][1].speaker_groups if records else ()
-    total_speakers = len(records[0][1].speaker_ids) if records else 0
     for modality in modalities:
+        modality_cells = tuple(cells for _, cells in records if cells.sheet == modality)
+        total_speakers = max((len(cells.speaker_ids) for cells in modality_cells), default=0)
+        observation_counts: dict[str, int] = {}
+        for cells in modality_cells:
+            for speaker_id, observations in zip(cells.speaker_ids, cells.speaker_observations):
+                observation_counts[speaker_id] = max(
+                    observation_counts.get(speaker_id, 0), len(observations)
+                )
         for group_id, group_name, speaker_ids in group_metadata:
+            expected_sources = max(
+                (observation_counts.get(speaker_id, 0) for speaker_id in speaker_ids),
+                default=0,
+            )
             outline.append(
                 neutralize_spreadsheet_row(
                     (
@@ -409,7 +425,8 @@ def _write_probability_outline(
                             display_names.get(speaker_id, speaker_id)
                             for speaker_id in speaker_ids
                         ),
-                        f"speaker: up to 5 per-video means; overall: up to {total_speakers} speaker means",
+                        f"speaker: up to {expected_sources} per-source means; "
+                        f"overall: up to {total_speakers} speaker means",
                     )
                 )
             )
@@ -520,22 +537,19 @@ def add_probability_mirrors(
     details = book.create_sheet("Inference Details")
     details.append(neutralize_spreadsheet_row(_detail_headers(confidence_level)))
     inputs = book.create_sheet("Inference Inputs")
+    max_observations = max(
+        (
+            len(observations)
+            for _metric_key, cells in ordered_records
+            for observations in cells.speaker_observations
+        ),
+        default=5,
+    )
+    input_headers: list[str] = ["Probability target"]
+    for index in range(1, max(5, max_observations) + 1):
+        input_headers.extend((f"Source {index}", f"Value {index}"))
     inputs.append(
-        neutralize_spreadsheet_row(
-            (
-                "Probability target",
-                "Source 1",
-                "Value 1",
-                "Source 2",
-                "Value 2",
-                "Source 3",
-                "Value 3",
-                "Source 4",
-                "Value 4",
-                "Source 5",
-                "Value 5",
-            )
-        )
+        neutralize_spreadsheet_row(tuple(input_headers))
     )
 
     reference_resolutions: list[ReferenceResolution] = []
@@ -676,8 +690,8 @@ def add_probability_mirrors(
     settings.column_dimensions["C"].width = 34
     settings.column_dimensions["D"].width = 20
     inputs.column_dimensions["A"].width = 56
-    for column in "BCDEFGHIJK":
-        inputs.column_dimensions[column].width = 16
+    for column in range(2, len(input_headers) + 1):
+        inputs.column_dimensions[get_column_letter(column)].width = 16
     inputs.sheet_state = "hidden"
 
     probability_sheets: list[str] = []

@@ -6,6 +6,24 @@ outputs that are useful for debugging but not the primary deliverables.
 
 ---
 
+## `analysis_profile.json`
+
+Records one reusable Analysis ordering, metadata filter, and grouping choice.
+The profile binds to a `source_manifest.json` path and SHA-256 digest, lists
+ordered sort fields, an optional automatic metadata grouping field, and manual
+groups made from speaker or SourceID members. It never changes
+`source_manifest.json` or `source_metadata.csv`, so researchers can produce
+multiple postprocessing views of the same source run.
+
+When imported Text is enabled, the profile must keep all visible sources for a
+speaker in one output group because Text contributes one speaker-level
+observation. Sidecarless legacy Text and iMotions folders are matched exactly
+to identities in the authoritative profile manifest. If every selected legacy
+folder is sidecarless, choose the procurement run's `source_manifest.json`
+explicitly in the desktop **Customize output** screen.
+
+---
+
 ## `combined_analysis.xlsx`
 
 The combined workbook separates measures into four direct semantic sections:

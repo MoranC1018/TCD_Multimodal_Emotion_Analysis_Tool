@@ -775,9 +775,13 @@ types can be mixed in the same run.
 | Use existing results | Reads an existing Analysis report tree without changing it |
 | Source folder | Accepts the enabled modality's fresh input or existing report folder |
 | Browse | Selects the folder for that modality |
-| Discover speakers | Scans every enabled source and opens the group editor |
-| Add group | Creates another named comparison group |
-| Speaker assignment | Places a discovered speaker in exactly one group for this run |
+| Customize output | Opens the nested metadata ordering, filtering, and grouping screen |
+| Load source metadata | Finds the paired `source_manifest.json` and `source_metadata.csv` for the selected run |
+| Procurement source manifest | Optionally selects the authoritative `source_manifest.json` when every chosen legacy result folder is sidecarless |
+| Sort fields | Applies selected metadata fields in the displayed priority order |
+| Automatic grouping | Groups remaining sources by any declared metadata field |
+| Manual group | Adds whole speakers or individual sources to a named group |
+| Visible metadata values | Leaves matching sources out of this Analysis run without changing source sidecars |
 | Combined workbook | Builds descriptive group sheets and their adjacent probability mirrors |
 | Default reference value | Sets the comparison value used unless a sheet or metric override is supplied |
 | Reference overrides | Accepts advanced, case-sensitive per-sheet or per-metric reference values as JSON |
@@ -788,31 +792,42 @@ types can be mixed in the same run.
 | Include timing columns | Includes timing and counter fields |
 | Exclude geometry | Omits geometry columns from histogram output |
 | Report output directory | Sets the destination for new Analysis and combined outputs |
-| Run Analysis | Validates sources and groups, then runs one coordinated workflow |
+| Run Analysis | Validates sources and the saved output customization, then runs one coordinated workflow |
 | Stop | Terminates active Analysis work |
 | Back to analysis options | Returns to the Analysis configuration screen |
 
-### Set Up Speaker Groups
+### Customize The Output
 
 1. Enable Video / iMotions, Audio, Text, or any useful combination.
 2. Choose **Run analysis** or **Use existing results** separately for Video and
    Audio. Text uses **Use existing results** only. Select each source folder.
-3. Select **Discover speakers**.
-4. Name the groups and assign every discovered speaker exactly once.
-5. Keep speakers in the order in which they should appear in the workbook.
-6. Choose the output directory and select **Run Analysis**.
+3. Select **Customize output**. The application loads the immutable source
+   sidecars from the selected procurement run. Ordinary legacy Text or
+   iMotions result folders do not need duplicate sidecars; their exact speaker,
+   title, SourceID, or output-folder identities are matched to the profile. If
+   every selected result folder is sidecarless, choose the procurement run's
+   `source_manifest.json` in **Procurement source manifest**, then select
+   **Load source metadata**.
+4. Enable metadata sort fields and use the arrow buttons to set their priority.
+5. Optionally hide metadata values or group remaining sources by one metadata
+   field.
+6. Optionally create manual groups containing a whole speaker, an individual
+   source, or both. A source may resolve into only one manual group. When Text
+   is enabled, keep every visible source for one speaker in the same group
+   because imported Text results contain one observation per speaker.
+7. Review the order/group preview, select **Use this customization**, choose
+   the output directory, and select **Run Analysis**.
 
-Groups define the speakers being compared; they are not raw-data filters. Each
-group receives its own quantitative sheet for every enabled modality. The
-submitted speakers appear first, in the submitted order, followed by one
-**Overall** column. The Overall value is the mean of the available speaker
-means. A speaker missing from one modality remains blank for that modality and
-is excluded from that result with a warning.
-
-The Run button explains anything still required. When the combined workbook is
-enabled, all discovered speakers must be assigned so no one is silently left
-out. Imported Text construct values appear in the comparison sheet but are not
-used for Video or Audio probability inference because those outputs use
+The application writes these choices to `analysis_profile.json` in the
+Analysis output. The profile records the source-manifest path and SHA-256
+digest, so the same procurement run can be postprocessed repeatedly with
+different groupings while `source_manifest.json` and `source_metadata.csv`
+remain unchanged. Unassigned visible sources flow into automatic metadata
+groups or one **All other sources** group. The Overall value is the mean of the
+available participant means. Metadata values are matched exactly after
+surrounding whitespace is removed, so differently capitalized categories remain
+distinct. Imported Text construct values appear in the comparison sheet but are
+not used for Video or Audio probability inference because those outputs use
 different measurement scales.
 
 Reference override keys must match generated names exactly. A sheet override
@@ -854,23 +869,27 @@ The selected output directory contains:
 ```text
 combined_analysis.xlsx
 combined_analysis_manifest.json
+analysis_profile.json
 video/                         # present when Video / iMotions ran fresh
 audio/                         # present when Audio ran fresh
 ```
 
 `combined_analysis_manifest.json` records status, source methods and paths,
-speaker groups, software version, best-effort Git revision, accepted and
+the Analysis profile, software version, best-effort Git revision, accepted and
 rejected report decisions, modality output roots, resolved reference sources,
 workbook path, and warnings. A failed manifest also records the failed stage
 and a sanitized one-line error. Keep it with the workbook when archiving or
 sharing a run.
 
 Before a new run uses the same output directory, any previous fixed-name
-workbook and manifest are moved into a self-contained run directory below
-`combined_analysis_history/`. The archived manifest is rewritten to identify
-its matching archived workbook and records that workbook's SHA-256 hash. This
-prevents a failed rerun from leaving an older `combined_analysis.xlsx` beside
+workbook, manifest, and Analysis profile are moved into a self-contained run
+directory below `combined_analysis_history/`. The archived manifest is rewritten
+to identify its matching archived workbook and records that workbook's SHA-256
+hash. This prevents a failed rerun from leaving an older
+`combined_analysis.xlsx` beside
 the new failed manifest or a historical manifest pointing at a later run.
+Failed-run state is quarantined in the same contained history directory so the
+researcher can correct the input and retry without manual file cleanup.
 Imported source files are never moved or changed.
 
 #### Combined workbook measure contract

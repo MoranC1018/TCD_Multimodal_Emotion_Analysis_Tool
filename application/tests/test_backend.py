@@ -4,6 +4,8 @@ import csv
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -13,55 +15,11 @@ from unittest.mock import patch
 from docx import Document
 
 from analysis.combined_summary import AUDIO_METRICS, AUDIO_REQUIRED_METRICS, VIDEO_METRICS
-from analysis import text_results
+from analysis.profile import AnalysisProfile, ManualGroup, ProfileMember
 from application import backend
 
 
-_Speaker = type(backend.SPEAKERS[0])
-NEUTRAL_SPEAKERS = (
-    _Speaker("speaker_a", "Speaker A", "Speaker A", "Group 1", "D", ("speaker a",)),
-    _Speaker("speaker_b", "Speaker B", "Speaker B", "Group 1", "E", ("speaker b",)),
-    _Speaker("speaker_c", "Speaker C", "Speaker C", "Group 2", "F", ("speaker c",)),
-    _Speaker("speaker_d", "Speaker D", "Speaker D", "Group 2", "G", ("speaker d",)),
-    _Speaker("speaker_e", "Speaker E", "Speaker E", "Group 3", "H", ("speaker e",)),
-)
-
-
-def neutral_resolve_speaker(value: str):
-    key = backend.normalized(value)
-    for speaker in NEUTRAL_SPEAKERS:
-        if key in {backend.normalized(speaker.speaker_id), backend.normalized(speaker.display_name)}:
-            return speaker
-    matches = [
-        speaker
-        for speaker in NEUTRAL_SPEAKERS
-        if any(backend.normalized(alias) in key for alias in speaker.aliases)
-    ]
-    if len(matches) == 1:
-        return matches[0]
-    display = " ".join(str(value).strip().split())
-    return _Speaker(key, display, display, "", "", (display,))
-
-
 class ProcurementUiBackendTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._speaker_registry = patch.object(backend, "SPEAKERS", NEUTRAL_SPEAKERS)
-        self._speaker_resolver = patch.object(backend, "resolve_speaker", side_effect=neutral_resolve_speaker)
-        self._text_speaker_resolver = patch.object(
-            text_results,
-            "resolve_speaker",
-            side_effect=neutral_resolve_speaker,
-        )
-        self._text_speaker_registry = patch.object(text_results, "SPEAKERS", NEUTRAL_SPEAKERS)
-        self._speaker_registry.start()
-        self._speaker_resolver.start()
-        self._text_speaker_resolver.start()
-        self._text_speaker_registry.start()
-        self.addCleanup(self._text_speaker_registry.stop)
-        self.addCleanup(self._text_speaker_resolver.stop)
-        self.addCleanup(self._speaker_resolver.stop)
-        self.addCleanup(self._speaker_registry.stop)
-
     def test_nearby_metadata_rejects_oversized_control_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             video = Path(temp_dir) / "clip.mp4"
@@ -332,7 +290,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
                 result,
                 {
                     "speakers": [
-                        {"key": "speaker_a", "name": "Speaker A", "availableIn": ["audio"]},
+                        {"key": "speakera", "name": "Speaker A", "availableIn": ["audio"]},
                     ],
                     "warnings": [],
                 },
@@ -356,7 +314,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
                 result,
                 {
                     "speakers": [
-                        {"key": "speaker_c", "name": "Speaker C", "availableIn": ["text"]},
+                        {"key": "speakerc", "name": "Speaker C", "availableIn": ["text"]},
                     ],
                     "warnings": [],
                 },
@@ -382,7 +340,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(
             result["speakers"],
             [
-                {"key": "speaker_a", "name": "Speaker A", "availableIn": ["audio"]},
+                {"key": "speakera", "name": "Speaker A", "availableIn": ["audio"]},
                 {"key": "unknownperson", "name": "Unknown Person", "availableIn": ["audio"]},
             ],
         )
@@ -400,7 +358,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
                 (backend.AnalysisModalityRunRequest("audio", "import", imported),)
             )
 
-        self.assertEqual(result["speakers"][0]["key"], "speaker_a")
+        self.assertEqual(result["speakers"][0]["key"], "speakera")
         self.assertEqual(result["warnings"], [])
 
     def test_analysis_speaker_discovery_unions_fresh_imotions_and_audio_in_canonical_order(self) -> None:
@@ -425,8 +383,8 @@ class ProcurementUiBackendTests(unittest.TestCase):
             result,
             {
                 "speakers": [
-                    {"key": "speaker_a", "name": "Speaker A", "availableIn": ["audio"]},
-                    {"key": "speaker_b", "name": "Speaker B", "availableIn": ["imotions", "audio"]},
+                    {"key": "speakera", "name": "Speaker A", "availableIn": ["audio"]},
+                    {"key": "speakerb", "name": "Speaker B", "availableIn": ["imotions", "audio"]},
                 ],
                 "warnings": [],
             },
@@ -1695,7 +1653,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(command[command.index("--text-method") + 1], "import")
         self.assertEqual(
             json.loads(command[command.index("--speaker-groups-json") + 1]),
-            [{"id": "group-1", "name": "Group 1", "speakerKeys": ["speaker_b", "speaker_a"]}],
+            [{"id": "group-1", "name": "Group 1", "speakerKeys": ["speakerb", "speakera"]}],
         )
         self.assertEqual(
             command[command.index("--reference-overrides-json") + 1],
@@ -1769,6 +1727,293 @@ class ProcurementUiBackendTests(unittest.TestCase):
         )
         self.assertIn("--no-combined-workbook", command)
         self.assertEqual(json.loads(command[command.index("--speaker-groups-json") + 1]), [])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
+    def test_analysis_workflow_command_preserves_output_junction_for_child_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            text_source = root / "text-results"
+            text_source.mkdir()
+            redirect = root / "outside"
+            redirect.mkdir()
+            parent_junction = root / "selected-output-parent"
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(parent_junction), str(redirect)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                self.skipTest(f"Could not create test junction: {completed.stderr.strip()}")
+            selected_output = parent_junction / "reports"
+            command = backend.build_analysis_workflow_command(
+                backend.AnalysisWorkflowRunRequest(
+                    output_root=selected_output,
+                    modalities=(
+                        backend.AnalysisModalityRunRequest("text", "import", text_source),
+                    ),
+                    write_combined_workbook=False,
+                    include_probability_sheets=False,
+                ),
+                repo_root=Path(__file__).resolve().parents[2],
+                python_executable=Path(sys.executable),
+            )
+
+            self.assertEqual(
+                command[command.index("--output-root") + 1],
+                str(Path(os.path.abspath(selected_output))),
+            )
+            child = subprocess.run(
+                command,
+                cwd=Path(__file__).resolve().parents[2],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(child.returncode, 0)
+            self.assertRegex(child.stderr + child.stdout, "reparse|junction")
+            self.assertEqual(tuple(redirect.iterdir()), ())
+
+    def test_analysis_profile_context_and_command_have_no_source_or_group_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run = root / "run"
+            selected = run / "processing" / "audio"
+            selected.mkdir(parents=True)
+            ordinary_text = root / "ordinary-text-results"
+            ordinary_text.mkdir()
+            sources = []
+            for index in range(1, 15):
+                speaker = f"Researcher {index:02d}"
+                sources.append(
+                    {
+                        "source_id": f"source-{index:04d}",
+                        "speaker": speaker,
+                        "speaker_display": speaker,
+                        "selected": True,
+                        "system_metadata": {"title": f"Interview {index:02d}"},
+                        "user_metadata": {
+                            "Country": "Ireland" if index % 2 else "Japan",
+                            "Language": "English",
+                        },
+                        "output_mapping": {"video_directory": str(run / speaker / f"source-{index:04d}")},
+                    }
+                )
+            sources.append(
+                {
+                    "source_id": "source-0015",
+                    "speaker": "Not selected",
+                    "speaker_display": "Not selected",
+                    "selected": False,
+                    "system_metadata": {"title": "Not selected"},
+                    "user_metadata": {"Country": "France", "Language": "French"},
+                    "output_mapping": {"video_directory": str(run / "Not selected" / "source-0015")},
+                }
+            )
+            manifest = run / "source_manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "format_version": 1,
+                        "catalog": {"metadata_headers": ["Country", "Language"]},
+                        "sources": sources,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run / "source_metadata.csv").write_text(
+                "SourceID,Country,Language\n"
+                + "\n".join(
+                    (
+                        "source-0015,France,French"
+                        if index == 15
+                        else f"source-{index:04d},{'Ireland' if index % 2 else 'Japan'},English"
+                    )
+                    for index in range(1, 16)
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            context = backend.discover_analysis_profile_context(
+                (
+                    backend.AnalysisModalityRunRequest("audio", "run", selected),
+                    backend.AnalysisModalityRunRequest("text", "import", ordinary_text),
+                )
+            )
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            profile = AnalysisProfile(
+                manifest,
+                digest,
+                sort_fields=("Country", "Language"),
+                automatic_group_field="Country",
+                manual_groups=tuple(
+                    ManualGroup(
+                        f"group-{index}",
+                        f"Group {index}",
+                        (ProfileMember("source", f"source-{index:04d}"),),
+                    )
+                    for index in range(1, 6)
+                ),
+            )
+            command = backend.build_analysis_workflow_command(
+                backend.AnalysisWorkflowRunRequest(
+                    output_root=root / "reports",
+                    modalities=(
+                        backend.AnalysisModalityRunRequest("audio", "run", selected),
+                        backend.AnalysisModalityRunRequest("text", "import", ordinary_text),
+                    ),
+                    analysis_profile=profile,
+                ),
+                repo_root=root,
+                python_executable=Path(r"C:\Python312\python.exe"),
+            )
+
+        self.assertEqual(context["sourceManifest"], str(manifest.resolve()))
+        self.assertEqual(context["sourceManifestSha256"], digest)
+        self.assertEqual([field["name"] for field in context["metadataFields"]], ["Country", "Language"])
+        self.assertEqual(context["metadataFields"][0]["values"], ["Ireland", "Japan"])
+        self.assertEqual(len(context["sources"]), 14)
+        self.assertEqual(len(context["speakers"]), 14)
+        self.assertNotIn("--speaker-groups-json", command)
+        self.assertEqual(command[command.index("--text-source") + 1], str(ordinary_text.resolve()))
+        profile_payload = json.loads(command[command.index("--analysis-profile-json") + 1])
+        self.assertEqual(len(profile_payload["manual_groups"]), 5)
+        self.assertEqual(profile_payload["automatic_group_field"], "Country")
+
+    def test_analysis_profile_command_rejects_an_unrelated_modality_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            def write_run(name: str) -> Path:
+                run = root / name
+                selected = run / "processing" / "audio"
+                selected.mkdir(parents=True)
+                manifest = run / "source_manifest.json"
+                manifest.write_text(
+                    json.dumps(
+                        {
+                            "format_version": 1,
+                            "catalog": {"metadata_headers": ["Country"]},
+                            "sources": [
+                                {
+                                    "source_id": "source-0001",
+                                    "speaker": "Researcher Alpha",
+                                    "speaker_display": "Researcher Alpha",
+                                    "selected": True,
+                                    "system_metadata": {"title": "Interview"},
+                                    "user_metadata": {"Country": "Ireland"},
+                                    "output_mapping": {
+                                        "video_directory": str(run / "source-0001")
+                                    },
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (run / "source_metadata.csv").write_text(
+                    "SourceID,Country\nsource-0001,Ireland\n",
+                    encoding="utf-8",
+                )
+                return selected
+
+            profile_source = write_run("profile-run")
+            selected_source = write_run("selected-run")
+            profile_manifest = profile_source.parents[1] / "source_manifest.json"
+            profile = AnalysisProfile(
+                profile_manifest,
+                hashlib.sha256(profile_manifest.read_bytes()).hexdigest(),
+            )
+
+            with self.assertRaisesRegex(ValueError, "associated with the selected modality"):
+                backend.build_analysis_workflow_command(
+                    backend.AnalysisWorkflowRunRequest(
+                        output_root=root / "output",
+                        modalities=(
+                            backend.AnalysisModalityRunRequest(
+                                "audio", "run", selected_source
+                            ),
+                        ),
+                        analysis_profile=profile,
+                    ),
+                    repo_root=root,
+                )
+
+    def test_analysis_profile_command_rejects_text_speaker_split_by_manual_or_automatic_groups(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run = root / "run"
+            audio = run / "analysis-input" / "audio"
+            text = root / "ordinary-text-results"
+            audio.mkdir(parents=True)
+            text.mkdir()
+            sources = [
+                {
+                    "source_id": f"source-{index:04d}",
+                    "speaker": "Researcher Alpha",
+                    "speaker_display": "Researcher Alpha",
+                    "selected": True,
+                    "system_metadata": {"title": f"Interview {index}"},
+                    "user_metadata": {"Country": country},
+                    "output_mapping": {
+                        "video_directory": str(run / "Researcher Alpha" / f"source-{index:04d}")
+                    },
+                }
+                for index, country in ((1, "Ireland"), (2, "Japan"))
+            ]
+            manifest = run / "source_manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "format_version": 1,
+                        "catalog": {"metadata_headers": ["Country"]},
+                        "sources": sources,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run / "source_metadata.csv").write_text(
+                "SourceID,Country\nsource-0001,Ireland\nsource-0002,Japan\n",
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+            profiles = (
+                AnalysisProfile(manifest, digest, automatic_group_field="Country"),
+                AnalysisProfile(
+                    manifest,
+                    digest,
+                    manual_groups=(
+                        ManualGroup(
+                            "first",
+                            "First interview",
+                            (ProfileMember("source", "source-0001"),),
+                        ),
+                    ),
+                ),
+            )
+            modalities = (
+                backend.AnalysisModalityRunRequest("audio", "import", audio),
+                backend.AnalysisModalityRunRequest("text", "import", text),
+            )
+
+            for profile in profiles:
+                with self.subTest(profile=profile), self.assertRaisesRegex(
+                    ValueError,
+                    "Text is speaker-level|same output group",
+                ):
+                    backend.build_analysis_workflow_command(
+                        backend.AnalysisWorkflowRunRequest(
+                            output_root=root / "output",
+                            modalities=modalities,
+                            analysis_profile=profile,
+                        ),
+                        repo_root=root,
+                    )
 
 
 if __name__ == "__main__":

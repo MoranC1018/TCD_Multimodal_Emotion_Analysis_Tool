@@ -156,6 +156,33 @@ and produce one concise warning; newly generated audio reports retain all nine
 emotions. Action units, muscles, and tones stay in detailed/raw reports and are
 outside the combined emotional workbook.
 
+## Reusable Output Customization
+
+The desktop application's **Customize output** screen reads the paired
+`source_manifest.json` and `source_metadata.csv` from a procurement run. It can
+order sources by any declared metadata fields, hide selected metadata values,
+automatically group by one field, and create manual groups containing whole
+speakers or individual SourceIDs. A SourceID can resolve into only one manual
+group. If Text is included, every visible source for a speaker must resolve to
+one output group because the imported Text summary has speaker-level rather
+than source-level observations.
+
+Metadata values are matched exactly after surrounding whitespace is removed;
+capitalization remains meaningful for sorting, filtering, and grouping.
+
+Each Analysis output stores the choices in `analysis_profile.json`, including
+the source-manifest path and SHA-256 digest. This file is separate from the
+source sidecars: rerunning postprocessing with a different profile creates a
+different ordering/grouping without modifying procurement provenance. Previous
+fixed-name workbooks, manifests, and profiles are archived together when the
+same output directory is reused. A failed run is quarantined under the same
+reparse-checked history directory so a corrected run can be retried normally.
+Sidecarless legacy Text and iMotions exports remain usable when their exact
+speaker, SourceID, title, or output-folder identities map unambiguously to the
+profile's authoritative procurement manifest. When every selected legacy
+result folder is sidecarless, choose that procurement `source_manifest.json`
+explicitly in **Customize output** before loading source metadata.
+
 ## RockSteady Text-Emotion Outputs
 
 `text.py` has two subcommands: `split` (split a combined export by speaker)
