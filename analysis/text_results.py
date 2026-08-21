@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 from dataclasses import dataclass
@@ -209,7 +210,16 @@ def _load_native_summary(root: Path, summary_path: Path) -> TextResultsDiscovery
     multimodal = batch.get("multimodal")
     if not isinstance(multimodal, Mapping):
         raise TextResultsError("Native Text pair manifest has no multimodal contract")
-    _verify_bound_artifact(pair_root, multimodal, "video_summary", "video_summary_sha256")
+    verified_summary_path, verified_summary_bytes = _verify_bound_artifact_snapshot(
+        pair_root,
+        multimodal,
+        "video_summary",
+        "video_summary_sha256",
+    )
+    if verified_summary_path != summary_path:
+        raise TextResultsError(
+            "Native Text discovered summary does not match the manifest-bound video summary"
+        )
     contract_path = _verify_bound_artifact(pair_root, multimodal, "contract", "contract_sha256")
     contract = _read_json(contract_path, "native Text alignment contract")
     if contract.get("kind") != "transcript-multimodal-alignment":
@@ -255,7 +265,7 @@ def _load_native_summary(root: Path, summary_path: Path) -> TextResultsDiscovery
     summaries: list[TextConstructSummary] = []
     seen: set[str] = set()
     try:
-        with summary_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        with io.StringIO(verified_summary_bytes.decode("utf-8-sig"), newline="") as handle:
             reader = csv.DictReader(handle)
             if not reader.fieldnames:
                 raise TextResultsError("Native Text video summary has no header")
@@ -287,7 +297,7 @@ def _load_native_summary(root: Path, summary_path: Path) -> TextResultsDiscovery
                         display_name=source.title,
                         country=str(source.user_metadata.get("Country", row.get("Country", ""))),
                         constructs=constructs,
-                        source_path=summary_path,
+                        source_path=verified_summary_path,
                         grain="source",
                         source_ids=(source_id,),
                     )
@@ -296,19 +306,33 @@ def _load_native_summary(root: Path, summary_path: Path) -> TextResultsDiscovery
         raise TextResultsError(f"Could not read native Text summary: {summary_path}") from exc
     if tuple(item.source_ids[0] for item in summaries) != tuple(declared_ids):
         raise TextResultsError("Native Text summary SourceIDs do not match the pair manifest in order")
-    return TextResultsDiscovery(summary_path, tuple(summaries), "source")
+    return TextResultsDiscovery(verified_summary_path, tuple(summaries), "source")
 
 
 def _verify_bound_artifact(root: Path, contract: Mapping[str, object], path_key: str, hash_key: str) -> Path:
+    path, _ = _verify_bound_artifact_snapshot(root, contract, path_key, hash_key)
+    return path
+
+
+def _verify_bound_artifact_snapshot(
+    root: Path,
+    contract: Mapping[str, object],
+    path_key: str,
+    hash_key: str,
+) -> tuple[Path, bytes]:
     label = path_key.replace("_", " ")
     relative = Path(str(contract.get(path_key) or ""))
     path = (root / relative).resolve()
     if relative.is_absolute() or ".." in relative.parts or not path.is_relative_to(root.resolve()):
         raise TextResultsError(f"Native Text {label} path is unsafe")
     expected = str(contract.get(hash_key) or "").casefold()
-    if not path.is_file() or len(expected) != 64 or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+    try:
+        snapshot = path.read_bytes()
+    except OSError as exc:
+        raise TextResultsError(f"Native Text {label} hash does not match its manifest") from exc
+    if len(expected) != 64 or hashlib.sha256(snapshot).hexdigest() != expected:
         raise TextResultsError(f"Native Text {label} hash does not match its manifest")
-    return path
+    return path, snapshot
 
 
 def _bound_source_contexts(

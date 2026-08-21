@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,12 +38,43 @@ class ApplicationPackageTests(unittest.TestCase):
                 self.assertTrue((APPLICATION_ROOT / relative_path).is_file())
 
     def test_primary_launcher_uses_application_module(self) -> None:
-        launcher = (REPOSITORY_ROOT / "Launch_Video_Processing_Stack.ps1").read_text(
-            encoding="utf-8"
-        )
+        with tempfile.TemporaryDirectory(prefix="emotion-tool-launcher-") as raw_root:
+            root = Path(raw_root)
+            launcher = root / "Launch_Video_Processing_Stack.bat"
+            shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
+            command_dir = root / "commands"
+            command_dir.mkdir()
+            record = root / "launcher-invocation.txt"
+            (command_dir / "python.cmd").write_text(
+                "@echo off\n"
+                "if /I \"%~1\"==\"-c\" exit /b 0\n"
+                "if /I \"%~1\"==\"-m\" if /I \"%~2\"==\"application.launcher\" (\n"
+                "  >\"%LAUNCHER_TEST_RECORD%\" echo %1 %2\n"
+                "  exit /b 0\n"
+                ")\n"
+                "exit /b 91\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["LOCALAPPDATA"] = str(root / "no-local-python")
+            environment["PATH"] = os.pathsep.join(
+                (str(command_dir), str(Path(os.environ["SystemRoot"]) / "System32"))
+            )
+            environment["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+            environment["LAUNCHER_TEST_RECORD"] = str(record)
 
-        self.assertIn("-m application.launcher", launcher)
-        self.assertNotIn("-m procurement.ui.launcher", launcher)
+            completed = subprocess.run(
+                [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher)],
+                cwd=root,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(record.read_text(encoding="utf-8").strip(), "-m application.launcher")
 
     def test_application_modules_are_importable(self) -> None:
         for module_name in (

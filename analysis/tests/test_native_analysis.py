@@ -315,6 +315,68 @@ def test_native_text_hash_tampering_is_rejected(tmp_path: Path) -> None:
         discover_text_results(tmp_path)
 
 
+def test_native_text_rejects_discovered_summary_that_is_not_manifest_bound(
+    tmp_path: Path,
+) -> None:
+    """Break caught: Analysis verified one CSV but parsed another compatible CSV."""
+
+    _write_source_sidecars(tmp_path)
+    discovered = _write_native_text(tmp_path)
+    bound = discovered.with_name("bound.csv")
+    discovered.replace(bound)
+
+    batch_path = tmp_path / "postprocessing" / "text_postprocessing_batch_manifest.json"
+    batch = json.loads(batch_path.read_text(encoding="utf-8"))
+    batch["multimodal"]["video_summary"] = "multimodal/bound.csv"
+    batch["multimodal"]["video_summary_sha256"] = _sha(bound)
+    batch_path.write_text(json.dumps(batch), encoding="utf-8")
+
+    rows = list(csv.reader(bound.read_text(encoding="utf-8").splitlines()))
+    positive = rows[0].index("Positive Sentiment")
+    negative = rows[0].index("Negative Sentiment")
+    rows[1][positive] = "0.2"
+    rows[1][negative] = "0.8"
+    with discovered.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+    with pytest.raises(TextResultsError, match="manifest-bound video summary"):
+        discover_text_results(tmp_path)
+
+
+def test_native_text_parses_the_same_snapshot_that_was_manifest_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Break caught: the summary path changed after its manifest hash check."""
+
+    _write_source_sidecars(tmp_path)
+    summary = _write_native_text(tmp_path)
+    summary_resolved = summary.resolve()
+    original_read_bytes = Path.read_bytes
+    replaced = False
+
+    def read_then_replace(path: Path) -> bytes:
+        nonlocal replaced
+        snapshot = original_read_bytes(path)
+        if path.resolve() == summary_resolved and not replaced:
+            rows = list(csv.reader(snapshot.decode("utf-8").splitlines()))
+            positive = rows[0].index("Positive Sentiment")
+            negative = rows[0].index("Negative Sentiment")
+            rows[1][positive] = "0.2"
+            rows[1][negative] = "0.8"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                csv.writer(handle).writerows(rows)
+            replaced = True
+        return snapshot
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_replace)
+
+    discovery = discover_text_results(tmp_path)
+
+    assert replaced
+    assert discovery.summaries[0].constructs["Text Valence"] == pytest.approx(0.8)
+
+
 def test_native_text_rejects_replacement_sidecars_with_the_same_source_ids(tmp_path: Path) -> None:
     _write_source_sidecars(tmp_path)
     _write_native_text(tmp_path)

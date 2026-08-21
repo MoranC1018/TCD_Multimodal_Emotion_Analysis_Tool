@@ -435,7 +435,6 @@ class ReleaseUiContractTests(unittest.TestCase):
         cls.javascript = (UI_ROOT / "static" / "app.js").read_text(encoding="utf-8")
         cls.styles = (UI_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
         cls.launcher = (UI_ROOT / "launcher.py").read_text(encoding="utf-8")
-        cls.launch_script = (PROJECT_ROOT / "Launch_Video_Processing_Stack.ps1").read_text(encoding="utf-8")
 
     def test_procurement_has_one_universal_search_control(self) -> None:
         self.assertEqual(self.html.count('id="scanButton"'), 1)

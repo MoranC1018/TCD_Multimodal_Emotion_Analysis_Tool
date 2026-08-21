@@ -84,7 +84,8 @@ not made redistributable by this repository.
 
 ## Research And Release Boundaries
 
-- Face and Text processing are import-only in the current release.
+- Face and Text processing are optional local pipelines and must report missing
+  model or runtime dependencies before creating outputs.
 - Clean Speaker remains experimental and must fail closed when model-backed
   evidence is unavailable.
 - Model outputs require study-specific validation and human review.
@@ -92,5 +93,3 @@ not made redistributable by this repository.
   and interpretation remain the researcher's responsibility.
 - Institutional affiliation does not imply endorsement of a contribution or
   its findings.
-
-Report suspected vulnerabilities through the private process in `SECURITY.md`.

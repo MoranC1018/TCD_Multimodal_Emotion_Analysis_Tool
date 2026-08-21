@@ -35,10 +35,8 @@ Project-authored code and documentation are released under the root
 in particular, OpenSMILE 3.0.0 is excluded from the MIT License and remains
 under the audEERING Research License, including its non-commercial boundary.
 Read [Third-Party Notices](THIRD_PARTY_NOTICES.md) before reuse or
-redistribution. Citation metadata, attribution, contribution guidance, and the
-private vulnerability-reporting process are in [CITATION.cff](CITATION.cff),
-[AUTHORS.md](AUTHORS.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
-[SECURITY.md](SECURITY.md).
+redistribution. Attribution and contribution guidance are in
+[AUTHORS.md](AUTHORS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Contents
 
