@@ -1167,7 +1167,8 @@ class TextSegmentPostprocessingTests(unittest.TestCase):
 
         row = construct_row(source, level="segment", variant="extra")
 
-        self.assertEqual(len(CONSTRUCTS), 5)
+        self.assertEqual(len(CONSTRUCTS), 6)
+        self.assertAlmostEqual(float(row["text_valence_balance_score"]), 1 / 3)
         self.assertAlmostEqual(float(row["activation_balance_score"]), 0.5)
         self.assertAlmostEqual(float(row["dominance_power_balance_score"]), 0.5)
         self.assertAlmostEqual(float(row["affiliation_social_balance_score"]), 0.5)

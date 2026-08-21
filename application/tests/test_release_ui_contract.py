@@ -735,8 +735,7 @@ class ReleaseUiContractTests(unittest.TestCase):
             completed = subprocess.run(
                 [
                     node_command,
-                    "-e",
-                    harness.read_text(encoding="utf-8"),
+                    str(harness),
                     str(UI_ROOT),
                     str(playwright_root),
                     json.dumps(browser_config),
@@ -787,10 +786,10 @@ class ReleaseUiContractTests(unittest.TestCase):
             r"analysisOutputRootInput\.value = payload\.defaultAnalysisOutputRoot;\s+updateAnalysisForm\(\);",
         )
 
-    def test_analysis_modality_grid_responds_three_two_one(self) -> None:
+    def test_analysis_modality_grid_responds_four_two_one(self) -> None:
         self.assertRegex(
             self.styles,
-            r"\.analysis-modality-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);",
+            r"\.analysis-modality-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);",
         )
         self.assertRegex(
             self.styles,

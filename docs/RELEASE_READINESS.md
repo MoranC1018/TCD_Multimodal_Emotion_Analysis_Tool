@@ -1,12 +1,12 @@
 # Release Readiness Report
 
-Date: 2026-07-23
+Date: 2026-08-21
 
 ## Outcome
 
-The implemented Procurement, audio Processing, import, and Analysis workflows
-are ready for local Windows research use. The release is intentionally bounded:
-Face and Text are import-only, and Clean speaker segments remains labelled
+The implemented Procurement, native Face/Audio/Text Processing, import, and
+Analysis workflows are ready for local Windows research use when their
+structured dependency checks pass. Clean speaker segments remains labelled
 Beta. The launcher is a local desktop application backed by a loopback HTTP
 service; media paths are passed to local tools rather than uploaded into the
 interface.
@@ -42,6 +42,9 @@ is not a diagnostic system.
   files are removed on rerun.
 - Added a repeatable non-media launcher stress tool at
   `tools/benchmark_launcher_limits.py`.
+- Added manifest-bound native Py-Feat Face and Whisper/RockSteady Text screens,
+  immutable SourceID propagation, dedicated native Face Analysis, and
+  SourceID-grain Text Analysis with Text Valence.
 
 ## Bugs Found And Fixed
 
@@ -79,8 +82,9 @@ is not a diagnostic system.
 | Procurement | One MP4, MOV, MKV, WebM, or AVI | Standard, Full, Focus, and compatible beta paths. |
 | Focus preview | YouTube, MP4, WebM | Most reliable embedded playback. Browser codec support controls local preview. |
 | Audio Processing | MP4 file or recursive MP4 folder | Existing audio outputs can instead be imported. |
-| Face/Text Processing | Existing processed folder | Import-only in this release. |
-| Analysis | iMotions exports or audio processing outputs | Produces per-video and combined speaker reports. |
+| Native Face Processing | One supported video, recursive folder, authorized catalog subset, or verified result import | Requires cached/offline Detectorv2 and the pinned native stack. |
+| Native Text Processing | One supported video, recursive folder, authorized catalog subset, or verified result import | Requires Whisper plus an externally installed JDK/RockSteady 0.4 runtime. |
+| Analysis | iMotions exports, native Face, audio processing, native SourceID-grain Text, or legacy speaker-grain Text | Produces per-source, per-speaker, provider-specific, and combined reports. |
 
 Unsupported local files, missing paths, empty folders, and DOCX files without
 YouTube rows are rejected with actionable errors.
@@ -192,8 +196,17 @@ playhead, and long-segment acceptance.
 
 ## Release Boundaries
 
-- Face and Text do not execute in-app yet; they accept imported processed
-  folders.
+- Native Face and Text execute in-app only after structured readiness succeeds.
+  Child processes start from a minimal operational environment allowlist rather
+  than inheriting arbitrary parent variables. Normal Face/Text children receive
+  no secrets; a Hugging Face token may flow only to the explicit Face
+  model-preparation child.
+- Repository setup does not download the separately licensed RockSteady 0.4
+  JAR/dictionaries or a JDK. Researchers must supply, license, and validate
+  that external runtime.
+- Py-Feat native Face estimates remain a separate provider from
+  iMotions/AFFDEX. Primary-face selection is not speaker identification;
+  unsupported/no-face values remain missing.
 - Clean speaker segments is experimental and depends on optional models,
   confidence gates, and model terms.
 - Model estimates are not ground truth. Validation against a labelled,

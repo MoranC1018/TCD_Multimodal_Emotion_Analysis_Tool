@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from analysis import metadata as analysis_metadata
 from analysis.metadata import (
     load_source_metadata,
     map_report_source_ids,
     resolve_analysis_profile,
 )
+from processing.audio_analysis.audio_pipeline import source_context as producer_limits
 from analysis.profile import (
     AnalysisProfile,
     ManualGroup,
@@ -388,6 +390,12 @@ def test_metadata_sidecar_source_ids_and_declared_columns_must_match_manifest(tm
 
     with pytest.raises(ValueError, match="source_metadata.csv.*manifest"):
         load_source_metadata(manifest_path)
+
+
+def test_analysis_sidecar_limits_cover_the_catalog_producer_envelope() -> None:
+    assert analysis_metadata.MAX_SOURCE_MANIFEST_BYTES == producer_limits.MAX_SOURCE_MANIFEST_BYTES
+    assert analysis_metadata.MAX_SOURCE_MANIFEST_ITEMS == producer_limits.MAX_SOURCE_MANIFEST_ITEMS
+    assert analysis_metadata.MAX_SOURCE_METADATA_BYTES == producer_limits.MAX_SOURCE_METADATA_BYTES
 
 
 def test_metadata_sidecar_values_must_match_manifest_snapshot(tmp_path: Path) -> None:

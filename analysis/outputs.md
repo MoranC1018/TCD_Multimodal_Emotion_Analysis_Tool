@@ -15,9 +15,10 @@ groups made from speaker or SourceID members. It never changes
 `source_manifest.json` or `source_metadata.csv`, so researchers can produce
 multiple postprocessing views of the same source run.
 
-When imported Text is enabled, the profile must keep all visible sources for a
-speaker in one output group because Text contributes one speaker-level
-observation. Sidecarless legacy Text and iMotions folders are matched exactly
+When legacy imported Text is enabled, the profile must keep all visible sources
+for a speaker in one output group because that format contributes one
+speaker-level observation. Native `video_level_summary.csv` contributes one
+verified SourceID observation and permits SourceID splits. Sidecarless legacy Text and iMotions folders are matched exactly
 to identities in the authoritative profile manifest. If every selected legacy
 folder is sidecarless, choose the procurement run's `source_manifest.json`
 explicitly in the desktop **Customize output** screen.
@@ -31,14 +32,20 @@ The combined workbook separates measures into four direct semantic sections:
 - **Emotions:** Audio Anger, Contempt, Disgust, Fear, Joy, Sadness, Surprise,
   Neutral, and Other are `0..100` (source probability `0..1` multiplied by
   100; source `Happiness` becomes Joy). Video Anger, Contempt, Disgust, Fear,
-  Joy, Sadness, Surprise, Neutral, and Confusion are `0..100`.
+  Joy, Sadness, Surprise, Neutral, and Confusion are `0..100`. The separate
+  `Py-Feat / Native Face` provider maps Happy to Joy and Sad to Sadness and
+  maps its seven primary-face probabilities to `0..100`; Contempt and
+  Confusion remain blank.
 - **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
   Negative Sentiment are `0..1`. Text imports also accept legacy
   `Positive valence` and `Negative valence` headers, while preferring canonical
   sentiment headers when both are present.
 - **Valence:** Audio Valence converts source `0..1` to `-100..100` using
   `(raw * 200) - 100`. Video Valence and Adaptive Valence are `-100..100`.
-  Joy and Valence are never used as Positive/Negative Sentiment proxies.
+  Native Face valence and arousal convert source `-1..1` to `-100..100`.
+  Text Valence is `(Positive Sentiment - Negative Sentiment) / (Positive
+  Sentiment + Negative Sentiment)` on `-1..1` and is blank when its denominator
+  is zero. Joy and Valence are never used as Positive/Negative Sentiment proxies.
 - **Dimensions:** Audio Arousal and Dominance convert source `0..1` to
   `0..100`. Video Engagement and Adaptive Engagement are `0..100`. Text
   Arousal / Activation, Dominance / Power, and Affiliation / Social
@@ -52,6 +59,21 @@ Valid legacy audio reports that lack optional emotion classes show blank cells
 plus one warning; new full reports retain all nine audio emotions. Action
 units, muscles, and tones remain in detailed/raw outputs rather than this
 combined emotional workbook.
+
+Native Face reads only manifest-verified `face_core.csv` rows where
+`face_detected=true` and `is_primary_face=true`. No-face rows are missing
+observations. Its worksheet name is `Py-Feat - Native Face` because Excel sheet
+names cannot contain `/`; the Measure Guide retains the exact provider label
+`Py-Feat / Native Face`. Source columns use the actual selected count, including
+small, large, and greater-than-twelve profiles.
+
+Native Text summaries are bound to the explicit postprocessing run-root source
+sidecars, their exact hashes, catalog digest, ordered source-context hashes,
+artifact hash, ordered SourceID set, and identity mapping. The consumer uses
+the same bounded manifest/metadata envelope as the catalog producer, so valid
+large catalogs are not rejected by a lower Analysis-only ceiling. On profile rerun, Text Valence
+is recomputed from the selected positive/negative totals. Neither processing
+artifacts nor source sidecars are modified.
 
 ---
 

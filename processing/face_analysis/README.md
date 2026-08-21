@@ -1,8 +1,11 @@
 # Face Processing
 
-This package runs native facial-behaviour analysis on the MP4 delivered by
-Procurement. It does not require a unified procurement manifest: timestamps
-always refer to the exact input video passed to this module.
+This package runs native facial-behaviour analysis on media delivered by
+Procurement. A legacy file/folder may run without catalog evidence. When any
+catalog evidence is present, the exact top `source_manifest.json` and
+`source_metadata.csv`, its SHA-256, the selected SourceIDs, and every mapped
+`source_context.json` are mandatory and are validated before model work.
+Timestamps always refer to the exact input video passed to this module.
 
 ## Why this output design
 
@@ -71,15 +74,16 @@ Batch directories are supported:
 
 The desktop Processing page exposes the same input, output, sampling, threshold,
 batch, device, recursion, overwrite, debug, readiness, and model-preparation
-controls. It accepts either one supported video or a directory and can validate
-an existing native Face run for import. Native Py-Feat results are not forwarded
-to the current iMotions/AFFDEX Analysis route because those model semantics are
-not interchangeable.
+controls. It accepts one supported video, a directory, or an authorized catalog
+subset. A completed run is handed to the distinct **Py-Feat / Native Face**
+Analysis provider; it is never relabelled as iMotions or AFFDEX.
 
 ## Output
 
 ```text
 processing/face_analysis/output/
+  source_manifest.json    # catalog mode: exact byte copy of the sealed top JSON
+  source_metadata.csv     # catalog mode: exact byte copy of the sealed top CSV
   run_manifest.json
   run_index.csv          # one readable row per input video
   <input-relative-folders>/
@@ -88,6 +92,15 @@ processing/face_analysis/output/
     face_core.csv          # readable core fields plus explicit no-face rows
     video_manifest.json    # input hash, model/config, quality and provenance
 ```
+
+The run manifest records `catalog_sha256` and the ordered
+`processed_source_ids` subset separately; the copied source manifest is never
+rewritten to look like a smaller catalog. In catalog mode only canonical final
+media is selected. Caches, raw clips, focus/segment intermediates, and other
+processing artifacts are excluded. Output folders come from each row's
+`output_mapping.video_directory`; only `Speaker` may add grouping folders.
+Country, Language, Gender, and all other catalog fields stay metadata. Repeated
+identical links remain separate SourceIDs.
 
 For a single-file input, `<video-name>__<sha-prefix>/` stays directly below the
 output root. For a directory input, country/speaker folders are mirrored so a
@@ -130,6 +143,8 @@ in every `video_manifest.json`.
 Each per-video manifest records:
 
 - source path, size, media SHA-256, dimensions, duration and FPS;
+- SourceID, raw/display speaker, catalog digest, arbitrary user/system
+  metadata, output mapping, exact source-context object and its SHA-256;
 - requested configuration, resolved CPU/CUDA/MPS device, Py-Feat model
   components, and relevant package versions;
 - for each actual Detectorv2 checkpoint (`retinaface_r34`, `arcface_r50`, and
@@ -141,12 +156,18 @@ Each per-video manifest records:
 - for both CSV and Parquet: byte size, SHA-256, rows, columns and ordered-column
   schema fingerprint.
 
-An existing result is skipped only when its manifest version, input hash,
+An existing result is skipped only when its manifest version, SourceID/context/
+catalog binding, input hash,
 three-weight model signature, analysis fingerprint, artifact hashes, schemas,
 row counts and column counts all verify. A legacy manifest that identifies
 only one checkpoint is a cache miss. Empty, truncated, unreadable, modified or
 legacy-schema artifacts are recomputed automatically. `--overwrite`
 deliberately recomputes even a verified result.
+
+After the backend returns, Face re-probes the media, recomputes its content
+digest, and compares its exact filesystem identity before transforming or
+publishing results. A file changed or replaced during analysis fails at the
+`integrity` stage and cannot produce a completed per-video manifest.
 
 `run_index.csv` is the first file to open after a batch. It contains one row per
 discovered video, including source/output mapping, coverage, and structured
@@ -156,5 +177,26 @@ as the run-level completion marker and contains a unique `run_id`; orchestrators
 may supply their own with `--run-id`.
 
 The possible per-video error stages are `probe`, `provenance`, `resume`,
-`analyse`, `transform`, and `write`, making the failing responsibility directly
+`analyse`, `integrity`, `transform`, and `write`, making the failing responsibility directly
 searchable in the source package.
+
+## Analysis contract and limits
+
+Analysis reads verified `face_core.csv` plus its manifest without requiring
+PyArrow. It uses only rows with `face_detected=true` and
+`is_primary_face=true`; sampled no-face rows are missing observations, not
+zeros. Happy maps to Joy, Sad maps to Sadness, and Anger, Disgust, Fear,
+Surprise, and Neutral map directly. Probabilities are multiplied by 100;
+valence and arousal are multiplied by 100 from `[-1,1]` to `[-100,100]`.
+Contempt and Confusion are unsupported blanks. Primary face is a confidence
+heuristic, not verified speaker identity, and Py-Feat scores must not be treated
+as AFFDEX-equivalent or as clinical ground truth.
+
+For catalog runs, Analysis also requires every duplicated outer source label
+(raw/display speaker, user/system metadata, and output mapping) to equal the
+hash-bound embedded context and the copied run-root sidecars. Outer manifest
+labels therefore cannot relabel a valid core artifact.
+
+Analysis profiles may sort, filter, and regroup the actual SourceID set, then
+rerun without mutating this processing tree or either source sidecar. Native
+source counts are actual counts rather than a fixed display minimum.

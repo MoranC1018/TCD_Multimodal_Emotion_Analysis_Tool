@@ -31,6 +31,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--to-stage", choices=STAGES, default="postprocess")
     parser.add_argument("--whisper-model", choices=WHISPER_MODELS, default=None)
     parser.add_argument("--whisper-device", choices=("auto", "cpu", "cuda"), default=None)
+    parser.add_argument(
+        "--whisper-language",
+        default=None,
+        help="Explicit Whisper language used only when catalog system metadata is blank.",
+    )
+    parser.add_argument(
+        "--source-id",
+        action="append",
+        default=None,
+        help="Process an authorized catalog SourceID. Repeat for multiple rows.",
+    )
+    parser.add_argument(
+        "--catalog-sha256",
+        default=None,
+        help="Exact digest of the authorized procurement catalog.",
+    )
     parser.add_argument("--threads", type=int, default=None)
     parser.add_argument(
         "--dictionary",
@@ -73,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {
             "whisper_model": args.whisper_model,
             "whisper_device": args.whisper_device,
+            "whisper_language": args.whisper_language,
+            "source_ids": tuple(args.source_id) if args.source_id is not None else None,
+            "catalog_sha256": args.catalog_sha256,
             "threads": args.threads,
             "dictionaries": tuple(args.dictionary) if args.dictionary is not None else None,
             "categories": (

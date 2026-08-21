@@ -1,8 +1,8 @@
 # Analysis Calculations
 
 This document explains what the analysis reports contain and how the
-numbers are calculated. The source-specific scripts, `imotions.py` and
-`audio.py`, find and parse their own input files. The shared calculation engine
+numbers are calculated. The source-specific scripts, `imotions.py`,
+`native_face.py`, and `audio.py`, find and parse their own input files. The shared calculation engine
 is `histograms.py`, so face and audio reports use the same histogram,
 descriptor, chi-squared, Spearman, and graph logic once the inputs have been
 converted into the common table format.
@@ -20,6 +20,12 @@ Audio inputs are read from:
 ```text
 analysis/audio_outputs/<run-folder>/
 ```
+
+Native Face inputs are read from a processing run root containing verified
+`run_manifest.json`, `run_index.csv`, per-video `face_core.csv` and
+`video_manifest.json`, plus the exact source sidecars for catalog runs. Native
+Text prefers its manifest-bound SourceID-grain `video_level_summary.csv`;
+legacy `speaker_level_summary.csv` remains supported.
 
 Reports are written under:
 
@@ -75,6 +81,16 @@ audio valence is mapped from `0..1` to `-100..100` using:
 signed_valence = (raw_valence * 200) - 100
 ```
 
+Native Face input is accepted only when the core CSV hash and manifest binding
+verify. Rows contribute only when `face_detected=true` and
+`is_primary_face=true`; explicit no-face samples are missing observations.
+Happy maps to Joy, Sad maps to Sadness, and the other five supported emotions
+map directly. Contempt and Confusion are unsupported blanks.
+
+Native Text validates the summary artifact hash, run-root sidecars, exact
+SourceID coverage, and identity alignment. SourceID-grain profiles may split a
+speaker; legacy speaker-grain Text may not.
+
 ## Column Classification
 
 Each numeric column is classified before histogramming:
@@ -96,7 +112,7 @@ out of histogram output.
 
 ## Scaling Rules
 
-The code keeps three face-score scale contracts separate:
+The code keeps provider-specific face-score scale contracts separate:
 
 - Core iMotions face emotions are allowed to auto-scale from `0..1` to
   `0..100` when the raw CSV values are in that range.
@@ -104,6 +120,9 @@ The code keeps three face-score scale contracts separate:
   multiplied by 100.
 - Other iMotions FEA index columns that already have unit `Index` are treated
   as `0..100` and are not auto-scaled again.
+- Native Py-Feat probabilities are multiplied from `0..1` to `0..100`.
+- Native Py-Feat valence and arousal are multiplied from `-1..1` to
+  `-100..100`.
 
 Audio probabilities are converted before they reach the shared engine:
 categorical emotion probabilities become `0..100`, and audio valence becomes
@@ -118,13 +137,18 @@ their labels or signs look similar. Its four direct-mapping sections are:
   Neutral, and Other use `0..100`, calculated as source probability `* 100`
   (`Happiness` is the imported source label for Joy). Video Anger, Contempt,
   Disgust, Fear, Joy, Sadness, Surprise, Neutral, and Confusion use `0..100`.
+  The distinct `Py-Feat / Native Face` provider contributes its seven mapped
+  primary-face probabilities on `0..100`; it is never labelled AFFDEX.
 - **Sentiment:** Video Sentimentality uses `0..100`. Text Positive Sentiment
   and Negative Sentiment use `0..1`. `Positive valence` and `Negative valence`
   are legacy text-header aliases only; canonical sentiment headers take
   precedence when both are present.
 - **Valence:** Audio Valence uses `(raw * 200) - 100` from source `0..1` to
   output `-100..100`. Video Valence and Adaptive Valence use `-100..100`.
-  Neither Joy nor Valence is used as a Positive/Negative Sentiment proxy.
+  Native Face valence and arousal use `-100..100`. Text Valence uses
+  `(Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment)`
+  on `-1..1` and is blank when the denominator is zero. Neither Joy nor
+  Valence is used as a Positive/Negative Sentiment proxy.
 - **Dimensions:** Audio Arousal and Dominance use source probability `* 100`
   and output `0..100`. Video Engagement and Adaptive Engagement use
   `0..100`. Text Arousal / Activation, Dominance / Power, and Affiliation /
@@ -137,6 +161,13 @@ label, Workbook sheet, Output range, and Transformation/meaning. Missing
 optional classes in valid legacy audio reports remain blank with one warning;
 full new reports retain all nine audio emotions. Action units, muscles, and
 tones are deliberately outside the combined emotional workbook.
+
+For a native Text profile, Text Valence is recomputed from the selected
+SourceID positive and negative totals. Averaging per-source valences would give
+different weights and is deliberately not used. Repeated profile runs only
+write new Analysis outputs; processing summaries and source sidecars remain
+byte-identical. Native Face workbook columns use the actual selected source
+count, with no fixed participant count.
 
 ## Histograms
 

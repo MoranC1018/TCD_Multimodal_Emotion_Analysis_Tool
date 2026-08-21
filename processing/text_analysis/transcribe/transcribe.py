@@ -44,7 +44,7 @@ import hashlib
 import json
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +54,7 @@ from processing.io_utils import (
     exclusive_process_lock,
     lexical_absolute_path,
 )
+from processing.catalog_context import catalog_text_language, discover_catalog_jobs
 from processing.text_analysis.filesystem import assert_safe_output_target
 from processing.text_analysis.contracts import (
     TEXT_MEDIA_EXTENSIONS,
@@ -88,6 +89,8 @@ class TranscriptionJob:
     output_stem: Path
     source_relative: str
     source_id: str = ""
+    requested_language: str = ""
+    catalog_binding: dict[str, object] = field(default_factory=dict)
 
     @property
     def identity(self) -> str:
@@ -328,12 +331,14 @@ def _base_output(
     *,
     source_sha256_value=None,
     source_id="",
+    catalog_binding=None,
 ):
     source = Path(video_path)
     output = {
         "schema_version": TEXT_SCHEMA_VERSION,
         "source": str(source.resolve()),
         "source_id": str(source_id or ""),
+        "catalog_binding": dict(catalog_binding or {}),
         "language": language,
         "task": task,
         "duration_sec": segments[-1]["end"] if segments else 0.0,
@@ -356,6 +361,7 @@ def _build_bilingual_outputs(
     *,
     source_sha256_value=None,
     source_id="",
+    catalog_binding=None,
 ):
     """Build usable original/English files plus a time-aligned audit file."""
     original_segments = _plain_segments(result_original["segments"])
@@ -375,14 +381,17 @@ def _build_bilingual_outputs(
     original = _base_output(
         video_path, detected_lang, "transcribe", device, original_segments,
         source_sha256_value=source_sha256_value, source_id=source_id,
+        catalog_binding=catalog_binding,
     )
     english = _base_output(
         video_path, "en", "translate", device, english_segments,
         source_sha256_value=source_sha256_value, source_id=source_id,
+        catalog_binding=catalog_binding,
     )
     bilingual = _base_output(
         video_path, detected_lang, "bilingual", device, aligned_segments,
         source_sha256_value=source_sha256_value, source_id=source_id,
+        catalog_binding=catalog_binding,
     )
     ratios = [segment["alignment_overlap_ratio"] for segment in aligned_segments]
     audit = {
@@ -414,6 +423,7 @@ def transcribe_file(
     provenance_by_kind=None,
     source_sha256_value=None,
     source_id="",
+    catalog_binding=None,
 ):
     """Run Whisper on one video/audio file using a pre-loaded model."""
     provenance_by_kind = _resolve_output_provenance(
@@ -449,6 +459,7 @@ def transcribe_file(
             result_en,
             source_sha256_value=source_sha256_value,
             source_id=source_id,
+            catalog_binding=catalog_binding,
         )
         for kind, output in outputs.items():
             _apply_whisper_provenance(
@@ -484,6 +495,7 @@ def transcribe_file(
         segments,
         source_sha256_value=source_sha256_value,
         source_id=source_id,
+        catalog_binding=catalog_binding,
     )
     return _apply_whisper_provenance(
         output,
@@ -541,6 +553,8 @@ def _saved_pass_is_reusable(
     trust_legacy=False,
     source_sha256_value=None,
     expected_provenance=None,
+    expected_source_id="",
+    expected_catalog_binding=None,
 ):
     """Validate a saved pass before allowing expensive Whisper work to skip.
 
@@ -554,6 +568,10 @@ def _saved_pass_is_reusable(
     except ValueError:
         return False
     if not trust_legacy and data.get("schema_version") != TEXT_SCHEMA_VERSION:
+        return False
+    if not trust_legacy and str(data.get("source_id") or "") != str(expected_source_id or ""):
+        return False
+    if not trust_legacy and data.get("catalog_binding", {}) != dict(expected_catalog_binding or {}):
         return False
     if not _saved_segments_are_valid(data, expected_task):
         return False
@@ -610,6 +628,8 @@ def transcription_artifact_set_is_reusable(
     provenance_by_kind,
     source_sha256_value=None,
     trust_legacy=False,
+    expected_source_id="",
+    expected_catalog_binding=None,
 ):
     """Return whether an exact output set is safe to reuse as one unit.
 
@@ -629,7 +649,16 @@ def transcription_artifact_set_is_reusable(
             )
         except (OSError, ValueError):
             return False
-        return True
+        try:
+            return all(
+                str(_read_saved_whisper_pass(path, _expected_task(kind)).get("source_id") or "")
+                == str(expected_source_id or "")
+                and _read_saved_whisper_pass(path, _expected_task(kind)).get("catalog_binding", {})
+                == dict(expected_catalog_binding or {})
+                for kind, path in paths.items()
+            )
+        except ValueError:
+            return False
     return all(
         _saved_pass_is_reusable(
             path,
@@ -639,6 +668,8 @@ def transcription_artifact_set_is_reusable(
             trust_legacy=True,
             source_sha256_value=source_hash,
             expected_provenance=provenance_by_kind[kind],
+            expected_source_id=expected_source_id,
+            expected_catalog_binding=expected_catalog_binding,
         )
         for kind, path in paths.items()
     )
@@ -663,6 +694,7 @@ def transcribe_bilingual_to_paths(
     source_sha256_value=None,
     provenance_by_kind=None,
     source_id="",
+    catalog_binding=None,
 ):
     """Persist each expensive Whisper pass before attempting bilingual alignment."""
     provenance_by_kind = _resolve_output_provenance(
@@ -677,6 +709,8 @@ def transcribe_bilingual_to_paths(
         paths["original"], "transcribe", model_name, video_path,
         trust_legacy=trust_legacy, source_sha256_value=source_sha256_value,
         expected_provenance=provenance_by_kind["original"],
+        expected_source_id=source_id,
+        expected_catalog_binding=catalog_binding,
     ):
         original = _read_saved_whisper_pass(paths["original"], "transcribe")
         print(f"  REUSE original: {paths['original']}")
@@ -696,6 +730,7 @@ def transcribe_bilingual_to_paths(
             _plain_segments(raw_original["segments"]),
             source_sha256_value=source_sha256_value,
             source_id=source_id,
+            catalog_binding=catalog_binding,
         )
         _apply_whisper_provenance(
             original,
@@ -709,6 +744,8 @@ def transcribe_bilingual_to_paths(
         paths["eng"], "translate", model_name, video_path,
         trust_legacy=trust_legacy, source_sha256_value=source_sha256_value,
         expected_provenance=provenance_by_kind["eng"],
+        expected_source_id=source_id,
+        expected_catalog_binding=catalog_binding,
     ):
         english = _read_saved_whisper_pass(paths["eng"], "translate")
         print(f"  REUSE eng: {paths['eng']}")
@@ -727,6 +764,7 @@ def transcribe_bilingual_to_paths(
             _plain_segments(raw_english["segments"]),
             source_sha256_value=source_sha256_value,
             source_id=source_id,
+            catalog_binding=catalog_binding,
         )
         _apply_whisper_provenance(
             english,
@@ -745,6 +783,7 @@ def transcribe_bilingual_to_paths(
         english,
         source_sha256_value=source_sha256_value,
         source_id=source_id,
+        catalog_binding=catalog_binding,
     )
     for kind, data in outputs.items():
         _apply_whisper_provenance(
@@ -824,10 +863,35 @@ def _build_transcription_jobs(
     procurement_run: Path | None,
     canonical_layout: bool,
     speaker_parent_layout: bool = False,
+    catalog_root: Path | None = None,
+    selected_source_ids: list[str] | None = None,
+    expected_catalog_sha256: str = "",
+    explicit_language: str = "",
 ) -> tuple[Path, Path, list[TranscriptionJob]]:
     """Return invocation input, source root, and collision-free output jobs."""
 
-    if procurement_run is not None:
+    if catalog_root is not None:
+        discovery = discover_catalog_jobs(
+            catalog_root,
+            selected_source_ids=selected_source_ids,
+            expected_catalog_sha256=expected_catalog_sha256,
+        )
+        if discovery is None:
+            raise ValueError(f"No procurement catalog sidecars found under {catalog_root}")
+        invocation_input = discovery.run_root
+        source_root = discovery.run_root
+        jobs = [
+            TranscriptionJob(
+                source=job.media_path,
+                output_stem=validate_text_identity(job.relative_output),
+                source_relative=job.media_path.relative_to(discovery.run_root).as_posix(),
+                source_id=job.source_id,
+                requested_language=catalog_text_language(job, explicit_language),
+                catalog_binding=_catalog_binding(job),
+            )
+            for job in discovery.jobs
+        ]
+    elif procurement_run is not None:
         invocation_input = procurement_run.resolve()
         source_root = (
             invocation_input
@@ -889,7 +953,14 @@ def _build_transcription_jobs(
                         output_stem = relative_stem
                 else:
                     output_stem = relative_stem
-            jobs.append(TranscriptionJob(video.resolve(), output_stem, source_relative))
+            jobs.append(
+                TranscriptionJob(
+                    video.resolve(),
+                    output_stem,
+                    source_relative,
+                    requested_language=explicit_language,
+                )
+            )
 
     if not jobs:
         raise ValueError(f"No transcribable videos found under {source_root}")
@@ -906,6 +977,27 @@ def _build_transcription_jobs(
     return invocation_input, source_root.resolve(), jobs
 
 
+def _catalog_binding(job) -> dict[str, object]:
+    def plain(value):
+        if isinstance(value, dict) or hasattr(value, "items"):
+            return {str(key): plain(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return [plain(item) for item in value]
+        return value
+
+    context = plain(job.source_context)
+    return {
+        "source_id": job.source_id,
+        "speaker": job.speaker,
+        "speaker_display": job.speaker_display,
+        "catalog_sha256": job.catalog_sha256,
+        "user_metadata": plain(job.user_metadata),
+        "system_metadata": plain(job.system_metadata),
+        "output_mapping": context.get("output_mapping", {}),
+        "source_context": context,
+    }
+
+
 def _transcription_record(
     job: TranscriptionJob,
     paths: dict[str, Path],
@@ -915,11 +1007,15 @@ def _transcription_record(
     segment_count: int | None = None,
     error: str | None = None,
     source_sha256_value: str | None = None,
+    provenance_by_kind: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "source_path": str(job.source),
         "source_relative": job.source_relative,
         "source_id": job.source_id,
+        "requested_language": job.requested_language,
+        "catalog_binding": job.catalog_binding,
+        "whisper_provenance": provenance_by_kind or {},
         "video_stem": job.output_stem.name,
         "identity": job.identity,
         "source_fingerprint": source_fingerprint(job.source),
@@ -996,6 +1092,19 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                              "(e.g. procurement/output/<run>). "
                              "Automatically finds stitched_imotions.mp4 / full-video files "
                              "and preserves their Speaker/Video folder identity.")
+    parser.add_argument(
+        "--catalog-root",
+        type=Path,
+        default=None,
+        help="Procurement run root containing the exact source sidecar pair.",
+    )
+    parser.add_argument(
+        "--source-id",
+        action="append",
+        default=None,
+        help="Authorized catalog SourceID. Repeat for multiple rows.",
+    )
+    parser.add_argument("--catalog-sha256", default="")
     parser.add_argument("--model", default="small",
                         choices=["tiny", "base", "small", "medium",
                                  "large", "large-v2", "large-v3"],
@@ -1032,21 +1141,26 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     output_root = assert_safe_output_target(lexical_absolute_path(args.output_dir))
-    device = _resolve_device(args.device)
     try:
-        provenance_by_kind = build_output_provenance(
-            collect_whisper_execution_identity(args.model),
-            requested_task=args.task,
-            device=device,
-            requested_language=args.language,
-        )
         invocation_input, source_root, jobs = _build_transcription_jobs(
             input_value=args.input,
             procurement_run=args.from_procurement,
             canonical_layout=args.canonical_layout,
             speaker_parent_layout=args.speaker_parent_layout,
+            catalog_root=args.catalog_root,
+            selected_source_ids=args.source_id,
+            expected_catalog_sha256=args.catalog_sha256,
+            explicit_language=str(args.language or ""),
         )
         output_root = assert_safe_output_target(output_root, invocation_input)
+        device = _resolve_device(args.device)
+        execution_identity = collect_whisper_execution_identity(args.model)
+        provenance_by_kind = build_output_provenance(
+            execution_identity,
+            requested_task=args.task,
+            device=device,
+            requested_language=args.language,
+        )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -1058,23 +1172,43 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     started_at = datetime.now(timezone.utc).isoformat()
     path_sets = [_output_paths(output_root, job.relative_json, args.task) for job in jobs]
     source_hashes = [_source_content_sha256(job.source) for job in jobs]
+    provenance_sets = [
+        build_output_provenance(
+            execution_identity,
+            requested_task=args.task,
+            device=device,
+            requested_language=job.requested_language or args.language,
+        )
+        for job in jobs
+    ]
     records = [
         _transcription_record(
-            job, paths, output_root, status="planned", source_sha256_value=source_hash
+            job,
+            paths,
+            output_root,
+            status="planned",
+            source_sha256_value=source_hash,
+            provenance_by_kind=job_provenance,
         )
-        for job, paths, source_hash in zip(jobs, path_sets, source_hashes)
+        for job, paths, source_hash, job_provenance in zip(
+            jobs, path_sets, source_hashes, provenance_sets
+        )
     ]
     complete: list[bool] = []
-    for job, paths, source_hash in zip(jobs, path_sets, source_hashes):
+    for job, paths, source_hash, job_provenance in zip(
+        jobs, path_sets, source_hashes, provenance_sets
+    ):
         complete.append(
             bool(args.skip_existing)
             and transcription_artifact_set_is_reusable(
                 paths,
                 model_name=args.model,
                 video_path=job.source,
-                provenance_by_kind=provenance_by_kind,
+                provenance_by_kind=job_provenance,
                 source_sha256_value=source_hash,
                 trust_legacy=args.trust_legacy,
+                expected_source_id=job.source_id,
+                expected_catalog_binding=job.catalog_binding,
             )
         )
     _write_transcription_manifest(
@@ -1093,8 +1227,8 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     )
 
     needs_model = False
-    for job, paths, is_complete, source_hash in zip(
-        jobs, path_sets, complete, source_hashes
+    for job, paths, is_complete, source_hash, job_provenance in zip(
+        jobs, path_sets, complete, source_hashes, provenance_sets
     ):
         if is_complete:
             continue
@@ -1105,13 +1239,17 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
             paths["original"], "transcribe", args.model, job.source,
             trust_legacy=args.trust_legacy,
             source_sha256_value=source_hash,
-            expected_provenance=provenance_by_kind["original"],
+            expected_provenance=job_provenance["original"],
+            expected_source_id=job.source_id,
+            expected_catalog_binding=job.catalog_binding,
         )
         english_ready = _saved_pass_is_reusable(
             paths["eng"], "translate", args.model, job.source,
             trust_legacy=args.trust_legacy,
             source_sha256_value=source_hash,
-            expected_provenance=provenance_by_kind["eng"],
+            expected_provenance=job_provenance["eng"],
+            expected_source_id=job.source_id,
+            expected_catalog_binding=job.catalog_binding,
         )
         if not original_ready or not english_ready:
             needs_model = True
@@ -1142,8 +1280,8 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     elif any(not value for value in complete):
         print("\nSaved original and English passes are valid; retrying alignment without loading Whisper.")
 
-    for index, (job, paths, is_complete, source_hash) in enumerate(
-        zip(jobs, path_sets, complete, source_hashes), start=1
+    for index, (job, paths, is_complete, source_hash, job_provenance) in enumerate(
+        zip(jobs, path_sets, complete, source_hashes, provenance_sets), start=1
     ):
         print(f"\n[{index}/{len(jobs)}] {job.identity}")
         record_index = index - 1
@@ -1153,6 +1291,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
             records[record_index] = _transcription_record(
                 job, paths, output_root, status="skipped", segment_count=len(saved["segments"]),
                 source_sha256_value=source_hash,
+                provenance_by_kind=job_provenance,
             )
             print(f"  SKIP (verified complete set): {', '.join(str(path) for path in paths.values())}")
         else:
@@ -1164,23 +1303,29 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                         device,
                         paths,
                         model_name=args.model,
-                        language=args.language,
+                        language=job.requested_language or args.language,
                         reuse_existing=args.skip_existing,
                         trust_legacy=args.trust_legacy,
                         source_sha256_value=source_hash,
-                        provenance_by_kind=provenance_by_kind,
+                        provenance_by_kind=job_provenance,
                         source_id=job.source_id,
+                        catalog_binding=job.catalog_binding,
                     )
                     segment_count = len(outputs["bilingual"]["segments"])
                 else:
                     if model is None:
                         raise RuntimeError("Whisper model is required for this transcription pass")
                     result = transcribe_file(
-                        job.source, model, device, language=args.language, task=args.task,
+                        job.source,
+                        model,
+                        device,
+                        language=job.requested_language or args.language,
+                        task=args.task,
                         model_name=args.model,
-                        provenance_by_kind=provenance_by_kind,
+                        provenance_by_kind=job_provenance,
                         source_sha256_value=source_hash,
                         source_id=job.source_id,
+                        catalog_binding=job.catalog_binding,
                     )
                     result["model"] = args.model
                     outputs = {args.task: result}
@@ -1189,6 +1334,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                 records[record_index] = _transcription_record(
                     job, paths, output_root, status="completed", segment_count=segment_count,
                     source_sha256_value=source_hash,
+                    provenance_by_kind=job_provenance,
                 )
                 for kind, path in paths.items():
                     print(f"  -> {kind}: {path} ({len(outputs[kind]['segments'])} segments)")
@@ -1200,6 +1346,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                     status="failed",
                     error=f"{type(exc).__name__}: {exc}",
                     source_sha256_value=source_hash,
+                    provenance_by_kind=job_provenance,
                 )
                 print(f"  ERROR: {exc}", file=sys.stderr)
         _write_transcription_manifest(

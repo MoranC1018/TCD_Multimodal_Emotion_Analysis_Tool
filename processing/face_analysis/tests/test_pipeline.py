@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -329,6 +330,47 @@ def test_failure_records_stage_and_structured_error(monkeypatch, tmp_path: Path)
         index_row = next(csv.DictReader(handle))
     assert index_row["error_stage"] == "analyse"
     assert index_row["error_message"] == "model failed"
+
+
+def test_input_mutation_during_backend_analysis_is_rejected_before_publication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"original-video")
+    destination = tmp_path / "output"
+
+    def current_metadata(path: Path) -> VideoMetadata:
+        content = path.read_bytes()
+        return VideoMetadata(
+            str(path), hashlib.sha256(content).hexdigest(), len(content),
+            1.0, 1.0, 1, 10, 10,
+        )
+
+    class MutatingBackend(FakeBackend):
+        def analyse(self, path: Path, *_args) -> pd.DataFrame:
+            path.write_bytes(b"replacement-video")
+            return pd.DataFrame([complete_detection_row()])
+
+    monkeypatch.setattr(pipeline, "probe_video", current_metadata)
+    monkeypatch.setattr(
+        pipeline,
+        "build_output_tables",
+        lambda *_args, **_kwargs: pytest.fail("mutated input reached output transformation"),
+    )
+
+    result = pipeline.process_face_input(
+        video,
+        destination,
+        config=FaceProcessingConfig(sample_fps=1.0, batch_size=1, device="cpu"),
+        backend=MutatingBackend(),
+    )
+
+    assert result.failed == 1
+    payload = json.loads(result.run_manifest.read_text(encoding="utf-8"))
+    assert payload["videos"][0]["error_stage"] == "integrity"
+    assert "changed during analysis" in payload["videos"][0]["error_message"]
+    assert not list(destination.rglob("video_manifest.json"))
 
 
 def test_keyboard_interrupt_writes_cancelled_run_manifest_before_propagating(

@@ -26,6 +26,7 @@ from analysis.combined_summary import (
     discover_combined_sources_audited,
 )
 from analysis.imotions import analyse_imotions_folder
+from analysis.native_face import analyse_native_face_folder
 from analysis.inference import ReferenceResolution, add_probability_mirrors
 from analysis.metadata import (
     load_source_metadata,
@@ -61,7 +62,7 @@ class WorkflowError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModalityRequest:
-    name: Literal["imotions", "audio", "text"]
+    name: Literal["imotions", "native_face", "audio", "text"]
     source_method: Literal["run", "import"]
     source_path: Path
     write_graphs: bool = True
@@ -104,6 +105,7 @@ class _ModalityExecution:
 
 _MODALITIES: tuple[tuple[str, str, str], ...] = (
     ("imotions", "video", "Video / iMotions"),
+    ("native_face", "native_face", "Py-Feat / Native Face"),
     ("audio", "audio", "Audio"),
     ("text", "text", "Text"),
 )
@@ -160,6 +162,15 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
                 except TextResultsError as exc:
                     raise WorkflowError(f"Text import is invalid: {exc}") from exc
                 text_summaries = text_discovery.summaries
+                if request.analysis_profile is not None and text_discovery.grain == "speaker":
+                    metadata = load_source_metadata(
+                        request.analysis_profile.source_manifest,
+                        expected_sha256=request.analysis_profile.source_manifest_sha256,
+                    )
+                    validate_text_profile_grouping(
+                        metadata,
+                        resolve_analysis_profile(metadata, request.analysis_profile),
+                    )
                 accepted_reports.extend(
                     DiscoveryEntry(
                         "text",
@@ -318,7 +329,7 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
 
     requested: dict[str, ModalityRequest] = {}
     for modality in modalities:
-        if modality.name not in {"imotions", "audio", "text"}:
+        if modality.name not in {"imotions", "native_face", "audio", "text"}:
             raise WorkflowError(f"Unsupported modality: {modality.name!r}")
         if modality.name in requested:
             raise WorkflowError(f"Duplicate modality: {modality.name}")
@@ -349,7 +360,10 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
                 "Analysis profile source manifest is not associated with the selected "
                 "modality folders"
             ) from exc
-        if "text" in requested:
+        text_request = requested.get("text")
+        if text_request is not None and not any(
+            Path(text_request.source_path).rglob("video_level_summary.csv")
+        ):
             try:
                 validate_text_profile_grouping(profile_metadata, resolved_profile)
             except ValueError as exc:
@@ -374,6 +388,13 @@ def _run_modality(modality: ModalityRequest, output_root: Path, combined_name: s
                 include_timing=modality.include_timing,
                 exclude_geometry=modality.exclude_geometry,
             )
+        elif modality.name == "native_face":
+            analysis_result = analyse_native_face_folder(
+                modality.source_path,
+                output_root=stage_root,
+                write_graphs=modality.write_graphs,
+                include_logscale=modality.include_logscale,
+            )
         else:
             analysis_result = analyse_audio_folder(
                 modality.source_path,
@@ -382,7 +403,11 @@ def _run_modality(modality: ModalityRequest, output_root: Path, combined_name: s
                 include_logscale=modality.include_logscale,
             )
     except Exception as exc:
-        label = "Video / iMotions" if modality.name == "imotions" else "Audio"
+        label = (
+            "Video / iMotions"
+            if modality.name == "imotions"
+            else ("Py-Feat / Native Face" if modality.name == "native_face" else "Audio")
+        )
         raise WorkflowError(f"{label} analysis failed: {exc}") from exc
     stage_root = stage_root.resolve()
     discovery_root = analysis_result.domain_output_dirs.get("emotion", analysis_result.output_dir).resolve()
@@ -948,7 +973,7 @@ class _WorkflowArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = _WorkflowArgumentParser(description=__doc__)
     parser.add_argument("--output-root", required=True, type=Path)
-    for name in ("imotions", "audio", "text"):
+    for name in ("imotions", "native_face", "audio", "text"):
         parser.add_argument(f"--{name}-source", type=Path)
         parser.add_argument(f"--{name}-method", choices=("run", "import"))
     parser.add_argument("--no-combined-workbook", action="store_true")
@@ -972,7 +997,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(argv)
         modalities: list[ModalityRequest] = []
-        for name in ("imotions", "audio", "text"):
+        for name in ("imotions", "native_face", "audio", "text"):
             source = getattr(args, f"{name}_source")
             method = getattr(args, f"{name}_method")
             if bool(source) != bool(method):

@@ -13,7 +13,7 @@ import uuid
 import warnings
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +26,7 @@ from analysis.text_pipeline.ownership import (
 )
 from procurement.external_tools import credential_free_media_environment
 from processing.io_utils import atomic_write_json, exclusive_process_lock, lexical_absolute_path
+from processing.catalog_context import discover_catalog_jobs, publish_catalog_run_context
 
 from .contracts import TEXT_SCHEMA_VERSION, file_sha256, inventory_digest
 from .derived_views import DERIVED_MANIFEST, derive_category_view
@@ -106,6 +107,9 @@ class TextProcessingConfig:
     overwrite_rocksteady: bool = False
     write_graphs: bool = True
     default_language_variant: str = "eng"
+    whisper_language: str = ""
+    source_ids: tuple[str, ...] = ()
+    catalog_sha256: str = ""
     language_policy: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_LANGUAGE_POLICY))
 
     def validate(self) -> "TextProcessingConfig":
@@ -133,6 +137,14 @@ class TextProcessingConfig:
             raise ValueError("categories must not contain case-insensitive duplicates")
         if not isinstance(self.default_language_variant, str) or self.default_language_variant not in {"original", "eng"}:
             raise ValueError("default_language_variant must be original or eng")
+        if not isinstance(self.whisper_language, str):
+            raise ValueError("whisper_language must be text")
+        if any(re.fullmatch(r"source-\d{4,6}", source_id) is None for source_id in self.source_ids):
+            raise ValueError("source_ids must contain catalog SourceID values")
+        if len(set(self.source_ids)) != len(self.source_ids):
+            raise ValueError("source_ids must be unique")
+        if self.catalog_sha256 and re.fullmatch(r"[0-9a-fA-F]{64}", self.catalog_sha256) is None:
+            raise ValueError("catalog_sha256 must be a SHA-256 value")
         if not isinstance(self.language_policy, Mapping):
             raise ValueError("language_policy must be an object mapping countries to variants")
         if any(not isinstance(country, str) or not country.strip() for country in self.language_policy):
@@ -205,7 +217,7 @@ def load_text_processing_config(
         if unknown:
             raise ValueError(f"Unknown text config overrides: {', '.join(sorted(unknown))}")
         values.update({key: value for key, value in overrides.items() if value is not None})
-    for key in ("dictionaries", "categories"):
+    for key in ("dictionaries", "categories", "source_ids"):
         if isinstance(values.get(key), list):
             values[key] = tuple(values[key])
     return TextProcessingConfig(**values).validate()
@@ -298,17 +310,30 @@ def run_text_pipeline(
     requested_stages = STAGES[start_index : stop_index + 1]
     root = (repo_root or Path.cwd()).resolve()
     paths = _pipeline_paths(settings, root)
+    catalog_discovery = discover_catalog_jobs(
+        paths["input"],
+        selected_source_ids=settings.source_ids or None,
+        expected_catalog_sha256=settings.catalog_sha256,
+    )
+    if catalog_discovery is not None:
+        settings = replace(
+            settings,
+            source_ids=tuple(job.source_id for job in catalog_discovery.jobs),
+            catalog_sha256=catalog_discovery.catalog_sha256,
+        )
+        paths = _pipeline_paths(settings, root)
     _validate_pipeline_paths(paths)
     _preflight_stage_targets(paths, requested_stages)
     check_text_processing_readiness(settings, stages=requested_stages)
     lock_path = root / "processing" / "text_analysis" / "output" / ".pipeline.run.lock"
     with exclusive_process_lock(lock_path, purpose="running the Text processing pipeline"):
         return _run_text_pipeline_locked(
-            config,
+            settings,
             from_stage=from_stage,
             to_stage=to_stage,
             repo_root=root,
             run_id=run_id,
+            catalog_discovery=catalog_discovery,
         )
 
 
@@ -319,6 +344,7 @@ def _run_text_pipeline_locked(
     to_stage: str,
     repo_root: Path,
     run_id: str | None,
+    catalog_discovery=None,
 ) -> TextProcessingResult:
     """Run a bounded stage range without mixing artifacts from other inventories."""
 
@@ -341,6 +367,8 @@ def _run_text_pipeline_locked(
     stage_records: list[dict[str, object]] = []
     artifacts: dict[str, object] = {}
     inventory_items: list[dict[str, object]] = []
+    if catalog_discovery is not None:
+        publish_catalog_run_context(paths["whisper"].parent, catalog_discovery)
     _write_manifest(
         manifest_targets, settings, current_run_id, started, stage_records,
         inventory_items, artifacts, "running",
@@ -496,6 +524,7 @@ def _run_text_pipeline_locked(
                         write_graphs=settings.write_graphs,
                         text_language="en",
                         run_id=current_run_id,
+                        catalog_discovery=catalog_discovery,
                     )
                     pair_payload = _read_completed_manifest(
                         paths["postprocess_pair_manifest"], "paired postprocessing"
@@ -747,6 +776,10 @@ def _run_rocksteady_pair_stage(
                 source_relative_paths=csv_paths,
                 upstream_inventory_sha256=str(rock_payload["inventory_sha256"]),
                 manifest_source_root=all_target,
+                source_ids={
+                    str(item["identity"]): str(item.get("source_id") or "")
+                    for item in candidate_inventory
+                },
             )
             staged_derived_manifest = core_staging / DERIVED_MANIFEST
             derived_payload = _read_completed_manifest(
@@ -850,6 +883,13 @@ def _transcribe_command(
         command.extend(("--batch-manifest", str(batch_manifest)))
     if config.whisper_device != "auto":
         command.extend(("--device", config.whisper_device))
+    if config.whisper_language:
+        command.extend(("--language", config.whisper_language))
+    if config.catalog_sha256:
+        command.extend(("--catalog-root", str(input_path)))
+        for source_id in config.source_ids:
+            command.extend(("--source-id", source_id))
+        command.extend(("--catalog-sha256", config.catalog_sha256))
     return command
 
 
@@ -1133,6 +1173,9 @@ def _inventory_from_transcription(
         artifact_paths: dict[str, Path] = {}
         artifact_hashes: dict[str, str] = {}
         raw_artifacts = raw.get("artifacts")
+        item_provenance = raw.get("whisper_provenance") or batch_provenance
+        if not isinstance(item_provenance, dict):
+            raise RuntimeError(f"Transcription item lacks Whisper provenance for {identity}")
         if not isinstance(raw_artifacts, dict) or set(raw_artifacts) != set(expected_tasks):
             raise RuntimeError(f"Transcription artifacts are malformed for {identity}")
         for kind, artifact_value in raw_artifacts.items():
@@ -1173,8 +1216,12 @@ def _inventory_from_transcription(
                 raise RuntimeError(f"Transcription artifact model mismatch: {path}")
             if transcript.get("source_sha256") != raw.get("source_sha256"):
                 raise RuntimeError(f"Transcription artifact source hash mismatch: {path}")
-            if transcript.get("whisper_provenance") != batch_provenance.get(kind):
+            if transcript.get("whisper_provenance") != item_provenance.get(kind):
                 raise RuntimeError(f"Transcription artifact Whisper provenance mismatch: {path}")
+            if str(transcript.get("source_id") or "") != str(raw.get("source_id") or ""):
+                raise RuntimeError(f"Transcription artifact SourceID mismatch: {path}")
+            if transcript.get("catalog_binding", {}) != raw.get("catalog_binding", {}):
+                raise RuntimeError(f"Transcription artifact catalog binding mismatch: {path}")
             if not isinstance(transcript.get("segments"), list) or not transcript["segments"]:
                 raise RuntimeError(f"Transcription artifact has no segments: {path}")
             artifact_paths[str(kind)] = path
@@ -1185,7 +1232,7 @@ def _inventory_from_transcription(
                 artifact_paths,
                 expected_model=str(batch_config["model"]),
                 expected_source_sha256=str(raw.get("source_sha256")),
-                expected_provenance_by_kind=batch_provenance,
+                expected_provenance_by_kind=item_provenance,
                 expected_artifact_sha256_by_kind=artifact_hashes,
             )
         except (OSError, ValueError) as exc:
@@ -1197,6 +1244,8 @@ def _inventory_from_transcription(
                 "source_path": raw.get("source_path"),
                 "source_relative": raw.get("source_relative"),
                 "source_id": str(raw.get("source_id") or ""),
+                "catalog_binding": dict(raw.get("catalog_binding") or {}),
+                "requested_language": str(raw.get("requested_language") or ""),
                 "video_stem": raw.get("video_stem"),
                 "identity": identity,
                 "status": "completed",
@@ -1259,6 +1308,13 @@ def _assert_identity_set(
             f"{label} identity inventory mismatch; missing={sorted(expected - actual)}, "
             f"unexpected={sorted(actual - expected)}"
         )
+    expected_source_ids = {
+        str(item["identity"]): str(item.get("source_id") or "") for item in inventory
+    }
+    for record in records:
+        identity = str(record.get("identity"))
+        if str(record.get("source_id") or "") != expected_source_ids[identity]:
+            raise RuntimeError(f"{label} SourceID does not match inventory identity {identity}")
 
 
 def _merge_selection(
@@ -1389,6 +1445,21 @@ def _validate_postprocess_identity_set(
     expected = set(_by_identity(items))
     if identities != expected:
         raise RuntimeError(f"{label} postprocessing identity inventory mismatch")
+    expected_source_ids = {
+        str(item["identity"]): str(item.get("source_id") or "") for item in items
+    }
+    for video in videos:
+        if not isinstance(video, dict):
+            continue
+        identity = "/".join(
+            str(value)
+            for value in (video.get("country"), video.get("speaker"), video.get("video"))
+            if value is not None and str(value)
+        )
+        if str(video.get("source_id") or "") != expected_source_ids[identity]:
+            raise RuntimeError(
+                f"{label} postprocessing SourceID does not match inventory identity {identity}"
+            )
 
 
 def _validate_postprocess_pair(
@@ -1505,6 +1576,8 @@ def _write_manifest(
         "finished_at": datetime.now(timezone.utc).isoformat()
         if status in {"completed", "failed", "cancelled"} else None,
         "config": asdict(config),
+        "catalog_sha256": config.catalog_sha256,
+        "processed_source_ids": list(config.source_ids),
         "summary": {
             "videos": len(inventory_items),
             "completed_stages": sum(record.get("status") == "completed" for record in stages),

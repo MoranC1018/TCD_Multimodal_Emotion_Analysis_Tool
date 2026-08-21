@@ -161,13 +161,12 @@
             </div>
           </div>
           <div class="subtile-grid">
-            <button id="openFaceProcessingButton" class="mode-tile unavailable" type="button" disabled aria-disabled="true">
+            <button id="openFaceProcessingButton" class="mode-tile" type="button">
               <span class="tile-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M9 10h.01M15 10h.01"></path><path d="M8 15s1.5 2 4 2 4-2 4-2"></path><path d="M4 12a8 8 0 1 0 16 0 8 8 0 0 0-16 0"></path></svg>
               </span>
               <strong>Face</strong>
-              <small>Import face outputs below. In-app processing is not included in this release.</small>
-              <span class="availability-label">Import only</span>
+              <small>Run cached Py-Feat models or import native face outputs.</small>
             </button>
             <button id="openAudioProcessingButton" class="mode-tile" type="button">
               <span class="tile-icon" aria-hidden="true">
@@ -176,13 +175,12 @@
               <strong>Audio</strong>
               <small>Run OpenSMILE and optional emotion models.</small>
             </button>
-            <button id="openTextProcessingButton" class="mode-tile unavailable" type="button" disabled aria-disabled="true">
+            <button id="openTextProcessingButton" class="mode-tile" type="button">
               <span class="tile-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M5 4h14"></path><path d="M7 8h10"></path><path d="M8 12h8"></path><path d="M10 16h4"></path></svg>
               </span>
               <strong>Text</strong>
-              <small>Import transcript outputs below. In-app processing is not included in this release.</small>
-              <span class="availability-label">Import only</span>
+              <small>Run Whisper and RockSteady or import native Text outputs.</small>
             </button>
           </div>
           <section class="processing-import-panel" aria-labelledby="processingImportsTitle">
@@ -392,6 +390,154 @@
           </div>
         </section>
 
+        <section id="faceInputScreen" class="screen" data-screen="face-input">
+          <div class="screen-head">
+            <div>
+              <h2>Face Processing — Py-Feat / Native Face</h2>
+              <p>Run the native Py-Feat detector over one video, a folder tree, or selected catalog sources.</p>
+            </div>
+            <button id="backFromFaceButton" type="button" class="secondary-button">Back to processing</button>
+          </div>
+          <div class="audio-layout">
+            <section class="input-panel">
+              <h3>Input and output</h3>
+              <button id="browseFaceFolderButton" type="button" class="primary-wide">Select input folder</button>
+              <button id="browseFaceVideoButton" type="button" class="secondary-wide">Select single video</button>
+              <label for="faceSourcePathInput">Face source path</label>
+              <input id="faceSourcePathInput" type="text" placeholder="Paste a folder or supported video path">
+              <label for="faceOutputRootInput">Face output directory</label>
+              <input id="faceOutputRootInput" type="text">
+              <button id="browseFaceOutputButton" type="button" class="secondary-wide">Change output folder</button>
+            </section>
+            <section class="input-panel">
+              <h3>Readiness</h3>
+              <p id="faceReadinessStatus" role="status">Checks are offline and never download model files.</p>
+              <button id="checkFaceReadinessButton" type="button" class="secondary-wide">Check Face readiness</button>
+              <button id="prepareFaceModelsButton" type="button" class="secondary-wide">Prepare Py-Feat models</button>
+              <small>Model preparation is an explicit network-capable step. Normal runs use verified cached weights.</small>
+            </section>
+            <section id="faceCatalogSelection" class="input-panel audio-catalog-panel hidden">
+              <h3>Catalog sources</h3>
+              <p id="faceCatalogSelectionSummary">Select authorized SourceIDs. Filters change visibility only.</p>
+              <label>Filter <input id="faceCatalogFilterText" type="search" placeholder="Hide non-matching sources"></label>
+              <div class="catalog-selection-actions">
+                <button id="faceSelectVisibleSourcesButton" type="button" class="secondary-button">Select visible</button>
+                <button id="faceClearVisibleSourcesButton" type="button" class="secondary-button">Clear visible</button>
+              </div>
+              <div id="faceCatalogSourceList" class="audio-catalog-source-list"></div>
+            </section>
+            <section class="input-panel audio-options-panel">
+              <h3>Py-Feat options</h3>
+              <div class="advanced-grid">
+                <label>Frames per second <input id="faceSampleFpsInput" type="number" min="0.1" max="120" step="0.1" value="5"></label>
+                <label>Confidence threshold <input id="faceConfidenceInput" type="number" min="0.01" max="1" step="0.01" value="0.9"></label>
+                <label>Batch size <input id="faceBatchSizeInput" type="number" min="1" max="1024" step="1" value="8"></label>
+                <label>Device <select id="faceDeviceSelect"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option><option value="mps">MPS</option></select></label>
+                <label class="check-option compact"><input id="faceRecursiveToggle" type="checkbox" checked><span><strong>Search subfolders</strong></span></label>
+                <label class="check-option compact"><input id="faceOverwriteToggle" type="checkbox"><span><strong>Overwrite verified outputs</strong></span></label>
+                <label class="check-option compact"><input id="faceDebugToggle" type="checkbox"><span><strong>Debug traceback</strong></span></label>
+              </div>
+              <button id="runFaceButton" type="button" class="primary-wide">Run Native Face processing</button>
+            </section>
+          </div>
+        </section>
+
+        <section id="faceRunScreen" class="screen" data-screen="face-run">
+          <div class="run-center">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2>Running Py-Feat / Native Face</h2>
+            <div class="progress-track"><div id="faceProgressBar" class="progress-bar"></div></div>
+            <div id="faceProgressLabel" class="progress-label">Starting...</div>
+            <div class="run-actions">
+              <button id="stopFaceButton" type="button" class="ghost-button">Stop</button>
+              <button id="backToFaceInputButton" type="button" class="secondary-button">Back to Face options</button>
+              <button id="openFaceOutputButton" type="button" class="secondary-button">Open output</button>
+            </div>
+            <div id="faceNextStep" class="next-step-panel hidden">
+              <strong>Native Face outputs are ready</strong>
+              <button id="faceToAnalysisButton" type="button" class="primary-button">Import into Analysis</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="textInputScreen" class="screen" data-screen="text-input">
+          <div class="screen-head">
+            <div>
+              <h2>Text Processing</h2>
+              <p>Transcribe with Whisper, prepare language variants, run external RockSteady, and publish Analysis-ready Text results.</p>
+            </div>
+            <button id="backFromTextButton" type="button" class="secondary-button">Back to processing</button>
+          </div>
+          <div class="audio-layout">
+            <section class="input-panel">
+              <h3>Input and output</h3>
+              <button id="browseTextFolderButton" type="button" class="primary-wide">Select input folder</button>
+              <button id="browseTextVideoButton" type="button" class="secondary-wide">Select single video</button>
+              <label for="textSourcePathInput">Text source path</label>
+              <input id="textSourcePathInput" type="text" placeholder="Paste a folder or supported video path">
+              <label for="textOutputRootInput">Text output directory</label>
+              <input id="textOutputRootInput" type="text">
+              <button id="browseTextOutputButton" type="button" class="secondary-wide">Change output folder</button>
+              <button id="checkTextReadinessButton" type="button" class="secondary-wide">Check Text readiness</button>
+              <p id="textReadinessStatus" role="status">Checks Whisper, FFmpeg, Java, and the external RockSteady runtime.</p>
+            </section>
+            <section id="textCatalogSelection" class="input-panel audio-catalog-panel hidden">
+              <h3>Catalog sources</h3>
+              <p id="textCatalogSelectionSummary">Select authorized SourceIDs. Filters change visibility only.</p>
+              <label>Filter <input id="textCatalogFilterText" type="search" placeholder="Hide non-matching sources"></label>
+              <div class="catalog-selection-actions">
+                <button id="textSelectVisibleSourcesButton" type="button" class="secondary-button">Select visible</button>
+                <button id="textClearVisibleSourcesButton" type="button" class="secondary-button">Clear visible</button>
+              </div>
+              <div id="textCatalogSourceList" class="audio-catalog-source-list"></div>
+            </section>
+            <section class="input-panel audio-options-panel">
+              <h3>Whisper and language</h3>
+              <div class="advanced-grid">
+                <label>Whisper model <select id="textWhisperModelSelect"><option>tiny</option><option>base</option><option selected>small</option><option>medium</option><option>large</option><option>large-v2</option><option>large-v3</option></select></label>
+                <label>Device <select id="textWhisperDeviceSelect"><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
+                <label>Whisper language <input id="textWhisperLanguageInput" type="text" placeholder="Blank uses catalog language first"></label>
+                <label>Analysis transcript <select id="textLanguageVariantSelect"><option value="original">Original language</option><option value="eng" selected>English</option></select></label>
+              </div>
+            </section>
+            <section class="input-panel audio-options-panel">
+              <h3>RockSteady dictionaries and categories</h3>
+              <label for="textDictionaryInput">Dictionaries (one <code>embedded:RESOURCE</code> or <code>file:PATH</code> per line)</label>
+              <textarea id="textDictionaryInput" rows="3" placeholder="embedded:RESOURCE">embedded:affectDictionaries/General Language (En)(2011-07-05).dict.xml</textarea>
+              <label>Dictionary combination <select id="textDictionaryCombinationSelect"><option value="merge">Merge</option><option value="override">Override</option></select></label>
+              <label for="textCategorySearchInput">Search or enter categories (comma or newline separated)</label>
+              <input id="textCategorySearchInput" type="search" list="textCategorySuggestions" placeholder="Positive, Negative">
+              <datalist id="textCategorySuggestions"><option value="Positive"><option value="Negative"><option value="Strong"><option value="Weak"><option value="Active"><option value="Passive"></datalist>
+              <label class="check-option compact"><input id="textAllCategoriesToggle" type="checkbox"><span><strong>Export all available dictionary categories</strong></span></label>
+              <div class="advanced-grid">
+                <label>Threads <input id="textThreadsInput" type="number" min="1" max="256" step="1" value="1"></label>
+                <label class="check-option compact"><input id="textForceRocksteadyToggle" type="checkbox"><span><strong>Force RockSteady rerun</strong></span></label>
+                <label class="check-option compact"><input id="textGraphsToggle" type="checkbox" checked><span><strong>Write graphs</strong></span></label>
+                <label class="check-option compact"><input id="textDebugToggle" type="checkbox"><span><strong>Debug traceback</strong></span></label>
+              </div>
+              <button id="runTextButton" type="button" class="primary-wide">Run Text processing</button>
+            </section>
+          </div>
+        </section>
+
+        <section id="textRunScreen" class="screen" data-screen="text-run">
+          <div class="run-center">
+            <div class="spinner" aria-hidden="true"></div>
+            <h2>Running native Text processing</h2>
+            <div class="progress-track"><div id="textProgressBar" class="progress-bar"></div></div>
+            <div id="textProgressLabel" class="progress-label">Starting...</div>
+            <div class="run-actions">
+              <button id="stopTextButton" type="button" class="ghost-button">Stop</button>
+              <button id="backToTextInputButton" type="button" class="secondary-button">Back to Text options</button>
+              <button id="openTextOutputButton" type="button" class="secondary-button">Open output</button>
+            </div>
+            <div id="textNextStep" class="next-step-panel hidden">
+              <strong>Native Text outputs are ready for SourceID-grain Analysis</strong>
+              <button id="textToAnalysisButton" type="button" class="primary-button">Import into Analysis</button>
+            </div>
+          </div>
+        </section>
+
         <section id="analysisInputScreen" class="screen" data-screen="analysis-input">
           <div class="screen-head">
             <div>
@@ -408,6 +554,25 @@
                 </div>
               </div>
               <div class="analysis-modality-grid">
+                <article class="analysis-modality-card" data-analysis-modality="native_face">
+                  <div class="analysis-modality-head">
+                    <label class="check-option compact">
+                      <input id="analysisNativeFaceEnabled" type="checkbox">
+                      <span><strong>Py-Feat / Native Face</strong><small>Native primary-face emotions, valence, and arousal.</small></span>
+                    </label>
+                  </div>
+                  <div class="analysis-source-method" role="radiogroup" aria-label="Native Face source method">
+                    <label><input id="analysisNativeFaceRunMethod" type="radio" name="analysisNativeFaceSourceMethod" value="run" checked><span>Run analysis</span></label>
+                    <label><input id="analysisNativeFaceImportMethod" type="radio" name="analysisNativeFaceSourceMethod" value="import"><span>Use existing results</span></label>
+                  </div>
+                  <label for="analysisNativeFaceSourcePath">Py-Feat / Native Face source folder</label>
+                  <div class="path-row">
+                    <input id="analysisNativeFaceSourcePath" type="text" placeholder="Native Face processing or Analysis reports">
+                    <button id="browseAnalysisNativeFaceSource" type="button" class="secondary-button">Browse</button>
+                  </div>
+                  <small class="analysis-source-help" data-analysis-help="native_face">Choose completed native Face processing outputs.</small>
+                </article>
+
                 <article class="analysis-modality-card" data-analysis-modality="imotions">
                   <div class="analysis-modality-head">
                     <label class="check-option compact">

@@ -32,6 +32,32 @@ _PER_VIDEO_CONTRACT = {
 }
 
 
+def validate_face_output_root(source: Path, output_root: Path) -> Path:
+    """Validate one Face output root without creating or changing it."""
+
+    source = Path(source).expanduser().resolve()
+    target = _assert_safe_target(Path(output_root), source)
+    if target.exists() and not target.is_dir():
+        raise NotADirectoryError(f"Face output root is not a directory: {target}")
+    if not target.exists():
+        return target
+
+    marker = target / FACE_OWNER_FILE
+    if marker.exists():
+        _require_owner_marker(marker, _ROOT_SCOPE)
+        return target
+
+    entries = list(target.iterdir())
+    if not entries or all(entry.name == ".gitkeep" for entry in entries):
+        return target
+    if _legacy_face_video_directories(target) is None:
+        raise ValueError(
+            "Refusing to take over a non-empty directory that is not a recognised "
+            f"Face output root: {target}"
+        )
+    return target
+
+
 def prepare_face_output_root(source: Path, output_root: Path) -> Path:
     """Validate, claim, or safely upgrade one Face output root.
 
@@ -42,9 +68,7 @@ def prepare_face_output_root(source: Path, output_root: Path) -> Path:
     """
 
     source = Path(source).expanduser().resolve()
-    target = _assert_safe_target(Path(output_root), source)
-    if target.exists() and not target.is_dir():
-        raise NotADirectoryError(f"Face output root is not a directory: {target}")
+    target = validate_face_output_root(source, output_root)
     if not target.exists():
         target.mkdir(parents=True)
         target = _assert_safe_target(target, source)

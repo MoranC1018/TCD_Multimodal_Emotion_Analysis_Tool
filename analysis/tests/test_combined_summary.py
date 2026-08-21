@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import openpyxl
 
+from analysis.native_face import NATIVE_FACE_METRICS
 from analysis.combined_summary import (
     AUDIO_DIMENSIONS,
     AUDIO_EMOTIONS,
@@ -386,7 +387,10 @@ class CombinedSummaryTests(unittest.TestCase):
             **{("Audio", metric): "-100..100" for metric in AUDIO_VALENCE},
             **{("Video", metric): "0..100" for metric in (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, *VIDEO_DIMENSIONS)},
             **{("Video", metric): "-100..100" for metric in VIDEO_VALENCE},
-            **{("Text", metric): "0..1" for metric in TEXT_SENTIMENT},
+            **{("Text", metric): "0..1" for metric in TEXT_SENTIMENT[:2]},
+            ("Text", "Text Valence"): "-1..1",
+            **{("Py-Feat / Native Face", metric): "0..100" for metric in NATIVE_FACE_METRICS[:9]},
+            **{("Py-Feat / Native Face", metric): "-100..100" for metric in NATIVE_FACE_METRICS[9:]},
             **{("Text", metric): "-1..1" for metric in TEXT_DIMENSIONS},
         }
         self.assertEqual({key: row[5] for key, row in rows.items()}, expected_ranges)
@@ -545,7 +549,7 @@ class CombinedSummaryTests(unittest.TestCase):
 
         book = openpyxl.load_workbook(result.workbook_path, data_only=False)
         self.assertEqual(book["Text sentiment"]["D2"].value, 0.20)
-        self.assertEqual(book["Text sentiment"]["D6"].value, 0.50)
+        self.assertEqual(book["Text sentiment"]["D7"].value, 0.50)
         comparison = book["Construct Comparison"]
         positive_row = next(
             row

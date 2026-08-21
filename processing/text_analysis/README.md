@@ -52,10 +52,18 @@ useful for development. Any stage range containing RockSteady performs this
 preflight before Whisper starts, so a missing runtime cannot waste a long
 transcription run.
 
+RockSteady 0.4, its dictionaries, and a supported JDK/Javac are external,
+separately licensed requirements. `scripts/setup.ps1` does not download them.
+Whisper, Torch, trusted FFmpeg, Java, the adapter/JAR, dictionaries, and selected
+categories must all pass the structured readiness contract for the requested
+stage range.
+
 The current run is easy to inspect in one Text-owned tree:
 
 ```text
 processing/text_analysis/output/
+  source_manifest.json      # catalog mode: exact sealed top JSON bytes
+  source_metadata.csv       # catalog mode: exact sealed top CSV bytes
   pipeline_manifest.json
   runs/<run-id>/pipeline_manifest.json
   current/
@@ -66,13 +74,44 @@ processing/text_analysis/output/
     rocksteady/core/<Country>/<Speaker>/<Video>.csv
 ```
 
+The pipeline manifest stores the exact catalog digest and ordered
+`processed_source_ids` separately; it never rewrites the full source manifest
+to resemble the selection. Every transcript, selected/prepared item,
+RockSteady job, derived row, and postprocessing manifest retains SourceID,
+raw/display speaker, content hash/size, user/system metadata, output mapping,
+catalog digest, and source-context identity. Resume fingerprints include this
+binding, so two identities cannot exchange SourceIDs merely because their media
+bytes match.
+
+Catalog discovery is manifest ordered and accepts only canonical final media.
+It excludes private caches, raw clips, focus/segment/intermediate artifacts,
+and validates all sidecars before Whisper, cleanup, RockSteady, or publication.
+Only `Speaker` can create grouping folders; Country, researcher `Language`,
+Gender, and all other fields remain metadata. Repeated links remain distinct
+SourceIDs. Transcription language precedence is YouTube-reported
+`system_metadata.youtube_language`, then the explicit Whisper language, then
+blank; the researcher `Language` field never overrides it.
+
 The final statistical locations and file formats remain:
 
 ```text
 analysis/output/text/text_output/selected
 analysis/output/text/text_output/extra
 analysis/output/text/text_output/multimodal
+analysis/output/text/text_output/source_manifest.json
+analysis/output/text/text_output/source_metadata.csv
 ```
+
+Native postprocessing publishes a SourceID-grain `video_level_summary.csv`
+with its bound pair manifest. Catalog runs also copy the exact validated
+sidecar bytes into this explicit postprocessing run root. The pair manifest
+binds their SHA-256 values, the catalog digest, and each ordered source-context
+object/hash; Analysis never searches a fixed number of parent directories or
+accepts a replacement catalog with coincidentally matching SourceIDs. Analysis
+prefers that file, validates its hash, sidecars, ordered SourceID coverage, and
+identity alignment, and supports SourceID profile splits. It retains the legacy speaker-grain
+`speaker_level_summary.csv` importer, for which one speaker may not be split
+across groups.
 
 `processing/text_analysis/output/pipeline_manifest.json` is written as
 `running` before work begins and records the shared `run_id`, commands, stage
@@ -115,3 +154,16 @@ Older generated folders under `transcribe/output`, `prepare_input`, and
 `parse_output` are left untouched. They predate content hashes and complete
 model provenance, so the current pipeline does not silently trust or relabel
 them as resumable v2 output.
+
+## Text constructs and profile reruns
+
+Positive Sentiment and Negative Sentiment use `[0,1]`; legacy `Positive
+valence` and `Negative valence` headers are accepted only as compatibility
+aliases. Text Valence is
+`(Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment)`
+on `[-1,1]` and is blank when the denominator is zero. After every profile
+selection Analysis recomputes this value from the selected source-grain
+positive and negative totals; it never averages child valences. A profile rerun
+therefore changes only Analysis output and never processing artifacts or source
+sidecars. RockSteady category counts remain dictionary-derived text indicators,
+not diagnoses or direct measurements of emotion.

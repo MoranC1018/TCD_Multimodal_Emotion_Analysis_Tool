@@ -5,7 +5,8 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
-const [uiRoot, playwrightRoot, browserConfigJson, screenshotDir] = process.argv.slice(1);
+const argumentOffset = process.argv[1]?.endsWith("analysis_ui_browser_harness.js") ? 2 : 1;
+const [uiRoot, playwrightRoot, browserConfigJson, screenshotDir] = process.argv.slice(argumentOffset);
 if (![uiRoot, playwrightRoot, browserConfigJson, screenshotDir].every(Boolean)) {
   throw new Error("Pass UI root, Playwright root, browser configuration, and screenshot directory.");
 }
@@ -73,6 +74,8 @@ function statePayload(backend) {
     settings: { resourceCapabilities: {} },
     defaultOutputRoot: "C:\\output\\procurement",
     defaultAudioOutputRoot: "C:\\output\\audio",
+    defaultFaceOutputRoot: "C:\\output\\face",
+    defaultTextOutputRoot: "C:\\output\\text",
     defaultAnalysisOutputRoot: "C:\\output\\analysis",
     running: backend.running,
     status: backend.status,
@@ -156,6 +159,7 @@ async function createTestPage(browser, origin, viewport) {
     profileContextBodies: [],
     requireSourceManifest: false,
     runBodies: [],
+    nativeRunBodies: [],
     holdStateOnNextRun: false,
     stateGate: null,
     stateWaitCount: 0,
@@ -209,6 +213,34 @@ async function createTestPage(browser, origin, viewport) {
         backend.stateGate = deferred();
       }
       return responseJson(route, { runId: backend.runId });
+    }
+    if (pathname === "/api/processing-catalog") {
+      return responseJson(route, {
+        catalog: true,
+        source_kind: "catalog",
+        catalog_sha256: "c".repeat(64),
+        sources: [
+          { source_id: "source-0001", speaker: "Researcher A", title: "Interview A", metadata: { Country: "Ireland" } },
+          { source_id: "source-0002", speaker: "Researcher B", title: "<img src=x onerror=alert(1)>", metadata: { Country: "Japan" } },
+        ],
+      });
+    }
+    if (pathname === "/api/run-face" || pathname === "/api/run-text") {
+      backend.nativeRunBodies.push({ pathname, body: request.postDataJSON() });
+      backend.running = true;
+      backend.status = "running";
+      backend.runId = ++backend.nextRunId;
+      backend.progress = { mode: pathname.endsWith("face") ? "face-native" : "text-native", label: "Running" };
+      return responseJson(route, { runId: backend.runId });
+    }
+    if (pathname === "/api/face-readiness") {
+      return responseJson(route, { kind: "face-processing-readiness", ready: false, device: "cpu", detail: "cached weights missing" });
+    }
+    if (pathname === "/api/text-readiness") {
+      return responseJson(route, { kind: "text-processing-readiness", status: "ready", categories: ["Positive", "Negative"], category_count: 2 });
+    }
+    if (pathname === "/api/open-output") {
+      return responseJson(route, { opened: true, path: request.postDataJSON().path });
     }
     if (pathname === "/api/stop") {
       backend.running = false;
@@ -372,6 +404,64 @@ async function responsiveSmoke(browser, origin) {
     const narrowPath = path.join(screenshotDir, "analysis-customize-narrow.png");
     await page.screenshot({ path: narrowPath, fullPage: true });
     assert.ok(fs.statSync(narrowPath).size > 10000);
+  } finally {
+    await page.close();
+  }
+}
+
+async function nativeProcessingScreens(browser, origin) {
+  const { page, backend } = await createTestPage(browser, origin, { width: 1440, height: 1000 });
+  try {
+    await page.evaluate(() => showProcessingHub());
+    await page.click("#openFaceProcessingButton");
+    await page.fill("#faceSourcePathInput", "C:\\catalog-run");
+    await page.locator("#faceSourcePathInput").press("Tab");
+    await page.waitForFunction(() => document.querySelectorAll("#faceCatalogSourceList input").length === 2);
+    assert.strictEqual(await page.locator("#faceCatalogSourceList img").count(), 0);
+    assert.ok((await page.locator("#faceCatalogSourceList").textContent()).includes("<img src=x onerror=alert(1)>") );
+    await page.fill("#faceCatalogFilterText", "Japan");
+    const filteredProbe = await page.evaluate(() => ({
+      visible: visibleNativeCatalogSources("face").map((source) => source.source_id),
+      selected: Array.from(state.faceSelectedSourceIds),
+      panelClass: document.querySelector("#faceCatalogSelection").className,
+      screenClass: document.querySelector("#faceInputScreen").className,
+    }));
+    assert.deepStrictEqual(filteredProbe.visible, ["source-0002"], JSON.stringify(filteredProbe));
+    await page.locator("#faceClearVisibleSourcesButton").evaluate((button) => button.click());
+    await page.locator("#faceCatalogFilterText").evaluate((input) => {
+      input.value = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    assert.strictEqual(await page.locator("#faceCatalogSourceList input:checked").count(), 1);
+    await page.click("#checkFaceReadinessButton");
+    await page.waitForFunction(() => document.querySelector("#faceReadinessStatus").textContent.includes("Not ready"));
+    await page.click("#runFaceButton");
+    await waitFor(() => backend.nativeRunBodies.length === 1, "Native Face request was not sent.");
+    assert.deepStrictEqual(backend.nativeRunBodies[0].body.selectedSourceIds, ["source-0001"]);
+    assert.strictEqual(backend.nativeRunBodies[0].body.catalogSha256, "c".repeat(64));
+    assert.strictEqual(await page.locator("#faceRunScreen").getAttribute("class"), "screen active");
+    await page.evaluate(() => importNativeFaceIntoAnalysis());
+    assert.strictEqual(await page.locator("#analysisNativeFaceEnabled").isChecked(), true);
+    assert.strictEqual(await page.locator("#analysisNativeFaceSourcePath").inputValue(), "C:\\output\\face");
+
+    await page.evaluate(() => showProcessingHub());
+    await page.click("#openTextProcessingButton");
+    await page.fill("#textSourcePathInput", "C:\\catalog-run");
+    await page.locator("#textSourcePathInput").press("Tab");
+    await page.waitForFunction(() => document.querySelectorAll("#textCatalogSourceList input").length === 2);
+    await page.click("#checkTextReadinessButton");
+    await page.waitForFunction(() => document.querySelector("#textReadinessStatus").textContent.includes("Ready"));
+    assert.strictEqual(await page.locator("#textCategorySuggestions option").count(), 2);
+    await page.check("#textAllCategoriesToggle");
+    assert.strictEqual(await page.locator("#textCategorySearchInput").isDisabled(), true);
+    await page.click("#runTextButton");
+    await waitFor(() => backend.nativeRunBodies.length === 2, "Native Text request was not sent.");
+    assert.strictEqual(backend.nativeRunBodies[1].body.allCategories, true);
+    assert.deepStrictEqual(backend.nativeRunBodies[1].body.categories, []);
+    assert.strictEqual(backend.nativeRunBodies[1].body.defaultLanguageVariant, "eng");
+    assert.strictEqual(await page.locator("#textRunScreen").getAttribute("class"), "screen active");
+    await page.setViewportSize({ width: 700, height: 1200 });
+    assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   } finally {
     await page.close();
   }
@@ -614,6 +704,7 @@ async function main() {
     ["submission lock and payloads", submissionLockAndPayloads],
     ["workflow failure detail", workflowFailureDetail],
     ["responsive rendering", responsiveSmoke],
+    ["native processing screens", nativeProcessingScreens],
     ["text grouping preflight", textGroupingPreflight],
     ["sidecarless manifest selection", sidecarlessManifestSelection],
   ]) {

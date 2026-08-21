@@ -180,8 +180,77 @@ const audioNextTitle = document.querySelector("#audioNextTitle");
 const audioNextCopy = document.querySelector("#audioNextCopy");
 const audioNextStep = document.querySelector("#audioNextStep");
 const audioToAnalysisButton = document.querySelector("#audioToAnalysisButton");
+const faceSourcePathInput = document.querySelector("#faceSourcePathInput");
+const faceOutputRootInput = document.querySelector("#faceOutputRootInput");
+const browseFaceFolderButton = document.querySelector("#browseFaceFolderButton");
+const browseFaceVideoButton = document.querySelector("#browseFaceVideoButton");
+const browseFaceOutputButton = document.querySelector("#browseFaceOutputButton");
+const backFromFaceButton = document.querySelector("#backFromFaceButton");
+const checkFaceReadinessButton = document.querySelector("#checkFaceReadinessButton");
+const prepareFaceModelsButton = document.querySelector("#prepareFaceModelsButton");
+const faceReadinessStatus = document.querySelector("#faceReadinessStatus");
+const faceSampleFpsInput = document.querySelector("#faceSampleFpsInput");
+const faceConfidenceInput = document.querySelector("#faceConfidenceInput");
+const faceBatchSizeInput = document.querySelector("#faceBatchSizeInput");
+const faceDeviceSelect = document.querySelector("#faceDeviceSelect");
+const faceRecursiveToggle = document.querySelector("#faceRecursiveToggle");
+const faceOverwriteToggle = document.querySelector("#faceOverwriteToggle");
+const faceDebugToggle = document.querySelector("#faceDebugToggle");
+const runFaceButton = document.querySelector("#runFaceButton");
+const stopFaceButton = document.querySelector("#stopFaceButton");
+const backToFaceInputButton = document.querySelector("#backToFaceInputButton");
+const openFaceOutputButton = document.querySelector("#openFaceOutputButton");
+const faceToAnalysisButton = document.querySelector("#faceToAnalysisButton");
+const faceProgressBar = document.querySelector("#faceProgressBar");
+const faceProgressLabel = document.querySelector("#faceProgressLabel");
+const faceNextStep = document.querySelector("#faceNextStep");
+const faceCatalogSelection = document.querySelector("#faceCatalogSelection");
+const faceCatalogSelectionSummary = document.querySelector("#faceCatalogSelectionSummary");
+const faceCatalogFilterText = document.querySelector("#faceCatalogFilterText");
+const faceSelectVisibleSourcesButton = document.querySelector("#faceSelectVisibleSourcesButton");
+const faceClearVisibleSourcesButton = document.querySelector("#faceClearVisibleSourcesButton");
+const faceCatalogSourceList = document.querySelector("#faceCatalogSourceList");
+const textSourcePathInput = document.querySelector("#textSourcePathInput");
+const textOutputRootInput = document.querySelector("#textOutputRootInput");
+const browseTextFolderButton = document.querySelector("#browseTextFolderButton");
+const browseTextVideoButton = document.querySelector("#browseTextVideoButton");
+const browseTextOutputButton = document.querySelector("#browseTextOutputButton");
+const backFromTextButton = document.querySelector("#backFromTextButton");
+const checkTextReadinessButton = document.querySelector("#checkTextReadinessButton");
+const textReadinessStatus = document.querySelector("#textReadinessStatus");
+const textWhisperModelSelect = document.querySelector("#textWhisperModelSelect");
+const textWhisperDeviceSelect = document.querySelector("#textWhisperDeviceSelect");
+const textWhisperLanguageInput = document.querySelector("#textWhisperLanguageInput");
+const textLanguageVariantSelect = document.querySelector("#textLanguageVariantSelect");
+const textDictionaryInput = document.querySelector("#textDictionaryInput");
+const textDictionaryCombinationSelect = document.querySelector("#textDictionaryCombinationSelect");
+const textCategorySearchInput = document.querySelector("#textCategorySearchInput");
+const textCategorySuggestions = document.querySelector("#textCategorySuggestions");
+const textAllCategoriesToggle = document.querySelector("#textAllCategoriesToggle");
+const textThreadsInput = document.querySelector("#textThreadsInput");
+const textForceRocksteadyToggle = document.querySelector("#textForceRocksteadyToggle");
+const textGraphsToggle = document.querySelector("#textGraphsToggle");
+const textDebugToggle = document.querySelector("#textDebugToggle");
+const runTextButton = document.querySelector("#runTextButton");
+const stopTextButton = document.querySelector("#stopTextButton");
+const backToTextInputButton = document.querySelector("#backToTextInputButton");
+const openTextOutputButton = document.querySelector("#openTextOutputButton");
+const textToAnalysisButton = document.querySelector("#textToAnalysisButton");
+const textProgressBar = document.querySelector("#textProgressBar");
+const textProgressLabel = document.querySelector("#textProgressLabel");
+const textNextStep = document.querySelector("#textNextStep");
+const textCatalogSelection = document.querySelector("#textCatalogSelection");
+const textCatalogSelectionSummary = document.querySelector("#textCatalogSelectionSummary");
+const textCatalogFilterText = document.querySelector("#textCatalogFilterText");
+const textSelectVisibleSourcesButton = document.querySelector("#textSelectVisibleSourcesButton");
+const textClearVisibleSourcesButton = document.querySelector("#textClearVisibleSourcesButton");
+const textCatalogSourceList = document.querySelector("#textCatalogSourceList");
 const analysisOutputRootInput = document.querySelector("#analysisOutputRootInput");
 const browseAnalysisOutputButton = document.querySelector("#browseAnalysisOutputButton");
+const analysisNativeFaceEnabled = document.querySelector("#analysisNativeFaceEnabled");
+const analysisNativeFaceSourcePath = document.querySelector("#analysisNativeFaceSourcePath");
+const analysisNativeFaceMethodInputs = Array.from(document.querySelectorAll("input[name='analysisNativeFaceSourceMethod']"));
+const browseAnalysisNativeFaceSource = document.querySelector("#browseAnalysisNativeFaceSource");
 const analysisImotionsEnabled = document.querySelector("#analysisImotionsEnabled");
 const analysisImotionsSourcePath = document.querySelector("#analysisImotionsSourcePath");
 const analysisImotionsMethodInputs = Array.from(document.querySelectorAll("input[name='analysisImotionsSourceMethod']"));
@@ -267,6 +336,14 @@ const analysisImotionsControls = {
   methodInputs: analysisImotionsMethodInputs,
   browse: browseAnalysisImotionsSource,
 };
+const analysisNativeFaceControls = {
+  name: "native_face",
+  label: "Py-Feat / Native Face",
+  enabled: analysisNativeFaceEnabled,
+  source: analysisNativeFaceSourcePath,
+  methodInputs: analysisNativeFaceMethodInputs,
+  browse: browseAnalysisNativeFaceSource,
+};
 const analysisAudioControls = {
   name: "audio",
   label: "Audio",
@@ -284,6 +361,7 @@ const analysisTextControls = {
   browse: browseAnalysisTextSource,
 };
 const analysisImplementedControls = [
+  analysisNativeFaceControls,
   analysisImotionsControls,
   analysisAudioControls,
   analysisTextControls,
@@ -838,6 +916,10 @@ const state = {
   scan: null,
   audioCatalog: null,
   audioCatalogLoadToken: 0,
+  faceCatalog: null,
+  faceCatalogLoadToken: 0,
+  textCatalog: null,
+  textCatalogLoadToken: 0,
   mode: "",
   audioMode: "batch",
   analysisSpeakers: [],
@@ -867,14 +949,20 @@ const state = {
   activeRunIds: {
     procurement: null,
     audio: null,
+    face: null,
+    text: null,
     analysis: null,
   },
   handledRunIds: new Set(),
   pendingAudioOutput: "",
+  pendingFaceOutput: "",
+  pendingTextOutput: "",
   activeSpeaker: "",
   selectedSpeakers: new Set(),
   selectedSourceIds: new Set(),
   audioSelectedSourceIds: new Set(),
+  faceSelectedSourceIds: new Set(),
+  textSelectedSourceIds: new Set(),
   selectedVideoId: "",
   selectedVideo: null,
   segmentsByVideo: new Map(),
@@ -1398,8 +1486,9 @@ function hydrateAnalysisModalitiesFromImports() {
       : "";
   const replaceExisting = Boolean(state.workflow.active && state.workflow.plan?.analysis);
   hydrateAnalysisModality(analysisImotionsControls, facePath, replaceExisting);
+  hydrateAnalysisModality(analysisNativeFaceControls, state.pendingFaceOutput, replaceExisting);
   hydrateAnalysisModality(analysisAudioControls, audioPath, replaceExisting);
-  hydrateAnalysisModality(analysisTextControls, textPath, replaceExisting, "import");
+  hydrateAnalysisModality(analysisTextControls, state.pendingTextOutput || textPath, replaceExisting, "import");
 }
 
 function hydrateAnalysisModality(controls, sourcePath, replaceExisting, sourceMethod = "run") {
@@ -2584,11 +2673,13 @@ function updateAnalysisCard(controls) {
   const help = document.querySelector(`[data-analysis-help="${controls.name}"]`);
   help.textContent = sourceMethod === "import"
     ? controls.name === "text"
-      ? "Choose completed text results containing multimodal/speaker_level_summary.csv."
+      ? "Choose completed native SourceID-grain Text results or a legacy speaker-level summary."
       : "Choose an existing Analysis report folder. Source files will not be re-analysed."
     : controls.name === "imotions"
       ? "Choose the folder containing iMotions CSV exports."
-      : "Choose the folder containing processed audio_analysis.csv files.";
+      : controls.name === "native_face"
+        ? "Choose completed Py-Feat / Native Face processing outputs."
+        : "Choose the folder containing processed audio_analysis.csv files.";
 }
 
 function updateAnalysisForm() {
@@ -3218,6 +3309,241 @@ async function saveAnalysisCustomization() {
   updateAnalysisForm();
 }
 
+function nativeProcessingControls(kind) {
+  if (kind === "face") {
+    return {
+      source: faceSourcePathInput,
+      catalogPanel: faceCatalogSelection,
+      summary: faceCatalogSelectionSummary,
+      filter: faceCatalogFilterText,
+      list: faceCatalogSourceList,
+      stateKey: "faceCatalog",
+      selectionKey: "faceSelectedSourceIds",
+      loadTokenKey: "faceCatalogLoadToken",
+    };
+  }
+  return {
+    source: textSourcePathInput,
+    catalogPanel: textCatalogSelection,
+    summary: textCatalogSelectionSummary,
+    filter: textCatalogFilterText,
+    list: textCatalogSourceList,
+    stateKey: "textCatalog",
+    selectionKey: "textSelectedSourceIds",
+    loadTokenKey: "textCatalogLoadToken",
+  };
+}
+
+function visibleNativeCatalogSources(kind) {
+  const controls = nativeProcessingControls(kind);
+  return visibleCatalogSources(catalogSources(state[controls.stateKey]), {
+    filterText: controls.filter.value,
+  });
+}
+
+function renderNativeCatalogSelection(kind) {
+  const controls = nativeProcessingControls(kind);
+  const catalog = state[controls.stateKey];
+  const sources = catalogSources(catalog);
+  const selected = state[controls.selectionKey];
+  const visible = visibleNativeCatalogSources(kind);
+  controls.catalogPanel.classList.toggle("hidden", !isCatalogScan(catalog));
+  controls.list.replaceChildren();
+  if (!isCatalogScan(catalog)) {
+    return;
+  }
+  controls.summary.textContent = `${plural(selected.size, "source")} selected; ${plural(visible.length, "source")} visible. Filters do not change selection.`;
+  visible.forEach((source) => {
+    const sourceId = String(source.source_id || source.id || "");
+    const label = document.createElement("label");
+    label.className = "catalog-source-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(sourceId);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) selected.add(sourceId); else selected.delete(sourceId);
+      renderNativeCatalogSelection(kind);
+    });
+    const copy = document.createElement("span");
+    const title = String(source.title || source.metadata?.Title || sourceId);
+    const speaker = String(source.speaker || source.metadata?.Speaker || "Pooled");
+    copy.textContent = `${sourceId} — ${speaker} — ${title}`;
+    label.append(checkbox, copy);
+    controls.list.appendChild(label);
+  });
+}
+
+function clearNativeCatalogSelection(kind) {
+  const controls = nativeProcessingControls(kind);
+  state[controls.loadTokenKey] += 1;
+  state[controls.stateKey] = null;
+  state[controls.selectionKey] = new Set();
+  renderNativeCatalogSelection(kind);
+}
+
+async function loadNativeCatalogSelection(kind, { preserveSelection = false } = {}) {
+  const controls = nativeProcessingControls(kind);
+  const sourcePath = controls.source.value.trim();
+  const previousCatalog = state[controls.stateKey];
+  const previousSelection = new Set(state[controls.selectionKey]);
+  const requestToken = ++state[controls.loadTokenKey];
+  state[controls.stateKey] = null;
+  state[controls.selectionKey] = new Set();
+  renderNativeCatalogSelection(kind);
+  if (!sourcePath) return;
+  const payload = await api("/api/processing-catalog", {
+    method: "POST",
+    body: { sourcePath },
+  });
+  if (requestToken !== state[controls.loadTokenKey] || controls.source.value.trim() !== sourcePath) return;
+  state[controls.stateKey] = payload;
+  if (isCatalogScan(payload)) {
+    const available = catalogSources(payload)
+      .map((source) => String(source.source_id || source.id || ""))
+      .filter(Boolean);
+    if (preserveSelection && isCatalogScan(previousCatalog)) {
+      const previousDigest = String(previousCatalog.catalog_sha256 || "");
+      const refreshedDigest = String(payload.catalog_sha256 || "");
+      if (!previousDigest || previousDigest !== refreshedDigest) {
+        state[controls.selectionKey] = new Set();
+        renderNativeCatalogSelection(kind);
+        throw new Error("The catalog changed while it was being authorized. Review and select its sources again.");
+      }
+      const availableSet = new Set(available);
+      state[controls.selectionKey] = new Set(
+        Array.from(previousSelection).filter((sourceId) => availableSet.has(sourceId)),
+      );
+    } else {
+      state[controls.selectionKey] = new Set(available);
+    }
+  }
+  renderNativeCatalogSelection(kind);
+}
+
+function splitResearcherList(value) {
+  return String(value || "").split(/[\r\n,;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function faceRequestBody() {
+  const selectedSourceIds = Array.from(state.faceSelectedSourceIds);
+  return {
+    sourcePath: faceSourcePathInput.value.trim(),
+    outputRoot: faceOutputRootInput.value.trim(),
+    sampleFps: requiredNumber(faceSampleFpsInput, "Face sample FPS", 0.1, 120),
+    confidenceThreshold: requiredNumber(faceConfidenceInput, "Face confidence", 0.01, 1),
+    batchSize: requiredNumber(faceBatchSizeInput, "Face batch size", 1, 1024),
+    device: faceDeviceSelect.value,
+    recursive: faceRecursiveToggle.checked,
+    overwrite: faceOverwriteToggle.checked,
+    debug: faceDebugToggle.checked,
+    selectedSourceIds,
+    catalogSha256: selectedSourceIds.length && isCatalogScan(state.faceCatalog)
+      ? String(state.faceCatalog.catalog_sha256 || "") : "",
+  };
+}
+
+function textRequestBody() {
+  const selectedSourceIds = Array.from(state.textSelectedSourceIds);
+  return {
+    sourcePath: textSourcePathInput.value.trim(),
+    outputRoot: textOutputRootInput.value.trim(),
+    whisperModel: textWhisperModelSelect.value,
+    whisperDevice: textWhisperDeviceSelect.value,
+    whisperLanguage: textWhisperLanguageInput.value.trim(),
+    defaultLanguageVariant: textLanguageVariantSelect.value,
+    dictionaries: splitResearcherList(textDictionaryInput.value),
+    dictionaryCombination: textDictionaryCombinationSelect.value,
+    categories: textAllCategoriesToggle.checked ? [] : splitResearcherList(textCategorySearchInput.value),
+    allCategories: textAllCategoriesToggle.checked,
+    threads: requiredNumber(textThreadsInput, "Text threads", 1, 256),
+    forceRocksteady: textForceRocksteadyToggle.checked,
+    writeGraphs: textGraphsToggle.checked,
+    debug: textDebugToggle.checked,
+    selectedSourceIds,
+    catalogSha256: selectedSourceIds.length && isCatalogScan(state.textCatalog)
+      ? String(state.textCatalog.catalog_sha256 || "") : "",
+  };
+}
+
+async function runFaceProcessing() {
+  if (!faceSourcePathInput.value.trim()) throw new Error("Choose a Native Face source first.");
+  await loadNativeCatalogSelection("face", { preserveSelection: true });
+  if (isCatalogScan(state.faceCatalog) && !state.faceSelectedSourceIds.size) {
+    throw new Error("Select at least one catalog source for Native Face processing.");
+  }
+  const response = await api("/api/run-face", { method: "POST", body: faceRequestBody() });
+  state.activeRunIds.face = Number(response.runId || 0) || null;
+  state.pendingFaceOutput = faceOutputRootInput.value.trim();
+  faceProgressBar.style.width = "0%";
+  faceProgressLabel.textContent = "Starting...";
+  faceNextStep.classList.add("hidden");
+  await showScreen("face-run");
+}
+
+async function runTextProcessing() {
+  if (!textSourcePathInput.value.trim()) throw new Error("Choose a Text source first.");
+  await loadNativeCatalogSelection("text", { preserveSelection: true });
+  if (isCatalogScan(state.textCatalog) && !state.textSelectedSourceIds.size) {
+    throw new Error("Select at least one catalog source for Text processing.");
+  }
+  const response = await api("/api/run-text", { method: "POST", body: textRequestBody() });
+  state.activeRunIds.text = Number(response.runId || 0) || null;
+  state.pendingTextOutput = textOutputRootInput.value.trim();
+  textProgressBar.style.width = "0%";
+  textProgressLabel.textContent = "Starting...";
+  textNextStep.classList.add("hidden");
+  await showScreen("text-run");
+}
+
+async function checkFaceReadiness(prepareModels = false) {
+  const endpoint = prepareModels ? "/api/prepare-face-models" : "/api/face-readiness";
+  const response = await api(endpoint, { method: "POST", body: { device: faceDeviceSelect.value } });
+  state.activeRunIds.face = Number(response.runId || 0) || null;
+  faceReadinessStatus.textContent = prepareModels
+    ? "Preparing and verifying Py-Feat models..."
+    : response.ready
+      ? `Ready on ${response.device || faceDeviceSelect.value}: ${response.detail || "all Face dependencies verified"}`
+      : `Not ready: ${response.detail || "one or more Face dependencies are missing"}`;
+}
+
+async function checkTextReadiness() {
+  const request = textRequestBody();
+  delete request.sourcePath;
+  delete request.outputRoot;
+  const response = await api("/api/text-readiness", { method: "POST", body: request });
+  state.activeRunIds.text = null;
+  if (Array.isArray(response.categories)) {
+    textCategorySuggestions.replaceChildren();
+    response.categories.forEach((category) => {
+      const option = document.createElement("option");
+      option.value = String(category);
+      textCategorySuggestions.appendChild(option);
+    });
+  }
+  textReadinessStatus.textContent = response.status === "ready"
+    ? `Ready: Whisper and ${response.category_count || 0} RockSteady categories verified.`
+    : `Not ready: ${response.error || "one or more Text dependencies are missing"}`;
+}
+
+async function openProcessingOutput(path) {
+  if (!path.trim()) throw new Error("Choose an output folder first.");
+  await api("/api/open-output", { method: "POST", body: { path: path.trim() } });
+}
+
+async function importNativeFaceIntoAnalysis() {
+  analysisNativeFaceEnabled.checked = true;
+  analysisNativeFaceSourcePath.value = state.pendingFaceOutput || faceOutputRootInput.value.trim();
+  setAnalysisSourceMethod(analysisNativeFaceControls, "run");
+  await showAnalysis();
+}
+
+async function importNativeTextIntoAnalysis() {
+  analysisTextEnabled.checked = true;
+  analysisTextSourcePath.value = state.pendingTextOutput || textOutputRootInput.value.trim();
+  setAnalysisSourceMethod(analysisTextControls, "import");
+  await showAnalysis();
+}
+
 async function runAudioProcessing() {
   const sourcePath = audioSourcePathInput.value.trim();
   if (!sourcePath) {
@@ -3454,6 +3780,12 @@ async function pollState() {
     if (!audioOutputRootInput.value && payload.defaultAudioOutputRoot) {
       audioOutputRootInput.value = payload.defaultAudioOutputRoot;
     }
+    if (!faceOutputRootInput.value && payload.defaultFaceOutputRoot) {
+      faceOutputRootInput.value = payload.defaultFaceOutputRoot;
+    }
+    if (!textOutputRootInput.value && payload.defaultTextOutputRoot) {
+      textOutputRootInput.value = payload.defaultTextOutputRoot;
+    }
     if (!analysisOutputRootInput.value && payload.defaultAnalysisOutputRoot) {
       analysisOutputRootInput.value = payload.defaultAnalysisOutputRoot;
       updateAnalysisForm();
@@ -3467,8 +3799,18 @@ async function pollState() {
     const progress = payload.progress || {};
     const progressMode = String(progress.mode || "");
     const isAudioRun = progressMode.startsWith("audio-");
+    const isFaceRun = progressMode.startsWith("face-");
+    const isTextRun = progressMode.startsWith("text-");
     const isAnalysisRun = progressMode.startsWith("analysis-");
-    const runKind = isAnalysisRun ? "analysis" : isAudioRun ? "audio" : "procurement";
+    const runKind = isAnalysisRun
+      ? "analysis"
+      : isFaceRun
+        ? "face"
+        : isTextRun
+          ? "text"
+          : isAudioRun
+            ? "audio"
+            : "procurement";
     const runId = Number(payload.runId || 0);
     if (payload.running && runId && !state.activeRunIds[runKind]) {
       state.activeRunIds[runKind] = runId;
@@ -3477,8 +3819,24 @@ async function pollState() {
       }
     }
     const runMatchesUi = Boolean(runId && state.activeRunIds[runKind] === runId);
-    const activeBar = isAnalysisRun ? analysisProgressBar : isAudioRun ? audioProgressBar : progressBar;
-    const activeLabel = isAnalysisRun ? analysisProgressLabel : isAudioRun ? audioProgressLabel : progressLabel;
+    const activeBar = isAnalysisRun
+      ? analysisProgressBar
+      : isFaceRun
+        ? faceProgressBar
+        : isTextRun
+          ? textProgressBar
+          : isAudioRun
+            ? audioProgressBar
+            : progressBar;
+    const activeLabel = isAnalysisRun
+      ? analysisProgressLabel
+      : isFaceRun
+        ? faceProgressLabel
+        : isTextRun
+          ? textProgressLabel
+          : isAudioRun
+            ? audioProgressLabel
+            : progressLabel;
     if (payload.running) {
       const total = Number(progress.total || 0);
       const current = Number(progress.current || 0);
@@ -3516,6 +3874,26 @@ async function pollState() {
         audioToAnalysisButton.textContent = continueToAnalysis ? "Open analysis" : "Finish workflow";
         audioNextStep.classList.remove("hidden");
       }
+      if (runKind === "face") {
+        if (progressMode === "face-native") {
+          state.workflow.imports.face = state.pendingFaceOutput;
+          faceNextStep.classList.remove("hidden");
+        } else {
+          faceReadinessStatus.textContent = progressMode === "face-model-preparation"
+            ? "Py-Feat model preparation finished. Run readiness to confirm the cache."
+            : "Face readiness check complete; see the run log for the structured result.";
+        }
+        state.activeRunIds.face = null;
+      }
+      if (runKind === "text") {
+        if (progressMode === "text-native") {
+          state.workflow.imports.text = state.pendingTextOutput;
+          textNextStep.classList.remove("hidden");
+        } else {
+          textReadinessStatus.textContent = "Text readiness check complete; see the run log for the structured result.";
+        }
+        state.activeRunIds.text = null;
+      }
       if (runKind === "analysis" && state.workflow.active) {
         state.workflow.active = false;
         setStatus("Workflow complete");
@@ -3528,6 +3906,14 @@ async function pollState() {
       if (runKind === "audio") {
         state.pendingAudioOutput = "";
         state.workflow.imports.audio = "";
+      }
+      if (runKind === "face") {
+        state.pendingFaceOutput = "";
+        state.activeRunIds.face = null;
+      }
+      if (runKind === "text") {
+        state.pendingTextOutput = "";
+        state.activeRunIds.text = null;
       }
       const failureMessage = payload.status === "stopped" ? "Stopped." : analysisFailureMessage(progress);
       activeLabel.textContent = failureMessage;
@@ -4066,8 +4452,8 @@ openAudioProcessingButton.addEventListener("click", () => {
   showScreen("audio-input");
   updateAudioMode();
 });
-openFaceProcessingButton.addEventListener("click", () => setStatus("Face processing is import-only in this release."));
-openTextProcessingButton.addEventListener("click", () => setStatus("Text processing is import-only in this release."));
+openFaceProcessingButton.addEventListener("click", () => showScreen("face-input"));
+openTextProcessingButton.addEventListener("click", () => showScreen("text-input"));
 browseFaceImportButton.addEventListener("click", () => browseInto("folder", faceImportPathInput).catch((error) => setStatus(error.message)));
 browseAudioImportHubButton.addEventListener("click", () => browseInto("folder", audioImportHubPathInput).catch((error) => setStatus(error.message)));
 browseTextImportButton.addEventListener("click", () => browseInto("folder", textImportPathInput).catch((error) => setStatus(error.message)));
@@ -4129,6 +4515,68 @@ browseAudioOutputButton.addEventListener("click", () => browseInto("output", aud
 runAudioButton.addEventListener("click", runAudioProcessing);
 stopAudioButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
 audioToAnalysisButton.addEventListener("click", () => continueAfterAudio().catch((error) => setStatus(error.message)));
+backFromFaceButton.addEventListener("click", showProcessingHub);
+backToFaceInputButton.addEventListener("click", () => showScreen("face-input"));
+browseFaceFolderButton.addEventListener("click", () => {
+  clearNativeCatalogSelection("face");
+  browseInto("folder", faceSourcePathInput)
+    .then((selectedPath) => selectedPath && loadNativeCatalogSelection("face"))
+    .catch((error) => setStatus(error.message));
+});
+browseFaceVideoButton.addEventListener("click", () => {
+  clearNativeCatalogSelection("face");
+  browseInto("video", faceSourcePathInput).catch((error) => setStatus(error.message));
+});
+browseFaceOutputButton.addEventListener("click", () => browseInto("output", faceOutputRootInput).catch((error) => setStatus(error.message)));
+faceSourcePathInput.addEventListener("input", () => clearNativeCatalogSelection("face"));
+faceSourcePathInput.addEventListener("change", () => loadNativeCatalogSelection("face").catch((error) => setStatus(error.message)));
+faceCatalogFilterText.addEventListener("input", () => renderNativeCatalogSelection("face"));
+faceSelectVisibleSourcesButton.addEventListener("click", () => {
+  state.faceSelectedSourceIds = setVisibleCatalogSelection(state.faceSelectedSourceIds, visibleNativeCatalogSources("face"), true);
+  renderNativeCatalogSelection("face");
+});
+faceClearVisibleSourcesButton.addEventListener("click", () => {
+  state.faceSelectedSourceIds = setVisibleCatalogSelection(state.faceSelectedSourceIds, visibleNativeCatalogSources("face"), false);
+  renderNativeCatalogSelection("face");
+});
+checkFaceReadinessButton.addEventListener("click", () => checkFaceReadiness(false).catch((error) => setStatus(error.message)));
+prepareFaceModelsButton.addEventListener("click", () => checkFaceReadiness(true).catch((error) => setStatus(error.message)));
+runFaceButton.addEventListener("click", () => runFaceProcessing().catch((error) => setStatus(error.message)));
+stopFaceButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
+openFaceOutputButton.addEventListener("click", () => openProcessingOutput(faceOutputRootInput.value).catch((error) => setStatus(error.message)));
+faceToAnalysisButton.addEventListener("click", () => importNativeFaceIntoAnalysis().catch((error) => setStatus(error.message)));
+backFromTextButton.addEventListener("click", showProcessingHub);
+backToTextInputButton.addEventListener("click", () => showScreen("text-input"));
+browseTextFolderButton.addEventListener("click", () => {
+  clearNativeCatalogSelection("text");
+  browseInto("folder", textSourcePathInput)
+    .then((selectedPath) => selectedPath && loadNativeCatalogSelection("text"))
+    .catch((error) => setStatus(error.message));
+});
+browseTextVideoButton.addEventListener("click", () => {
+  clearNativeCatalogSelection("text");
+  browseInto("video", textSourcePathInput).catch((error) => setStatus(error.message));
+});
+browseTextOutputButton.addEventListener("click", () => browseInto("output", textOutputRootInput).catch((error) => setStatus(error.message)));
+textSourcePathInput.addEventListener("input", () => clearNativeCatalogSelection("text"));
+textSourcePathInput.addEventListener("change", () => loadNativeCatalogSelection("text").catch((error) => setStatus(error.message)));
+textCatalogFilterText.addEventListener("input", () => renderNativeCatalogSelection("text"));
+textSelectVisibleSourcesButton.addEventListener("click", () => {
+  state.textSelectedSourceIds = setVisibleCatalogSelection(state.textSelectedSourceIds, visibleNativeCatalogSources("text"), true);
+  renderNativeCatalogSelection("text");
+});
+textClearVisibleSourcesButton.addEventListener("click", () => {
+  state.textSelectedSourceIds = setVisibleCatalogSelection(state.textSelectedSourceIds, visibleNativeCatalogSources("text"), false);
+  renderNativeCatalogSelection("text");
+});
+textAllCategoriesToggle.addEventListener("change", () => {
+  textCategorySearchInput.disabled = textAllCategoriesToggle.checked;
+});
+checkTextReadinessButton.addEventListener("click", () => checkTextReadiness().catch((error) => setStatus(error.message)));
+runTextButton.addEventListener("click", () => runTextProcessing().catch((error) => setStatus(error.message)));
+stopTextButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
+openTextOutputButton.addEventListener("click", () => openProcessingOutput(textOutputRootInput.value).catch((error) => setStatus(error.message)));
+textToAnalysisButton.addEventListener("click", () => importNativeTextIntoAnalysis().catch((error) => setStatus(error.message)));
 analysisImplementedControls.forEach((controls) => {
   controls.enabled.addEventListener("change", updateAnalysisForm);
   controls.methodInputs.forEach((input) => input.addEventListener("change", updateAnalysisForm));

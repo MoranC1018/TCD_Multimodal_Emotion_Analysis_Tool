@@ -13,6 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
+from processing.catalog_context import (
+    CatalogDiscoveryResult,
+    CatalogProcessingJob,
+    discover_catalog_jobs,
+    publish_catalog_run_context,
+)
+
 from .backend import FaceBackend, PyFeatBackend
 from .config import FaceProcessingConfig
 from .media import VideoMetadata, discover_videos, probe_video, stable_media_id
@@ -24,7 +31,7 @@ from .outputs import (
     verify_artifacts,
     write_video_outputs,
 )
-from .ownership import prepare_face_output_root
+from .ownership import prepare_face_output_root, validate_face_output_root
 from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from processing.io_utils import atomic_write_csv, atomic_write_json, exclusive_process_lock
 
@@ -33,6 +40,7 @@ VIDEO_MANIFEST_SCHEMA_VERSION = "2.0"
 RUN_MANIFEST_SCHEMA_VERSION = "1.1"
 _RUN_POLICY_CONFIG_KEYS = {"recursive", "overwrite"}
 FaceProgressCallback = Callable[[int, int, str, str], None]
+FaceRuntimeReadinessCheck = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -55,21 +63,40 @@ def process_face_input(
     backend: FaceBackend | None = None,
     run_id: str | None = None,
     progress_callback: FaceProgressCallback | None = None,
+    runtime_readiness_check: FaceRuntimeReadinessCheck | None = None,
 ) -> FaceProcessingResult:
     settings = (config or FaceProcessingConfig()).validate()
+    input_path = Path(source).expanduser().resolve()
+    catalog_discovery = discover_catalog_jobs(
+        input_path,
+        selected_source_ids=settings.source_ids or None,
+        expected_catalog_sha256=settings.catalog_sha256,
+    )
     # A newly installed WinGet package is not guaranteed to be present in the
     # caller's inherited PATH. Discover it before ffprobe or TorchCodec is used.
     configure_ffmpeg_shared_libraries()
-    input_path = Path(source).expanduser().resolve()
     # Ownership validation must see the caller's lexical path before
     # ``resolve()`` can hide a symlink or Windows junction/reparse component.
     destination = Path(output_root).expanduser()
-    videos = discover_videos(input_path, recursive=settings.recursive)
+    videos = (
+        [job.media_path for job in catalog_discovery.jobs]
+        if catalog_discovery is not None
+        else discover_videos(input_path, recursive=settings.recursive)
+    )
+    if not videos:
+        raise ValueError(f"No catalog SourceIDs were selected under {input_path}")
+    # This read-only ownership/path check and all catalog validation happen
+    # before an offline runtime check may construct Py-Feat's Detectorv2.
+    validate_face_output_root(input_path, destination)
+    if runtime_readiness_check is not None:
+        runtime_readiness_check(settings.device)
     destination = prepare_face_output_root(input_path, destination)
     with exclusive_process_lock(
         destination / ".face.run.lock",
         purpose=f"running Face processing in {destination}",
     ):
+        if catalog_discovery is not None:
+            publish_catalog_run_context(destination, catalog_discovery)
         return _process_face_input_locked(
             input_path,
             destination,
@@ -78,6 +105,7 @@ def process_face_input(
             backend,
             run_id,
             progress_callback,
+            catalog_discovery,
         )
 
 
@@ -89,6 +117,7 @@ def _process_face_input_locked(
     backend: FaceBackend | None,
     run_id: str | None,
     progress_callback: FaceProgressCallback | None,
+    catalog_discovery: CatalogDiscoveryResult | None = None,
 ) -> FaceProcessingResult:
     """Execute one Face run while its output-root lock is held."""
 
@@ -97,10 +126,15 @@ def _process_face_input_locked(
     started = datetime.now(timezone.utc)
     records: list[dict[str, object]] = []
     interrupted_error: KeyboardInterrupt | None = None
+    catalog_jobs = {
+        job.media_path.resolve(): job for job in (catalog_discovery.jobs if catalog_discovery else ())
+    }
 
     video_total = len(videos)
     for video_index, video in enumerate(videos, start=1):
         relative_input = _relative_input(input_path, video)
+        catalog_job = catalog_jobs.get(video.resolve())
+        source_record = _catalog_source_record(catalog_job)
         if progress_callback is not None:
             progress_callback(video_index, video_total, "analysing", relative_input)
         record: dict[str, object] = {
@@ -111,24 +145,36 @@ def _process_face_input_locked(
             "media_id": "",
             "output_relative": "",
             "quality": {},
+            **source_record,
         }
         stage = "probe"
         try:
             metadata = probe_video(video)
+            media_identity = _media_file_identity(video)
             record["input_sha256"] = metadata.sha256
+            source_record = _catalog_source_record(catalog_job, metadata)
+            record.update(source_record)
             media_id = stable_media_id(video, metadata.sha256)
-            video_dir = _video_output_dir(destination, input_path, video, media_id)
+            video_dir = _video_output_dir(
+                destination,
+                input_path,
+                video,
+                media_id,
+                catalog_job=catalog_job,
+            )
             record["media_id"] = media_id
             record["output_relative"] = str(video_dir.relative_to(destination))
             manifest_path = video_dir / "video_manifest.json"
             stage = "provenance"
             backend_provenance = _backend_provenance(engine, settings)
-            analysis_fingerprint = _analysis_fingerprint(settings, backend_provenance)
+            analysis_fingerprint = _analysis_fingerprint(
+                settings, backend_provenance, source_record
+            )
             stage = "resume"
             if manifest_path.exists() and not settings.overwrite:
                 existing = _load_manifest(manifest_path)
                 if existing is not None and _is_reusable_output(
-                    existing, video_dir, metadata, settings, engine
+                    existing, video_dir, metadata, settings, engine, source_record
                 ):
                     record.update(
                         _record_outputs(
@@ -143,9 +189,18 @@ def _process_face_input_locked(
                     continue
             stage = "analyse"
             detections = engine.analyse(video, metadata, settings)
+            stage = "integrity"
+            current_metadata = probe_video(video)
+            if (
+                current_metadata.to_dict() != metadata.to_dict()
+                or _media_file_identity(video) != media_identity
+            ):
+                raise RuntimeError(f"Face input changed during analysis: {video}")
             stage = "provenance"
             backend_provenance = _backend_provenance(engine, settings)
-            analysis_fingerprint = _analysis_fingerprint(settings, backend_provenance)
+            analysis_fingerprint = _analysis_fingerprint(
+                settings, backend_provenance, source_record
+            )
             stage = "transform"
             raw, core, quality = build_output_tables(
                 detections,
@@ -161,6 +216,7 @@ def _process_face_input_locked(
                 "run_id": current_run_id,
                 "media_id": media_id,
                 "input": metadata.to_dict(),
+                "source": source_record,
                 "backend": backend_provenance,
                 "config": settings.to_dict(),
                 "analysis_fingerprint": analysis_fingerprint,
@@ -226,6 +282,10 @@ def _process_face_input_locked(
         "input": str(input_path),
         "output_root": str(destination),
         "config": settings.to_dict(),
+        "catalog_sha256": catalog_discovery.catalog_sha256 if catalog_discovery else "",
+        "processed_source_ids": [job.source_id for job in catalog_discovery.jobs]
+        if catalog_discovery
+        else [],
         "runtime": {"python": sys.version, "platform": platform.platform()},
         "summary": {
             "discovered_videos": len(videos),
@@ -264,14 +324,29 @@ def _process_face_input_locked(
     )
 
 
+def _media_file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat_result = path.stat()
+    return (
+        int(stat_result.st_dev),
+        int(stat_result.st_ino),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+    )
+
+
 def _video_output_dir(
     destination: Path,
     input_path: Path,
     video: Path,
     media_id: str,
+    *,
+    catalog_job: CatalogProcessingJob | None = None,
 ) -> Path:
     """Keep single-file compatibility and mirror directory inputs for navigation."""
 
+    if catalog_job is not None:
+        return destination / catalog_job.relative_output / media_id
     if input_path.is_dir():
         return destination / video.parent.relative_to(input_path) / media_id
     return destination / media_id
@@ -320,6 +395,20 @@ def _write_run_index(path: Path, records: list[dict[str, object]]) -> None:
                 "input_video": record.get("input_video", ""),
                 "input_sha256": record.get("input_sha256", ""),
                 "media_id": record.get("media_id", ""),
+                "source_id": record.get("source_id", ""),
+                "speaker": record.get("speaker", ""),
+                "speaker_display": record.get("speaker_display", ""),
+                "catalog_sha256": record.get("catalog_sha256", ""),
+                "source_context_sha256": record.get("source_context_sha256", ""),
+                "user_metadata": json.dumps(
+                    record.get("user_metadata", {}), ensure_ascii=False, sort_keys=True
+                ),
+                "system_metadata": json.dumps(
+                    record.get("system_metadata", {}), ensure_ascii=False, sort_keys=True
+                ),
+                "output_mapping": json.dumps(
+                    record.get("output_mapping", {}), ensure_ascii=False, sort_keys=True
+                ),
                 "output_relative": record.get("output_relative", ""),
                 "face_core_csv": str(output_dir / "face_core.csv") if output_dir else "",
                 "face_features_parquet": str(output_dir / "face_features.parquet") if output_dir else "",
@@ -339,7 +428,9 @@ def _write_run_index(path: Path, records: list[dict[str, object]]) -> None:
         rows,
         (
             "status", "input_relative", "input_video", "input_sha256",
-            "media_id", "output_relative",
+            "media_id", "source_id", "speaker", "speaker_display",
+            "catalog_sha256", "source_context_sha256", "user_metadata",
+            "system_metadata", "output_mapping", "output_relative",
             "face_core_csv", "face_features_parquet", "video_manifest",
             "sampled_frames", "frames_with_face", "face_coverage",
             "detected_face_rows", "error_stage", "error_type", "error_message", "error",
@@ -353,6 +444,7 @@ def _is_reusable_output(
     metadata: VideoMetadata,
     settings: FaceProcessingConfig,
     engine: FaceBackend,
+    source_record: Mapping[str, object] | None = None,
 ) -> bool:
     """Return true only when an existing result proves it is reusable."""
 
@@ -369,6 +461,8 @@ def _is_reusable_output(
         return False
     if not isinstance(config_record, dict):
         return False
+    if manifest.get("source", {}) != dict(source_record or {}):
+        return False
     if manifest.get("output_contract_version") != OUTPUT_CONTRACT_VERSION:
         return False
     expected_backend = _backend_provenance(engine, settings)
@@ -376,7 +470,9 @@ def _is_reusable_output(
         return False
     if _analysis_config_from_mapping(config_record) != _analysis_config(settings):
         return False
-    expected_fingerprint = _analysis_fingerprint(settings, expected_backend)
+    expected_fingerprint = _analysis_fingerprint(
+        settings, expected_backend, source_record
+    )
     if manifest.get("analysis_fingerprint") != expected_fingerprint:
         return False
     if manifest.get("sampling") != sampling_metadata(metadata, settings.sample_fps):
@@ -418,17 +514,61 @@ def _backend_provenance(
 def _analysis_fingerprint(
     settings: FaceProcessingConfig,
     backend_provenance: Mapping[str, object],
+    source_record: Mapping[str, object] | None = None,
 ) -> str:
     encoded = json.dumps(
         {
             "config": _analysis_config(settings),
             "backend": _backend_signature(backend_provenance),
+            "source": dict(source_record or {}),
         },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _catalog_source_record(
+    job: CatalogProcessingJob | None,
+    metadata: VideoMetadata | None = None,
+) -> dict[str, object]:
+    if job is None:
+        return {}
+    context = _plain_json_value(job.source_context)
+    assert isinstance(context, dict)
+    context_bytes = json.dumps(
+        context,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    content = (
+        {"sha256": metadata.sha256, "size_bytes": metadata.size_bytes}
+        if metadata is not None
+        else {}
+    )
+    output_mapping = context.get("output_mapping")
+    return {
+        "source_id": job.source_id,
+        "speaker": job.speaker,
+        "speaker_display": job.speaker_display,
+        "catalog_sha256": job.catalog_sha256,
+        "source_context_sha256": hashlib.sha256(context_bytes).hexdigest(),
+        "source_context": context,
+        "user_metadata": _plain_json_value(job.user_metadata),
+        "system_metadata": _plain_json_value(job.system_metadata),
+        "output_mapping": output_mapping if isinstance(output_mapping, dict) else {},
+        "content": content,
+    }
+
+
+def _plain_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json_value(item) for item in value]
+    return value
 
 
 def _analysis_config(settings: FaceProcessingConfig) -> dict[str, object]:

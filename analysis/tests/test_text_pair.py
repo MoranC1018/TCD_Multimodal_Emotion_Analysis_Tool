@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from analysis.tests.test_text_segments import (
@@ -107,6 +108,51 @@ class TextPairPostprocessingTests(unittest.TestCase):
                 self.assertEqual(variant_manifest["variant"], variant)
                 self.assertTrue((output / variant / OUTPUT_OWNER_FILE).is_file())
             self.assertTrue((output / OUTPUT_OWNER_FILE).is_file())
+
+    def test_catalog_pair_publishes_and_hash_binds_exact_sidecars_and_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            selected, extra, whisper, prepare, output = self._fixture(root)
+            whisper_path = next(whisper.rglob("*.json"))
+            whisper_payload = json.loads(whisper_path.read_text(encoding="utf-8"))
+            whisper_payload["source_id"] = "source-0001"
+            whisper_path.write_text(json.dumps(whisper_payload), encoding="utf-8")
+            context = {
+                "source_id": "source-0001",
+                "speaker": "test-speaker",
+                "speaker_display": "Test Speaker",
+                "source_kind": "youtube",
+                "resolved_link": "https://www.youtube.com/watch?v=example0001",
+                "catalog_sha256": "a" * 64,
+                "user_metadata": {"Country": "France"},
+                "system_metadata": {"title": "Interview"},
+                "output_mapping": {"video_directory": str(root / "catalog" / "source-0001")},
+                "run_root": str(root / "catalog"),
+            }
+            manifest_bytes = b'{"format_version":1}\n'
+            metadata_bytes = b"SourceID\nsource-0001\n"
+            discovery = SimpleNamespace(
+                catalog_sha256="a" * 64,
+                sidecar_pair=(manifest_bytes, metadata_bytes),
+                jobs=(SimpleNamespace(source_id="source-0001", source_context=context),),
+            )
+
+            analyse_text_segment_pair(
+                selected,
+                extra,
+                output,
+                whisper_root=whisper,
+                prepare_root=prepare,
+                write_graphs=False,
+                catalog_discovery=discovery,
+            )
+
+            batch = json.loads((output / BATCH_MANIFEST_FILE).read_text(encoding="utf-8"))
+            binding = batch["source_binding"]
+            self.assertEqual((output / binding["source_manifest"]).read_bytes(), manifest_bytes)
+            self.assertEqual((output / binding["source_metadata"]).read_bytes(), metadata_bytes)
+            self.assertEqual(binding["catalog_sha256"], "a" * 64)
+            self.assertEqual(binding["source_contexts"][0]["source_id"], "source-0001")
 
     def test_pair_accepts_procurement_speaker_video_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

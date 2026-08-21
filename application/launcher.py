@@ -69,6 +69,55 @@ WEBVIEW_STORAGE_ROOT = (
     / "WebView2"
 )
 PROCESS_TERMINATION_LOCK = threading.Lock()
+CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        "APPDATA",
+        "COMSPEC",
+        "CUDA_PATH",
+        "CURL_CA_BUNDLE",
+        "FEAT_ARCFACE_R50_PATH",
+        "FEAT_MULTITASK_WEIGHTS",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_HUB_OFFLINE",
+        "JAVA_HOME",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "MULTIMODAL_EMOTION_ROCKSTEADY_HOME",
+        "NUMBER_OF_PROCESSORS",
+        "OS",
+        "OPENSMILE_BINARY",
+        "OPENSMILE_HOME",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "TORCH_HOME",
+        "TRANSFORMERS_CACHE",
+        "TRANSFORMERS_OFFLINE",
+        "USERPROFILE",
+        "VOX_PROFILE_RELEASE_DIR",
+        "WINDIR",
+        "XDG_CACHE_HOME",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -234,6 +283,8 @@ class LauncherState:
                 {
                     "defaultOutputRoot": str(backend.default_output_root(REPO_ROOT)),
                     "defaultAudioOutputRoot": str(backend.default_audio_output_root(REPO_ROOT)),
+                    "defaultFaceOutputRoot": str(backend.default_face_output_root(REPO_ROOT)),
+                    "defaultTextOutputRoot": str(backend.default_text_output_root(REPO_ROOT)),
                     "defaultAnalysisOutputRoot": str(backend.default_analysis_output_root(REPO_ROOT)),
                     "settings": backend.public_ui_settings(REPO_ROOT),
                     "access": backend.load_eula_state(REPO_ROOT),
@@ -643,6 +694,20 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.handle_run_audio(payload)
             elif parsed.path == "/api/audio-catalog":
                 self.handle_audio_catalog(payload)
+            elif parsed.path == "/api/run-face":
+                self.handle_run_face(payload)
+            elif parsed.path == "/api/face-readiness":
+                self.handle_face_readiness(payload, prepare_models=False)
+            elif parsed.path == "/api/prepare-face-models":
+                self.handle_face_readiness(payload, prepare_models=True)
+            elif parsed.path == "/api/run-text":
+                self.handle_run_text(payload)
+            elif parsed.path == "/api/text-readiness":
+                self.handle_text_readiness(payload)
+            elif parsed.path == "/api/processing-catalog":
+                self.handle_processing_catalog(payload)
+            elif parsed.path == "/api/open-output":
+                self.handle_open_output(payload)
             elif parsed.path == "/api/run-analysis":
                 self.handle_run_analysis(payload)
             elif parsed.path == "/api/run-analysis-workflow":
@@ -907,7 +972,10 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         raw_source_path = required_payload_text(payload, "sourcePath")
         if raw_source_path is None:
             raise ValueError("Choose an audio source folder first.")
-        source_path = validate_existing_path(Path(raw_source_path), kind="folder")
+        source_path = validate_existing_path(Path(raw_source_path), kind="file-or-folder")
+        if source_path.is_file():
+            self.send_json({"catalog": False, "source_path": str(source_path)})
+            return
         result = backend.scan_audio_catalog_run(source_path)
         if result is None:
             self.send_json({"catalog": False, "source_path": str(source_path)})
@@ -915,6 +983,123 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         response = backend.scan_result_to_json(result)
         response["catalog"] = True
         self.send_json(response)
+
+    def handle_processing_catalog(self, payload: dict[str, object]) -> None:
+        """Return the same sealed catalog contract for native processing screens."""
+
+        raw_source_path = required_payload_text(payload, "sourcePath")
+        if raw_source_path is None:
+            raise ValueError("Choose a processing source folder first.")
+        source_path = validate_existing_path(Path(raw_source_path), kind="file-or-folder")
+        if source_path.is_file():
+            self.send_json({"catalog": False, "source_path": str(source_path)})
+            return
+        result = backend.scan_audio_catalog_run(source_path)
+        if result is None:
+            self.send_json({"catalog": False, "source_path": str(source_path)})
+            return
+        response = backend.scan_result_to_json(result)
+        response["catalog"] = True
+        self.send_json(response)
+
+    def handle_run_face(self, payload: dict[str, object]) -> None:
+        """Start native Py-Feat processing with an authorized catalog subset."""
+
+        request = face_processing_request_from_payload(payload)
+        validate_processing_paths(
+            request.source_path,
+            request.output_root,
+            label="Native Face",
+            source_kind="file-or-folder",
+        )
+        if request.selected_source_ids:
+            APP_STATE.validate_audio_catalog_selection(
+                request.source_path,
+                request.catalog_sha256,
+                request.selected_source_ids,
+            )
+        elif request.catalog_sha256:
+            raise ValueError("Choose one or more catalog sources for Native Face processing.")
+        elif request.source_path.is_dir() and backend.scan_audio_catalog_run(request.source_path) is not None:
+            raise ValueError("Choose one or more catalog sources for Native Face processing.")
+        command = backend.build_face_processing_command(request, repo_root=REPO_ROOT)
+        run_id = start_process(command, mode="face-native", total=0)
+        if run_id is None:
+            self.send_error_json(HTTPStatus.CONFLICT, "A processing run is already active.")
+            return
+        self.send_json({"started": True, "runId": run_id, "command": command})
+
+    def handle_face_readiness(
+        self,
+        payload: dict[str, object],
+        *,
+        prepare_models: bool,
+    ) -> None:
+        """Start a structured offline Face check or explicit model preparation."""
+
+        if not set(payload).issubset({"device"}):
+            raise ValueError("Face readiness accepts only device.")
+        if not prepare_models:
+            self.send_json(
+                backend.face_processing_readiness(str(payload.get("device") or "auto"))
+            )
+            return
+        command = backend.build_face_readiness_command(
+            device=str(payload.get("device") or "auto"),
+            prepare_models=prepare_models,
+        )
+        mode = "face-model-preparation" if prepare_models else "face-readiness"
+        run_id = start_process(command, mode=mode, total=0)
+        if run_id is None:
+            self.send_error_json(HTTPStatus.CONFLICT, "A processing run is already active.")
+            return
+        self.send_json({"started": True, "runId": run_id, "command": command})
+
+    def handle_run_text(self, payload: dict[str, object]) -> None:
+        """Start native Whisper/RockSteady Text processing."""
+
+        request = text_processing_request_from_payload(payload)
+        validate_processing_paths(
+            request.source_path,
+            request.output_root,
+            label="Native Text",
+            source_kind="file-or-folder",
+        )
+        if request.selected_source_ids:
+            APP_STATE.validate_audio_catalog_selection(
+                request.source_path,
+                request.catalog_sha256,
+                request.selected_source_ids,
+            )
+        elif request.catalog_sha256:
+            raise ValueError("Choose one or more catalog sources for Native Text processing.")
+        elif request.source_path.is_dir() and backend.scan_audio_catalog_run(request.source_path) is not None:
+            raise ValueError("Choose one or more catalog sources for Native Text processing.")
+        command = backend.build_text_processing_command(request, repo_root=REPO_ROOT)
+        run_id = start_process(command, mode="text-native", total=0)
+        if run_id is None:
+            self.send_error_json(HTTPStatus.CONFLICT, "A processing run is already active.")
+            return
+        self.send_json({"started": True, "runId": run_id, "command": command})
+
+    def handle_text_readiness(self, payload: dict[str, object]) -> None:
+        """Start the structured Text dependency/readiness check."""
+
+        request = text_processing_request_from_payload(payload, readiness=True)
+        self.send_json(backend.text_processing_readiness(request, repo_root=REPO_ROOT))
+
+    def handle_open_output(self, payload: dict[str, object]) -> None:
+        """Open one validated output folder in the Windows shell."""
+
+        if set(payload) != {"path"}:
+            raise ValueError("Open output requires only path.")
+        folder = validate_existing_path(
+            Path(_workflow_required_text(payload["path"], "path")), kind="folder"
+        )
+        if os.name != "nt" or not hasattr(os, "startfile"):
+            raise ValueError("Open output is available only in the Windows desktop launcher.")
+        os.startfile(folder)  # type: ignore[attr-defined]
+        self.send_json({"opened": True, "path": str(folder)})
 
     def handle_run_analysis(self, payload: dict[str, object]) -> None:
         """Start the existing post-processing analysis scripts from the UI."""
@@ -1329,6 +1514,99 @@ def payload_text_list(value: object) -> list[str]:
     return [str(item).strip() for item in raw_items if str(item).strip()]
 
 
+def _strict_text_array(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"{label} must be a list of text values.")
+    cleaned = tuple(item.strip() for item in value)
+    if any(not item for item in cleaned):
+        raise ValueError(f"{label} must not contain blank values.")
+    return cleaned
+
+
+def face_processing_request_from_payload(
+    payload: dict[str, object],
+) -> backend.FaceProcessingRunRequest:
+    """Parse the exact native Face HTTP contract."""
+
+    expected = {
+        "sourcePath", "outputRoot", "sampleFps", "confidenceThreshold",
+        "batchSize", "device", "recursive", "overwrite", "debug",
+        "selectedSourceIds", "catalogSha256",
+    }
+    if set(payload) != expected:
+        raise ValueError("Invalid native Face processing payload.")
+    return backend.FaceProcessingRunRequest(
+        source_path=Path(_workflow_required_text(payload["sourcePath"], "sourcePath")).expanduser(),
+        output_root=Path(_workflow_required_text(payload["outputRoot"], "outputRoot")).expanduser(),
+        sample_fps=payload_float(payload, "sampleFps", 5.0),
+        confidence_threshold=payload_float(payload, "confidenceThreshold", 0.90),
+        batch_size=payload_int(payload, "batchSize", 8),
+        device=_workflow_required_text(payload["device"], "device"),
+        recursive=_workflow_bool(payload["recursive"], "recursive"),
+        overwrite=_workflow_bool(payload["overwrite"], "overwrite"),
+        debug=_workflow_bool(payload["debug"], "debug"),
+        selected_source_ids=_strict_text_array(payload["selectedSourceIds"], "selectedSourceIds"),
+        catalog_sha256=_workflow_required_text(payload["catalogSha256"], "catalogSha256")
+        if str(payload["catalogSha256"] or "").strip()
+        else "",
+    )
+
+
+def text_processing_request_from_payload(
+    payload: dict[str, object],
+    *,
+    readiness: bool = False,
+) -> backend.TextProcessingRunRequest:
+    """Parse the exact native Text HTTP contract."""
+
+    required = {
+        "whisperModel", "whisperDevice", "whisperLanguage",
+        "defaultLanguageVariant", "dictionaries", "dictionaryCombination",
+        "categories", "allCategories", "threads", "forceRocksteady",
+        "writeGraphs", "debug", "selectedSourceIds", "catalogSha256",
+    }
+    path_keys = {"sourcePath", "outputRoot"}
+    expected = required | path_keys
+    if (not readiness and set(payload) != expected) or (
+        readiness and (not required.issubset(payload) or not set(payload).issubset(expected))
+    ):
+        raise ValueError("Invalid native Text processing payload.")
+    source_text = str(payload.get("sourcePath") or "").strip()
+    output_text = str(payload.get("outputRoot") or "").strip()
+    return backend.TextProcessingRunRequest(
+        source_path=(
+            Path(_workflow_required_text(source_text, "sourcePath")).expanduser()
+            if source_text
+            else REPO_ROOT
+        ),
+        output_root=(
+            Path(_workflow_required_text(output_text, "outputRoot")).expanduser()
+            if output_text
+            else backend.default_text_output_root(REPO_ROOT)
+        ),
+        whisper_model=_workflow_required_text(payload["whisperModel"], "whisperModel"),
+        whisper_device=_workflow_required_text(payload["whisperDevice"], "whisperDevice"),
+        whisper_language=str(payload["whisperLanguage"] or "").strip(),
+        default_language_variant=_workflow_required_text(
+            payload["defaultLanguageVariant"], "defaultLanguageVariant"
+        ),
+        dictionaries=_strict_text_array(payload["dictionaries"], "dictionaries"),
+        dictionary_combination=_workflow_required_text(
+            payload["dictionaryCombination"], "dictionaryCombination"
+        ),
+        categories=_strict_text_array(payload["categories"], "categories"),
+        all_categories=_workflow_bool(payload["allCategories"], "allCategories"),
+        threads=payload_int(payload, "threads", 1),
+        force_rocksteady=_workflow_bool(payload["forceRocksteady"], "forceRocksteady"),
+        write_graphs=_workflow_bool(payload["writeGraphs"], "writeGraphs"),
+        debug=_workflow_bool(payload["debug"], "debug"),
+        selected_source_ids=_strict_text_array(payload["selectedSourceIds"], "selectedSourceIds"),
+        catalog_sha256=_workflow_required_text(payload["catalogSha256"], "catalogSha256")
+        if str(payload["catalogSha256"] or "").strip()
+        else "",
+    )
+
+
 def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backend.AnalysisWorkflowRunRequest:
     """Parse the complete combined-analysis payload without coercing its shape."""
 
@@ -1495,7 +1773,7 @@ def _analysis_modalities_from_payload(
         if not isinstance(item, dict) or set(item) != {"name", "sourceMethod", "sourcePath"}:
             raise ValueError("Each modality must contain only name, sourceMethod, and sourcePath.")
         name = _workflow_required_text(item["name"], "modalities.name").casefold()
-        if name not in {"imotions", "audio", "text"}:
+        if name not in {"imotions", "native_face", "audio", "text"}:
             raise ValueError(f"Unsupported analysis workflow modality: {name}")
         if name in modality_names:
             raise ValueError(f"Duplicate analysis workflow modality: {name}")
@@ -1673,7 +1951,7 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
             "label": error,
         }
     workflow_start = re.fullmatch(
-        r"Starting (Video / iMotions|Audio) analysis",
+        r"Starting (Video / iMotions|Py-Feat / Native Face|Audio) analysis",
         text,
         flags=re.IGNORECASE,
     )
@@ -1683,13 +1961,19 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
     if text.casefold() == "starting combined workbook":
         return {"stage": "combined workbook", "current": None, "label": "Building combined workbook"}
     workflow_complete = re.fullmatch(
-        r"Completed (Video / iMotions|Audio) analysis:\s*(.+)",
+        r"Completed (Video / iMotions|Py-Feat / Native Face|Audio) analysis:\s*(.+)",
         text,
         flags=re.IGNORECASE,
     )
     if workflow_complete:
         label = workflow_complete.group(1)
-        modality = "video" if label.casefold().startswith("video") else "audio"
+        modality = (
+            "video"
+            if label.casefold().startswith("video")
+            else "native_face"
+            if "native face" in label.casefold()
+            else "audio"
+        )
         return {
             "stage": f"{label} analysis",
             "current": None,
@@ -1722,6 +2006,24 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
         current = int(pipeline_item.group(1)) - 1
         total = int(pipeline_item.group(2))
         return {"current": max(0, current), "total": total, "label": f"Processing {pipeline_item.group(3)}"}
+    face_item = re.fullmatch(
+        r"Face item (\d+)/(\d+):\s*(\S+)\s+(.+)", text, flags=re.IGNORECASE
+    )
+    if face_item:
+        current = int(face_item.group(1))
+        total = int(face_item.group(2))
+        return {
+            "current": current,
+            "total": total,
+            "label": f"Face {face_item.group(3)}: {face_item.group(4)}",
+        }
+    text_stage = re.fullmatch(r"Text stage (\d+)/(\d+):\s*(.+)", text, flags=re.IGNORECASE)
+    if text_stage:
+        return {
+            "current": int(text_stage.group(1)),
+            "total": int(text_stage.group(2)),
+            "label": f"Text stage: {text_stage.group(3)}",
+        }
     complete = re.search(r"complete:\s*(\d+)\s+processed,\s*(\d+)\s+failed", text, flags=re.IGNORECASE)
     if complete:
         processed = int(complete.group(1))
@@ -1815,9 +2117,13 @@ def child_process_environment(
 ) -> dict[str, str]:
     """Return a child environment containing only credentials its module needs."""
 
-    env = dict(os.environ if base_environment is None else base_environment)
-    for name in ("YOUTUBE_API_KEY", "HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        env.pop(name, None)
+    inherited = os.environ if base_environment is None else base_environment
+    env = {
+        name: value
+        for name, value in inherited.items()
+        if name.upper() in CHILD_ENVIRONMENT_ALLOWLIST
+        or name.upper().startswith("CUDA_PATH_V")
+    }
 
     module = ""
     try:
@@ -1830,6 +2136,10 @@ def child_process_environment(
         if api_key:
             env["YOUTUBE_API_KEY"] = api_key
     elif module.startswith("procurement.procurement_beta"):
+        huggingface_token = backend.load_huggingface_token()
+        if huggingface_token:
+            env["HF_TOKEN"] = huggingface_token
+    elif module == "processing.face_analysis" and "--prepare-models" in command:
         huggingface_token = backend.load_huggingface_token()
         if huggingface_token:
             env["HF_TOKEN"] = huggingface_token

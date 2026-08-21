@@ -67,7 +67,8 @@ button:disabled {
 
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid rgba(7, 95, 213, 0.28);
   outline-offset: 2px;
 }
@@ -667,6 +668,25 @@ textarea {
   min-width: 0;
 }
 
+.catalog-source-option {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 9px 10px;
+  overflow-wrap: anywhere;
+}
+
+.catalog-source-option input {
+  width: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+}
+
 .audio-catalog-source-row small {
   color: var(--muted);
 }
@@ -709,7 +729,7 @@ textarea {
 
 .analysis-modality-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 

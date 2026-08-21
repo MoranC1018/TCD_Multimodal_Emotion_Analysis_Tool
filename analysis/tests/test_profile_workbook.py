@@ -157,7 +157,7 @@ def test_profile_workbook_orders_more_than_twelve_sources_and_keeps_metric_contr
     assert audio[cells.speaker_cells[0][0] + "1"].value == "'=Research formula"
     assert audio[cells.overall].value.startswith("=AVERAGE(")
     guide = book["Measure Guide"]
-    assert guide.max_row == 32
+    assert guide.max_row == 44
     assert {guide.cell(row, 1).value for row in range(2, guide.max_row + 1)} == {
         "Emotions",
         "Sentiment",

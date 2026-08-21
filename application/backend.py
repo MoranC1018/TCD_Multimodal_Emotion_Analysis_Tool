@@ -61,6 +61,7 @@ from analysis.imotions import (
     inspect_imotions_csv,
     read_imotions_csv,
 )
+from analysis.native_face import read_native_face_folder
 from analysis.metadata import (
     find_source_manifest,
     load_source_metadata,
@@ -291,6 +292,45 @@ class AudioRunRequest:
 
 
 @dataclass(frozen=True)
+class FaceProcessingRunRequest:
+    """Native Py-Feat processing options sent from the UI."""
+
+    source_path: Path
+    output_root: Path
+    sample_fps: float = 5.0
+    confidence_threshold: float = 0.90
+    batch_size: int = 8
+    device: str = "auto"
+    recursive: bool = True
+    overwrite: bool = False
+    debug: bool = False
+    selected_source_ids: tuple[str, ...] = ()
+    catalog_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class TextProcessingRunRequest:
+    """Native Whisper/RockSteady processing options sent from the UI."""
+
+    source_path: Path
+    output_root: Path
+    whisper_model: str = "small"
+    whisper_device: str = "auto"
+    whisper_language: str = ""
+    default_language_variant: str = "eng"
+    dictionaries: tuple[str, ...] = ()
+    dictionary_combination: str = "merge"
+    categories: tuple[str, ...] = ()
+    all_categories: bool = False
+    threads: int = 1
+    force_rocksteady: bool = False
+    write_graphs: bool = True
+    debug: bool = False
+    selected_source_ids: tuple[str, ...] = ()
+    catalog_sha256: str = ""
+
+
+@dataclass(frozen=True)
 class AnalysisRunRequest:
     """Statistical analysis options sent from the UI."""
 
@@ -359,7 +399,7 @@ def discover_analysis_speakers(
     warnings: list[str] = []
     by_name = {str(modality.name).casefold(): modality for modality in modalities}
 
-    for name in ("imotions", "audio", "text"):
+    for name in ("imotions", "native_face", "audio", "text"):
         modality = by_name.get(name)
         if modality is None:
             continue
@@ -382,7 +422,9 @@ def discover_analysis_speakers(
                 )
             continue
         if source_method == "import":
-            report_modality = "video" if name == "imotions" else "audio"
+            report_modality = (
+                "video" if name == "imotions" else "native_face" if name == "native_face" else "audio"
+            )
             labels = _discover_imported_speaker_labels(modality.source_path, report_modality, name, warnings)
             for label in labels:
                 _add_discovered_speaker(
@@ -412,6 +454,22 @@ def discover_analysis_speakers(
                     label,
                     name,
                     "iMotions speaker folder",
+                    discovered_speakers,
+                    available_in,
+                    warnings,
+                )
+            continue
+
+        if name == "native_face":
+            try:
+                exports = read_native_face_folder(modality.source_path)
+            except (NotADirectoryError, ValueError) as exc:
+                raise ValueError(f"Invalid Py-Feat / Native Face output: {exc}") from exc
+            for export in exports:
+                _add_discovered_speaker(
+                    str(export.speaker or export.source),
+                    name,
+                    "Py-Feat / Native Face source",
                     discovered_speakers,
                     available_in,
                     warnings,
@@ -2638,6 +2696,235 @@ def build_audio_command(
     return command
 
 
+def _validated_native_catalog_binding(
+    source_ids_value: Iterable[str], catalog_sha256_value: object
+) -> tuple[tuple[str, ...], str]:
+    source_ids = tuple(str(source_id).strip() for source_id in source_ids_value)
+    catalog_sha256 = str(catalog_sha256_value or "").strip().casefold()
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError("Selected SourceIDs must be unique.")
+    if any(re.fullmatch(r"source-\d{4,6}", source_id) is None for source_id in source_ids):
+        raise ValueError("Selected SourceIDs must use the source-0001 format.")
+    if source_ids and re.fullmatch(r"[0-9a-f]{64}", catalog_sha256) is None:
+        raise ValueError("Selected SourceIDs require the chosen catalog run SHA-256.")
+    if catalog_sha256 and not source_ids:
+        raise ValueError("A catalog SHA-256 requires one or more selected SourceIDs.")
+    return source_ids, catalog_sha256
+
+
+def build_face_processing_command(
+    request: FaceProcessingRunRequest,
+    *,
+    repo_root: Path,
+    python_executable: Path | None = None,
+) -> list[str]:
+    """Translate native Face UI options without resolving lexical child paths."""
+
+    _ = repo_root
+    python_executable = python_executable or Path(sys.executable)
+    sample_fps = require_finite_number(request.sample_fps, "Face sample FPS")
+    confidence = require_finite_number(request.confidence_threshold, "Face confidence threshold")
+    if not 0 < sample_fps <= 120:
+        raise ValueError("Face sample FPS must be greater than 0 and no more than 120.")
+    if not 0 < confidence <= 1:
+        raise ValueError("Face confidence threshold must be greater than 0 and no more than 1.")
+    if not 1 <= int(request.batch_size) <= 1024:
+        raise ValueError("Face batch size must be between 1 and 1024.")
+    device = str(request.device or "").casefold()
+    if device not in {"auto", "cpu", "cuda", "mps"}:
+        raise ValueError("Face device must be auto, cpu, cuda, or mps.")
+    source_ids, catalog_sha256 = _validated_native_catalog_binding(
+        request.selected_source_ids, request.catalog_sha256
+    )
+    command = [
+        str(python_executable),
+        "-m",
+        "processing.face_analysis",
+        str(Path(os.path.abspath(request.source_path.expanduser()))),
+        "--output-root",
+        str(Path(os.path.abspath(request.output_root.expanduser()))),
+        "--sample-fps",
+        str(sample_fps),
+        "--face-threshold",
+        str(confidence),
+        "--batch-size",
+        str(int(request.batch_size)),
+        "--device",
+        device,
+    ]
+    if not request.recursive:
+        command.append("--no-recursive")
+    if request.overwrite:
+        command.append("--overwrite")
+    if request.debug:
+        command.append("--debug")
+    if catalog_sha256:
+        command.extend(["--catalog-sha256", catalog_sha256])
+    for source_id in source_ids:
+        command.extend(["--source-id", source_id])
+    return command
+
+
+def build_face_readiness_command(
+    *,
+    device: str = "auto",
+    prepare_models: bool = False,
+    python_executable: Path | None = None,
+) -> list[str]:
+    """Build an offline readiness or explicitly authorized model-preparation command."""
+
+    python_executable = python_executable or Path(sys.executable)
+    clean_device = str(device or "").casefold()
+    if clean_device not in {"auto", "cpu", "cuda", "mps"}:
+        raise ValueError("Face device must be auto, cpu, cuda, or mps.")
+    return [
+        str(python_executable),
+        "-m",
+        "processing.face_analysis",
+        "--prepare-models" if prepare_models else "--check",
+        "--device",
+        clean_device,
+    ]
+
+
+def face_processing_readiness(device: str = "auto") -> dict[str, object]:
+    """Return the structured offline Face readiness report in-process."""
+
+    from processing.face_analysis.health import check_readiness
+
+    clean_device = str(device or "").casefold()
+    if clean_device not in {"auto", "cpu", "cuda", "mps"}:
+        raise ValueError("Face device must be auto, cpu, cuda, or mps.")
+    return {"kind": "face-processing-readiness", **check_readiness(clean_device).to_dict()}
+
+
+def text_processing_readiness(
+    request: TextProcessingRunRequest,
+    *,
+    repo_root: Path,
+) -> dict[str, object]:
+    """Return structured Text readiness without exposing launcher credentials."""
+
+    from processing.text_analysis.pipeline import (
+        TextProcessingConfig,
+        check_text_processing_readiness,
+    )
+
+    destination = Path(os.path.abspath(request.output_root.expanduser()))
+    defaults = TextProcessingConfig()
+    config = TextProcessingConfig(
+        input_path=str(Path(os.path.abspath(request.source_path.expanduser()))),
+        whisper_root=str(destination / "transcripts"),
+        selected_whisper_root=str(destination / "selected_transcripts"),
+        prepared_root=str(destination / "prepared_segments"),
+        selected_csv_root=str(destination / "rocksteady" / "core"),
+        extra_csv_root=str(destination / "rocksteady" / "all"),
+        postprocessing_root=str(destination / "analysis"),
+        whisper_model=request.whisper_model,
+        whisper_device=request.whisper_device,
+        whisper_language=request.whisper_language,
+        default_language_variant=request.default_language_variant,
+        dictionaries=request.dictionaries or defaults.dictionaries,
+        dictionary_combination=request.dictionary_combination,
+        categories=() if request.all_categories else request.categories,
+        threads=request.threads,
+        overwrite_rocksteady=request.force_rocksteady,
+        write_graphs=request.write_graphs,
+        source_ids=request.selected_source_ids,
+        catalog_sha256=request.catalog_sha256,
+    ).validate()
+    _ = repo_root
+    try:
+        readiness = check_text_processing_readiness(config)
+    except Exception as exc:
+        return {
+            "kind": "text-processing-readiness",
+            "status": "not_ready",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+    return {"kind": "text-processing-readiness", **readiness}
+
+
+def build_text_processing_command(
+    request: TextProcessingRunRequest,
+    *,
+    repo_root: Path,
+    python_executable: Path | None = None,
+    check: bool = False,
+) -> list[str]:
+    """Translate native Text UI options without resolving lexical child paths."""
+
+    _ = repo_root
+    python_executable = python_executable or Path(sys.executable)
+    model = str(request.whisper_model or "").casefold()
+    if model not in {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}:
+        raise ValueError(f"Unsupported Whisper model: {request.whisper_model}")
+    device = str(request.whisper_device or "").casefold()
+    if device not in {"auto", "cpu", "cuda"}:
+        raise ValueError(f"Unsupported Whisper device: {request.whisper_device}")
+    variant = str(request.default_language_variant or "").casefold()
+    if variant not in {"original", "eng"}:
+        raise ValueError("Text output language must be original or eng.")
+    combination = str(request.dictionary_combination or "").casefold()
+    if combination not in {"merge", "override"}:
+        raise ValueError("Text dictionary combination must be merge or override.")
+    if not 1 <= int(request.threads) <= 256:
+        raise ValueError("Text thread count must be between 1 and 256.")
+    dictionaries = tuple(str(value).strip() for value in request.dictionaries)
+    categories = tuple(str(value).strip() for value in request.categories)
+    if any(not value for value in dictionaries) or len({value.casefold() for value in dictionaries}) != len(dictionaries):
+        raise ValueError("Text dictionaries must be nonblank and unique.")
+    if any(not value for value in categories) or len({value.casefold() for value in categories}) != len(categories):
+        raise ValueError("Text categories must be nonblank and unique.")
+    if request.all_categories and categories:
+        raise ValueError("Choose all categories or named categories, not both.")
+    source_ids, catalog_sha256 = _validated_native_catalog_binding(
+        request.selected_source_ids, request.catalog_sha256
+    )
+    command = [
+        str(python_executable),
+        "-m",
+        "processing.text_analysis",
+        str(Path(os.path.abspath(request.source_path.expanduser()))),
+        "--output-root",
+        str(Path(os.path.abspath(request.output_root.expanduser()))),
+        "--whisper-model",
+        model,
+        "--whisper-device",
+        device,
+        "--default-language-variant",
+        variant,
+        "--dictionary-combination",
+        combination,
+        "--threads",
+        str(int(request.threads)),
+    ]
+    language = str(request.whisper_language or "").strip()
+    if language:
+        command.extend(["--whisper-language", language])
+    for dictionary in dictionaries:
+        command.extend(["--dictionary", dictionary])
+    if request.all_categories:
+        command.append("--all-categories")
+    else:
+        for category in categories:
+            command.extend(["--category", category])
+    if request.force_rocksteady:
+        command.append("--force-rocksteady")
+    if not request.write_graphs:
+        command.append("--no-graphs")
+    if request.debug:
+        command.append("--debug")
+    if catalog_sha256:
+        command.extend(["--catalog-sha256", catalog_sha256])
+    for source_id in source_ids:
+        command.extend(["--source-id", source_id])
+    if check:
+        command.append("--check")
+    return command
+
+
 def build_analysis_command(
     request: AnalysisRunRequest,
     *,
@@ -2651,6 +2938,7 @@ def build_analysis_command(
     mode = str(request.mode or "").casefold()
     module_by_mode = {
         "audio": "analysis.audio",
+        "native_face": "analysis.native_face",
         "face": "analysis.imotions",
         "imotions": "analysis.imotions",
         "raw": "analysis.imotions",
@@ -2693,7 +2981,7 @@ def build_analysis_workflow_command(
     python_executable = python_executable or Path(sys.executable)
     modalities = tuple(request.modalities)
     if not modalities:
-        raise ValueError("Choose at least one Video / iMotions, Audio, or Text modality.")
+        raise ValueError("Choose at least one Video / iMotions, Native Face, Audio, or Text modality.")
     if request.write_combined_workbook and not request.speaker_groups and request.analysis_profile is None:
         raise ValueError("Choose an output profile or at least one speaker group for the combined workbook.")
     if request.analysis_profile is not None and request.speaker_groups:
@@ -2729,7 +3017,7 @@ def build_analysis_workflow_command(
     seen_modalities: set[str] = set()
     for modality in modalities:
         name = str(modality.name or "").casefold()
-        if name not in {"imotions", "audio", "text"}:
+        if name not in {"imotions", "native_face", "audio", "text"}:
             raise ValueError(f"Unsupported analysis workflow modality: {modality.name}")
         if name in seen_modalities:
             raise ValueError(f"Duplicate analysis workflow modality: {name}")
@@ -2759,11 +3047,24 @@ def build_analysis_workflow_command(
             raise ValueError(
                 "Analysis output profile is not associated with the selected modality folders."
             ) from exc
+        # Native SourceID-grain Text validates splits against its own manifest
+        # during workflow execution. The legacy speaker-grain restriction is
+        # retained there, after the actual Text grain is known.
         if "text" in seen_modalities:
-            try:
-                validate_text_profile_grouping(profile_metadata, resolved_profile)
-            except ValueError as exc:
-                raise ValueError(str(exc)) from exc
+            text_modality = next(modality for modality in modalities if modality.name.casefold() == "text")
+            has_native_summary = any(text_modality.source_path.rglob("video_level_summary.csv"))
+            if has_native_summary:
+                try:
+                    text_discovery = discover_text_results(text_modality.source_path)
+                except TextResultsError as exc:
+                    raise ValueError(f"Invalid imported Text results: {exc}") from exc
+            else:
+                text_discovery = None
+            if text_discovery is None or text_discovery.grain == "speaker":
+                try:
+                    validate_text_profile_grouping(profile_metadata, resolved_profile)
+                except ValueError as exc:
+                    raise ValueError(str(exc)) from exc
 
     groups_payload: list[dict[str, object]] = []
     group_ids: set[str] = set()
@@ -2855,6 +3156,18 @@ def default_audio_output_root(repo_root: Path) -> Path:
     """Default location for audio runs started from the launcher."""
 
     return repo_root / "processing" / "audio_analysis" / "output" / "ui_runs"
+
+
+def default_face_output_root(repo_root: Path) -> Path:
+    """Default location for native Py-Feat runs started from the launcher."""
+
+    return repo_root / "processing" / "face_analysis" / "output" / "ui_runs"
+
+
+def default_text_output_root(repo_root: Path) -> Path:
+    """Default location for native Text runs started from the launcher."""
+
+    return repo_root / "processing" / "text_analysis" / "output" / "ui_runs"
 
 
 def default_analysis_output_root(repo_root: Path) -> Path:

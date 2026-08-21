@@ -55,6 +55,15 @@ CONSTRUCTS: tuple[ConstructDefinition, ...] = (
         "Higher values mean a larger share of RockSteady Terms matched negative words.",
     ),
     ConstructDefinition(
+        "text_valence",
+        "Text Valence",
+        ("positive", "negative"),
+        "Text Valence",
+        "(Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment)",
+        "-1 to 1",
+        "Positive values favour positive over negative lexical sentiment; blank means no sentiment evidence.",
+    ),
+    ConstructDefinition(
         "arousal_activation",
         "Arousal / Activation",
         ("active", "passive"),
@@ -143,12 +152,13 @@ IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
 DISPLAY_SCORE_FIELDS = (
     ("Positive Sentiment", "positive_sentiment_score"),
     ("Negative Sentiment", "negative_sentiment_score"),
+    ("Text Valence", "text_valence_balance_score"),
     ("Arousal / Activation", "activation_balance_score"),
     ("Dominance / Power", "dominance_power_balance_score"),
     ("Affiliation / Social orientation", "affiliation_social_balance_score"),
 )
 
-DISPLAY_COLORS = ("#16a34a", "#dc2626", "#2563eb", "#7e22ce", "#0f766e")
+DISPLAY_COLORS = ("#16a34a", "#dc2626", "#b45309", "#2563eb", "#7e22ce", "#0f766e")
 
 READABLE_IDENTITY_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "segment": (
@@ -338,6 +348,13 @@ def construct_row(
 
     _set_direct_score(row, "positive_sentiment", proportions["positive"])
     _set_direct_score(row, "negative_sentiment", proportions["negative"])
+    _set_balance_score(
+        row,
+        "text_valence",
+        proportions,
+        positive=("positive",),
+        negative=("negative",),
+    )
     _set_balance_score(
         row,
         "activation",
@@ -565,12 +582,12 @@ def _safe_name(label: str) -> str:
 def _readme_text() -> str:
     return """# Transcript 多模态输出 / Multimodal output
 
-先打开 `video_level_summary.csv`：每个视频一行，五个指标名称与统一心理构念表完全一致。
+先打开 `video_level_summary.csv`：每个视频一行，六个指标名称与统一心理构念表完全一致。
 
 - `segment_level/`：每个视频一张带时间戳的表，用于时间对齐。
 - `video_level_summary.csv`：每个视频一行。
 - `speaker_level_summary.csv`：每个 speaker 一行。
-- `graphs/`：同样五个构念的 SVG 图片。
+- `graphs/`：同样六个构念的 SVG 图片。
 - `construct_mapping.csv`：指标来源、范围、公式和阅读方法。
 - `alignment_contract.json`：供程序使用的对齐键和契约。
 
@@ -580,13 +597,13 @@ Facial 或 Audio 校准过的情绪强度。
 
 ## English
 
-Start with `video_level_summary.csv`. It has one row per video and five columns
+Start with `video_level_summary.csv`. It has one row per video and six columns
 named exactly like the shared psychological-construct table.
 
 - `segment_level/`: one timestamped CSV per video for temporal alignment.
 - `video_level_summary.csv`: one row per video.
 - `speaker_level_summary.csv`: one row per speaker.
-- `graphs/`: the same constructs shown as readable SVG charts.
+- `graphs/`: the same six constructs shown as readable SVG charts.
 - `construct_mapping.csv`: plain-language mapping and formulas.
 - `alignment_contract.json`: machine-readable join keys and provenance boundary.
 

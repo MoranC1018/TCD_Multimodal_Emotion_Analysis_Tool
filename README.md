@@ -25,6 +25,11 @@ Jiaming Liu, with academic direction from Professor Khurshid Ahmad and Dr
 Tracey Hilton at the School of Computer Science, Trinity College Dublin, the University of Dublin. Institutional affiliation does not imply endorsement
 of particular findings.
 
+The native Face/Text engines and their initial research contracts were adapted
+from PR 3 (`e6e886255b55b76137fdc40ca8734e971cd420b8`), authored by Jiaming Liu.
+This integration preserves that provenance while binding the engines to the
+current source-manifest, Analysis, security, and desktop-application contracts.
+
 Project-authored code and documentation are released under the root
 [MIT License](LICENSE). Bundled third-party components retain their own terms:
 in particular, OpenSMILE 3.0.0 is excluded from the MIT License and remains
@@ -56,10 +61,11 @@ private vulnerability-reporting process are in [CITATION.cff](CITATION.cff),
 | Full video | Keeps or downloads the complete source | Requires enough output storage |
 | Focus | Interactive timeline and exact segment selection | MP4 and WebM are the most reliable local preview formats |
 | Clean speaker segments | Face visibility, voice activity, overlap selection, and stitching | Model-backed runs require the dependencies described below |
-| Face processing | Import an existing processed folder | In-app face processing is not enabled in this release |
+| Face processing | Native Py-Feat processing or import | Cached Detectorv2 models and the native Python stack must pass readiness |
 | Audio processing | OpenSMILE and optional audio-emotion models | OpenSMILE 3.0.0 uses the audEERING Research License; review its non-commercial/product boundary |
-| Text processing | Import an existing processed folder | In-app text processing is not enabled in this release |
+| Text processing | Native Whisper/RockSteady processing or import | RockSteady 0.4 and a JDK are separately installed external requirements |
 | iMotions analysis | Emotions, action units, movement, geometry, and comparisons | Expects valid iMotions CSV exports |
+| Native Face analysis | Primary-face Py-Feat emotion, valence, and arousal reports | Kept distinct from iMotions/AFFDEX because the providers are not interchangeable |
 | Audio analysis | Emotion-model and OpenSMILE report generation | Expects outputs from this tool's audio processor |
 
 Generated videos, audio, iMotions exports, API credentials, model weights,
@@ -216,9 +222,10 @@ use.
 5. Untick speaker groups that are outside the study.
 6. Select Standard, Full, Focus, or Clean Speaker mode.
 7. Run Procurement and inspect its completion manifest.
-8. Open **Processing**. Run Audio in-app and import existing Face/Text outputs
-   as required.
-9. Open **Analysis**. Run iMotions and audio reports separately.
+8. Open **Processing**. Run native Face, Audio, and Text in-app, or import a
+   verified existing result where the workflow permits it.
+9. Open **Analysis**. Run iMotions, native Py-Feat Face, Audio, and Text reports
+   without blending provider semantics.
 10. Preserve the source list, processing manifests, settings, model versions,
     and generated reports with the research archive.
 
@@ -257,10 +264,10 @@ nonblank metadata value is retained. Relative local links resolve from the
 catalog directory, YouTube and local rows may be mixed, and repeated links
 remain distinct SourceIDs. Filtering and sorting the review table do not alter
 selection: only the row/speaker checkboxes and **Select visible** or **Clear
-visible** do so. The Audio Processing screen reopens the sealed manifest from
+visible** do so. Each Face, Audio, and Text Processing screen reopens the sealed manifest from
 the chosen batch folder, then offers its own metadata filter, sort, and explicit
 visible-selection controls. The selected SourceIDs and catalog digest are bound
-back to that same folder when the audio command starts.
+back to that same folder when the processing command starts.
 
 Every catalog run creates a fresh child run directory. Before media processing
 it seals `source_manifest.json` and spreadsheet-safe `source_metadata.csv` at
@@ -504,10 +511,11 @@ python processing\audio_analysis\run_audio_analysis.py batch "C:\path\to\videos"
 python processing\audio_analysis\run_audio_analysis.py single "C:\path\to\video.mp4"
 ```
 
-Run iMotions and audio Analysis:
+Run native Face, iMotions, and audio Analysis:
 
 ```powershell
 python -m analysis.imotions "C:\path\to\imotions_csvs" --logscale
+python -m analysis.native_face "C:\path\to\native_face_output" --logscale
 python -m analysis.audio "C:\path\to\audio_outputs" --logscale
 ```
 
@@ -517,13 +525,15 @@ Run the combined workflow from existing Analysis reports:
 python -m analysis.workflow `
   --output-root "C:\path\to\combined_output" `
   --imotions-source "C:\path\to\video_reports" --imotions-method import `
+  --native_face-source "C:\path\to\native_face_output" --native_face-method run `
   --audio-source "C:\path\to\audio_reports" --audio-method import `
   --speaker-groups-json '[{"id":"group-1","name":"Group 1","speaker_ids":["Speaker A","Speaker B"]}]'
 ```
 
 Use `run` instead of `import` for a modality when its source contains raw
-iMotions exports or processed `audio_analysis.csv` files that still need
-Analysis. The desktop application is easier for defining speaker groups.
+iMotions exports, verified native `face_core.csv` runs, or processed
+`audio_analysis.csv` files that still need Analysis. The desktop application
+is easier for defining speaker groups.
 
 ## Verification And Troubleshooting
 
@@ -559,8 +569,11 @@ runs. Without overrides, the test searches common Node, Playwright, and Edge
 locations and skips with setup guidance when optional browser automation is
 not installed.
 
-Before a Clean Speaker batch, select **Check model readiness**. Before an audio
-batch, run the `doctor` command above.
+Before Clean Speaker or native Face, select the corresponding **Check model
+readiness** action. Face preparation is an explicit network-enabled action;
+normal Face runs are offline and receive no credentials. Before Audio, run the
+`doctor` command above. Native Text readiness checks Whisper, FFmpeg, the JDK,
+and the separately installed RockSteady 0.4 JAR/dictionaries before processing.
 
 Common causes:
 
@@ -572,6 +585,8 @@ Common causes:
 | CUDA option fails | `torch.cuda.is_available()` must be `True` in the exact launcher environment |
 | Audio emotion columns are blank | Emotion models toggle, audio `doctor`, model downloads, and manifest warnings |
 | OpenSMILE output is missing | `OPENSMILE_HOME`, executable/config path, and audio `doctor` |
+| Native Face is not ready | Run its structured readiness check; install the pinned native stack and explicitly prepare cached Detectorv2 weights |
+| Native Text is not ready | Install the pinned Whisper stack plus a supported JDK and separately licensed RockSteady 0.4 runtime; the repository setup does not download RockSteady |
 | Focus video does not preview | Try MP4/WebM, but processing may still work through FFmpeg |
 | Long run pauses | Resource monitor has reached CPU, GPU, or RAM limit; inspect the visible launcher/PowerShell log |
 | OneDrive file is unavailable | Hydrate the file locally or move the run to a non-synced NTFS folder |
@@ -581,6 +596,8 @@ Further technical documents:
 - [Research Methods and Reproducibility](docs/RESEARCH_METHODS.md)
 - [Release Readiness and Limits](docs/RELEASE_READINESS.md)
 - [Analysis Calculations](analysis/CALCULATIONS.md)
+- [Native Face Processing Contract](processing/face_analysis/README.md)
+- [Native Text Processing Contract](processing/text_analysis/README.md)
 - [Audio Processing Contract](processing/audio_analysis/README.md)
 - [Clean Speaker Setup](procurement/procurement_beta/SETUP.md)
 - [Third-Party Notices](procurement/procurement_beta/THIRD_PARTY_NOTICES.md)
@@ -594,7 +611,7 @@ Further technical documents:
 | Settings icon | Opens credentials, download fallback, resource controls, and EULA access controls |
 | Procurement tile | Opens video source selection and Procurement modes |
 | Processing tile | Opens Face, Audio, and Text processing choices |
-| Analysis tile | Opens iMotions or Audio statistical report generation |
+| Analysis tile | Opens iMotions, native Py-Feat Face, Audio, or Text statistical report generation |
 | Guided workflow switch | Shows or hides the multi-stage workflow planner |
 | Procurement / Processing / Analysis checkboxes | Include or exclude each stage from the guided sequence |
 | Face / Audio / Text checkboxes | Include or exclude each processing stream |
@@ -602,8 +619,8 @@ Further technical documents:
 | Browse | Selects the import folder for that stream |
 | Start workflow | Begins at the first selected stage and carries paths forward |
 
-Face and Text are import-only in the current release. Audio can run in-app or
-be imported.
+Face, Audio, and Text can run in-app. Existing verified result folders can also
+be imported where the selected workflow permits it.
 
 ## Settings
 
@@ -720,14 +737,37 @@ highlighted both on the timeline and in the segment list.
 
 | Control | What it does |
 | --- | --- |
-| Face tile | Placeholder for future in-app face processing |
+| Face tile | Opens native Py-Feat processing, offline readiness, and explicit model preparation |
 | Audio tile | Opens the working Audio Processing screen |
-| Text tile | Placeholder for future in-app text processing |
+| Text tile | Opens native Whisper/RockSteady processing and readiness |
 | Import processed face/audio/text toggle | Marks that stream as supplied by an existing folder |
 | Browse | Selects the corresponding imported output folder |
 | Continue to analysis | Opens Analysis after required processing paths are present |
 
 Imported streams and in-app streams can be mixed in one guided workflow.
+
+## Native Face And Text Processing
+
+Both screens accept a supported file/folder or an immutable Procurement catalog
+run. Catalog mode displays ordered manifest rows and arbitrary metadata, but
+filtering only changes visibility: **Select visible** and **Clear visible** are
+the actions that change the authorized SourceID subset. The exact catalog
+SHA-256 and selected SourceIDs are sent as repeated CLI bindings.
+
+Native Face exposes sample FPS, detector confidence, batch size, device,
+recursion, overwrite, and debug controls. **Check readiness** is offline;
+**Prepare models** is the only Face child allowed to receive a Hugging Face
+token. Launcher children inherit a minimal operational environment allowlist,
+so unrelated parent-process secrets are not forwarded. Completed results can be opened or handed directly to the distinct
+native Face Analysis provider.
+
+Native Text exposes Whisper model/device/language, original or English output,
+embedded/custom dictionaries, merge/override behavior, searchable categories,
+all categories, thread count, forced RockSteady execution, graphs, and debug.
+The dynamic category list is readiness-derived. Completed source-grain results
+can be handed directly to Analysis. Their final pair root contains exact catalog
+sidecar copies bound by file, catalog, and ordered source-context hashes; the
+native importer reads that explicit run root rather than searching ancestors.
 
 ## Audio Processing
 
@@ -761,16 +801,17 @@ eGeMAPS, Auto device, and temporary/debug outputs off.
 
 ## Analysis
 
-Analysis can combine Video / iMotions, Audio, and imported Text constructs in
-one run. Video and Audio can process a fresh source in the application or reuse
-an existing Analysis report folder. Text is import-only, and all three source
-types can be mixed in the same run.
+Analysis can combine Video / iMotions, Py-Feat / Native Face, Audio, and Text
+constructs in one run. The native Face provider remains separate from
+iMotions/AFFDEX. Native Text prefers SourceID-grain results while legacy
+speaker-level Text imports remain supported.
 
 | Control | What it does |
 | --- | --- |
 | Video / iMotions | Enables analysis of iMotions emotions, action units, landmarks, movement, and geometry |
+| Py-Feat / Native Face | Enables primary-face native emotion, valence, and arousal analysis from a verified Face run |
 | Audio | Enables analysis of this tool's audio emotion and OpenSMILE outputs |
-| Text | Imports completed speaker-level text constructs from `multimodal/speaker_level_summary.csv`; it does not run the separate text analyser |
+| Text | Prefers native `video_level_summary.csv` SourceID observations and retains legacy `speaker_level_summary.csv` compatibility |
 | Run analysis | Processes that modality's fresh source before building the combined result |
 | Use existing results | Reads an existing Analysis report tree without changing it |
 | Source folder | Accepts the enabled modality's fresh input or existing report folder |
@@ -798,7 +839,7 @@ types can be mixed in the same run.
 
 ### Customize The Output
 
-1. Enable Video / iMotions, Audio, Text, or any useful combination.
+1. Enable Video / iMotions, Py-Feat / Native Face, Audio, Text, or any useful combination.
 2. Choose **Run analysis** or **Use existing results** separately for Video and
    Audio. Text uses **Use existing results** only. Select each source folder.
 3. Select **Customize output**. The application loads the immutable source
@@ -814,7 +855,8 @@ types can be mixed in the same run.
 6. Optionally create manual groups containing a whole speaker, an individual
    source, or both. A source may resolve into only one manual group. When Text
    is enabled, keep every visible source for one speaker in the same group
-   because imported Text results contain one observation per speaker.
+   only for a legacy speaker-grain Text import. Native SourceID-grain Text may
+   be split by SourceID.
 7. Review the order/group preview, select **Use this customization**, choose
    the output directory, and select **Run Analysis**.
 
@@ -901,15 +943,20 @@ in its non-quantitative **Measure Guide** sheet:
   Surprise, Neutral, and Other on `0..100` (source probabilities `0..1`
   multiplied by 100; Joy imports the source label `Happiness`). Video includes
   Anger, Contempt, Disgust, Fear, Joy, Sadness, Surprise, Neutral, and
-  Confusion on `0..100`.
+  Confusion on `0..100`. Native Py-Feat Face maps Happy to Joy and Sad to
+  Sadness, keeps the other five supported classes, and maps probabilities
+  `0..1` to `0..100`; Contempt and Confusion remain blank.
 - **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
   Negative Sentiment are `0..1`; imported legacy headers `Positive valence`
   and `Negative valence` are accepted as aliases, with canonical sentiment
   headers preferred when both are present.
 - **Valence:** Audio Valence maps source `0..1` to output `-100..100` with
   `(raw * 200) - 100`. Video Valence and Adaptive Valence remain
-  `-100..100`. Joy and Valence are never substituted for Positive or Negative
-  Sentiment.
+  `-100..100`. Native Face valence and arousal map source `-1..1` to
+  `-100..100`. Text Valence is `(Positive Sentiment - Negative Sentiment) /
+  (Positive Sentiment + Negative Sentiment)`, stays on `-1..1`, and is blank
+  when the denominator is zero. Joy and Valence are never substituted for
+  Positive or Negative Sentiment.
 - **Dimensions:** Audio Arousal and Dominance map source probabilities `0..1`
   to `0..100`. Video Engagement and Adaptive Engagement are `0..100`. Text
   Arousal / Activation, Dominance / Power, and Affiliation / Social

@@ -40,6 +40,7 @@ from analysis.text_pipeline.distribution_comparisons import (
 from analysis.text_pipeline.provenance import sha256_file
 from analysis.text_pipeline.transaction import replace_output_dir
 from processing.io_utils import atomic_write_json, make_staging_directory
+from processing.audio_analysis.audio_pipeline.source_context import publish_run_sidecars
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def analyse_text_segment_pair(
     segment_alignment: str = "error",
     text_language: str = "original",
     run_id: str | None = None,
+    catalog_discovery: object | None = None,
 ) -> TextPairAnalysisResult:
     """Generate selected and extra outputs, then publish them as one directory.
 
@@ -166,6 +168,12 @@ def analyse_text_segment_pair(
                 selected_manifest,
                 extra_manifest,
             )
+            source_binding = _catalog_source_binding(
+                catalog_discovery,
+                identity_contract,
+            )
+            if source_binding is not None:
+                publish_run_sidecars(staging_root, catalog_discovery.sidecar_pair)
             batch_manifest = _build_batch_manifest(
                 run_id=effective_run_id,
                 final_root=final_root,
@@ -185,6 +193,7 @@ def analyse_text_segment_pair(
                 identity_contract=identity_contract,
                 lineage_contract=lineage_contract,
                 multimodal_contract=multimodal_contract,
+                source_binding=source_binding,
             )
             atomic_write_json(staging_root / BATCH_MANIFEST_FILE, batch_manifest)
             write_output_owner(
@@ -402,6 +411,7 @@ def _video_source_contract(
         if not isinstance(alignment, dict):
             raise ValueError(f"{label.capitalize()} output lacks alignment evidence for {identity}")
         result[identity] = {
+            "source_id": str(item.get("source_id") or ""),
             "whisper_json_sha256": whisper_hash,
             "source_whisper_segments": item.get("source_whisper_segments"),
             "prepare_manifest_sha256": alignment.get("manifest_sha256"),
@@ -475,6 +485,7 @@ def _build_batch_manifest(
     identity_contract: Mapping[str, Mapping[str, object]],
     lineage_contract: Mapping[str, object],
     multimodal_contract: Mapping[str, object],
+    source_binding: Mapping[str, object] | None,
 ) -> dict[str, object]:
     identity_json = json.dumps(
         identity_contract,
@@ -482,7 +493,7 @@ def _build_batch_manifest(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return {
+    payload = {
         "schema_version": "1.0",
         "kind": PAIR_KIND,
         "run_id": run_id,
@@ -520,6 +531,17 @@ def _build_batch_manifest(
         "multimodal": {
             "path": "multimodal",
             "contract": "multimodal/alignment_contract.json",
+            "contract_sha256": sha256_file(
+                selected_manifest_path.parent.parent / "multimodal" / "alignment_contract.json"
+            ),
+            "video_summary": "multimodal/video_level_summary.csv",
+            "video_summary_sha256": sha256_file(
+                selected_manifest_path.parent.parent / "multimodal" / "video_level_summary.csv"
+            ),
+            "source_ids": [
+                str(record.get("source_id") or "")
+                for record in identity_contract.values()
+            ],
             "summary": dict(multimodal_contract.get("rows", {})),
             "graphs": multimodal_contract.get("graphs", 0),
         },
@@ -541,6 +563,77 @@ def _build_batch_manifest(
             "multimodal": "multimodal/video_level_summary.csv",
         },
     }
+    if source_binding is not None:
+        payload["source_binding"] = dict(source_binding)
+    return payload
+
+
+def _catalog_source_binding(
+    discovery: object | None,
+    identity_contract: Mapping[str, Mapping[str, object]],
+) -> dict[str, object] | None:
+    source_ids = [str(record.get("source_id") or "") for record in identity_contract.values()]
+    if not any(source_ids):
+        return None
+    if any(not source_id for source_id in source_ids) or len(source_ids) != len(set(source_ids)):
+        raise ValueError("Catalog Text pair must contain one unique SourceID for every video")
+    if discovery is None:
+        raise ValueError("SourceID-grain Text postprocessing requires validated catalog discovery")
+    catalog_sha256 = str(getattr(discovery, "catalog_sha256", "") or "").casefold()
+    if not _is_sha256(catalog_sha256):
+        raise ValueError("Catalog Text postprocessing has no valid catalog digest")
+    pair = getattr(discovery, "sidecar_pair", None)
+    if (
+        not isinstance(pair, tuple)
+        or len(pair) != 2
+        or not all(isinstance(item, bytes) for item in pair)
+    ):
+        raise ValueError("Catalog Text postprocessing has no immutable sidecar snapshot")
+    jobs: dict[str, object] = {}
+    for job in getattr(discovery, "jobs", ()):
+        source_id = str(getattr(job, "source_id", "") or "")
+        if not source_id or source_id in jobs:
+            raise ValueError("Catalog Text discovery repeats or omits a SourceID")
+        jobs[source_id] = job
+    if set(jobs) != set(source_ids):
+        raise ValueError("Catalog Text discovery does not match postprocessing SourceIDs")
+    contexts = []
+    for source_id in source_ids:
+        context = _plain_json_value(getattr(jobs[source_id], "source_context", {}))
+        if not isinstance(context, dict) or context.get("source_id") != source_id:
+            raise ValueError(f"Catalog Text source context is invalid for {source_id}")
+        if str(context.get("catalog_sha256") or "").casefold() != catalog_sha256:
+            raise ValueError(f"Catalog Text source context digest is invalid for {source_id}")
+        encoded = json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        contexts.append(
+            {
+                "source_id": source_id,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "context": context,
+            }
+        )
+    return {
+        "kind": "catalog-source-sidecars",
+        "catalog_sha256": catalog_sha256,
+        "source_manifest": "source_manifest.json",
+        "source_manifest_sha256": hashlib.sha256(pair[0]).hexdigest(),
+        "source_metadata": "source_metadata.csv",
+        "source_metadata_sha256": hashlib.sha256(pair[1]).hexdigest(),
+        "source_contexts": contexts,
+    }
+
+
+def _plain_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json_value(item) for item in value]
+    return value
 
 
 def _variant_batch_record(

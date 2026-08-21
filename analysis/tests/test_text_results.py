@@ -90,6 +90,7 @@ class TextResultsTests(unittest.TestCase):
                 "Arousal / Activation": -1.0,
                 "Dominance / Power": 0.0,
                 "Affiliation / Social orientation": 1.0,
+                "Text Valence": 1.0,
             },
         )
 

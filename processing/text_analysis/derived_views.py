@@ -6,7 +6,7 @@ import csv
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from processing.io_utils import atomic_write_json, exclusive_process_lock
 from spreadsheet_safety import SpreadsheetSafeWriter
@@ -28,6 +28,7 @@ def derive_category_view(
     source_relative_paths: Sequence[str | Path] | None = None,
     upstream_inventory_sha256: str | None = None,
     manifest_source_root: Path | None = None,
+    source_ids: Mapping[str, str] | None = None,
 ) -> int:
     """Derive one category snapshot under its standalone stage lock."""
 
@@ -49,6 +50,7 @@ def derive_category_view(
                 source_relative_paths=source_relative_paths,
                 upstream_inventory_sha256=upstream_inventory_sha256,
                 manifest_source_root=manifest_source_root,
+                source_ids=source_ids,
             )
         except BaseException:
             for candidate in target.parent.glob(pattern):
@@ -65,6 +67,7 @@ def _derive_category_view_unlocked(
     source_relative_paths: Sequence[str | Path] | None = None,
     upstream_inventory_sha256: str | None = None,
     manifest_source_root: Path | None = None,
+    source_ids: Mapping[str, str] | None = None,
 ) -> int:
     """Atomically write identifier columns plus the requested categories.
 
@@ -120,6 +123,9 @@ def _derive_category_view_unlocked(
             items.append(
                 {
                     "identity": relative.with_suffix("").as_posix(),
+                    "source_id": str(
+                        (source_ids or {}).get(relative.with_suffix("").as_posix(), "")
+                    ),
                     "source": relative.as_posix(),
                     "output": relative.as_posix(),
                     "source_sha256": file_sha256(source),

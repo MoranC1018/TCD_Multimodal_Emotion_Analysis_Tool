@@ -18,6 +18,12 @@ def _print_progress(index: int, total: int, status: str, input_relative: str) ->
     print(f"Face item {index}/{total}: {status} {input_relative}", flush=True)
 
 
+def _require_runtime_readiness(device: str) -> None:
+    readiness = check_readiness(device)
+    if not readiness.ready:
+        raise RuntimeError(readiness.detail)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyse videos with Py-Feat Detectorv2.")
     parser.add_argument("input", type=Path, nargs="?", help="One video or a directory of videos")
@@ -43,6 +49,17 @@ def main() -> int:
     parser.add_argument("--no-recursive", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
+        "--source-id",
+        action="append",
+        default=[],
+        help="Analyse an authorized catalog SourceID. Repeat for multiple rows.",
+    )
+    parser.add_argument(
+        "--catalog-sha256",
+        default="",
+        help="Exact digest of the authorized procurement catalog.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Show a traceback for configuration/startup failures",
@@ -66,9 +83,6 @@ def main() -> int:
     if args.input is None:
         parser.error("input is required unless --check or --prepare-models is used")
     try:
-        readiness = check_readiness(args.device)
-        if not readiness.ready:
-            raise RuntimeError(readiness.detail)
         result = process_face_input(
             args.input,
             args.output_root,
@@ -79,9 +93,12 @@ def main() -> int:
                 device=args.device,
                 recursive=not args.no_recursive,
                 overwrite=args.overwrite,
+                source_ids=tuple(args.source_id),
+                catalog_sha256=str(args.catalog_sha256).casefold(),
             ),
             run_id=args.run_id,
             progress_callback=_print_progress,
+            runtime_readiness_check=_require_runtime_readiness,
         )
     except KeyboardInterrupt:
         print("Facial processing cancelled; inspect run_manifest.json for partial status.", file=sys.stderr)

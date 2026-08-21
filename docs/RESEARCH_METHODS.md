@@ -211,10 +211,26 @@ dependent variables or explanatory evidence.
 
 ## Face And Text Processing
 
-Face and Text are import-only in this release. The launcher records the supplied
-processed folder and advances only when the selected workflow step has an
-in-app result or an import. Researchers must retain the external tool version,
-configuration, and source-to-output mapping for imported data.
+Native Face and Text can execute in-app from a legacy file/folder or an
+authorized Procurement catalog subset. Catalog mode validates the exact top
+`source_manifest.json`/`source_metadata.csv` pair, digest, selection, and every
+mapped `source_context.json` before model work or publication. The exact top
+pair is copied byte-for-byte to the processing root while the ordered processed
+SourceID subset is recorded separately. Only Speaker affects grouping; all
+other fields remain metadata. Repeated links remain distinct SourceIDs.
+
+Face uses Py-Feat Detectorv2 and emits full Parquet, readable `face_core.csv`,
+and manifests. Its offline readiness check requires the pinned native stack,
+trusted FFmpeg/TorchCodec runtime, verified cached checkpoints, and a real
+offline model construction. Model preparation is a separate network-enabled
+action; only that child may receive a Hugging Face token.
+
+Text uses Whisper followed by RockSteady. Language precedence is the catalog
+row's YouTube-reported language, then explicit Whisper language, then blank;
+researcher `Language` remains ordinary metadata. RockSteady 0.4, its
+dictionaries, and a JDK/Javac are separately installed/licensed external
+requirements and are not downloaded by repository setup. SourceID and context
+identity pass through every stage and resume fingerprint.
 
 iMotions face CSVs are parsed after the `#DATA` marker or a detected
 `Row,Timestamp` header. Parsing stops at the first blank row to exclude appended
@@ -237,9 +253,27 @@ Scaling contracts remain source-specific:
 - core iMotions emotion values in 0 to 1 can scale to 0 to 100;
 - iMotions valence in -1 to 1 scales to -100 to 100;
 - iMotions FEA `Index` columns already on 0 to 100 are not rescaled;
+- native Py-Feat primary-face probabilities in 0 to 1 scale to 0 to 100;
+- native Py-Feat valence and arousal in -1 to 1 scale to -100 to 100;
 - audio categorical probabilities are multiplied by 100;
 - audio valence in 0 to 1 is transformed as
   `signed_valence = (raw_valence * 200) - 100`.
+
+Native Face maps Happy to Joy and Sad to Sadness, with Anger, Disgust, Fear,
+Surprise, and Neutral direct. Only detected primary-face rows contribute;
+no-face rows, Contempt, and Confusion are missing rather than fabricated zero.
+The provider remains `Py-Feat / Native Face`, distinct from
+`Video / iMotions` and AFFDEX.
+
+Face media identity and SHA-256 are revalidated after Py-Feat returns and
+before result publication. Catalog Analysis also compares duplicated outer
+identity/metadata fields with the hash-bound source context and copied root
+sidecars. A changed input or relabelled manifest is rejected rather than
+reported against stale provenance.
+
+Native Text retains Positive/Negative Sentiment on 0 to 1. Text Valence is
+`(Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment)`
+on -1 to 1 and is blank at a zero denominator.
 
 These transformations should be stated when reporting values.
 
@@ -257,8 +291,19 @@ iMotions export has no duplicate sidecars; exact speaker, SourceID, title, and
 output-folder identities provide the linkage. When every selected legacy
 folder is sidecarless, researchers select the procurement run's
 `source_manifest.json` explicitly in **Customize output**. Because imported
-Text is one observation per speaker, Text-enabled profiles must not split one
-speaker's visible sources across output groups.
+legacy Text is one observation per speaker, legacy Text-enabled profiles must
+not split one speaker's visible sources across output groups.
+Native `video_level_summary.csv` is SourceID-grain, is validated against its
+manifest/hash/sidecars, and permits SourceID splits. Text Valence is recomputed
+from the selected positive/negative totals after every profile selection rather
+than averaging child valences. Profile reruns never mutate processing output or
+source sidecars.
+
+The native Text pair root contains exact copies of the validated catalog JSON
+and CSV sidecars. Its completion manifest hashes both files and the ordered
+source contexts, so import is explicit and relocatable without a parent-depth
+search. Analysis applies the producer's bounded 512 MiB/10,000,000-item JSON
+manifest and 384 MiB CSV envelope rather than a narrower consumer limit.
 
 ## Statistical Outputs
 
@@ -355,7 +400,8 @@ For each reported experiment, retain:
 5. Selected interval and extraction manifests.
 6. Audio window/stride, OpenSMILE feature set/version, model names, model
    availability, and device.
-7. External face/text tool versions and settings for imported outputs.
+7. Py-Feat/checkpoint and Whisper/RockSteady/JDK versions, readiness results,
+   settings, and external tool versions for any imported outputs.
 8. Analysis flags such as logscale, timing/landmark inclusion, and geometry
    exclusion.
 9. Generated run logs, column manifests, and skipped/duplicate records.

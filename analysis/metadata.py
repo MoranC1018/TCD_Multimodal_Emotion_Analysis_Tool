@@ -14,11 +14,12 @@ from typing import Mapping, Sequence
 
 from analysis.profile import AnalysisProfile
 from procurement.input_limits import count_json_items
+from processing.audio_analysis.audio_pipeline.source_context import (
+    MAX_SOURCE_MANIFEST_BYTES,
+    MAX_SOURCE_MANIFEST_ITEMS,
+    MAX_SOURCE_METADATA_BYTES,
+)
 from spreadsheet_safety import neutralize_spreadsheet_value
-
-
-MAX_SOURCE_MANIFEST_BYTES = 16 * 1024 * 1024
-MAX_SOURCE_MANIFEST_ITEMS = 1_000_000
 
 
 def normalise_identity(value: object) -> str:
@@ -111,7 +112,7 @@ def load_source_metadata(
         raise ValueError("Source manifest metadata_headers must be unique.")
 
     metadata_path = path.with_name("source_metadata.csv")
-    metadata_raw = _read_regular_bounded(metadata_path, MAX_SOURCE_MANIFEST_BYTES, "Source metadata")
+    metadata_raw = _read_regular_bounded(metadata_path, MAX_SOURCE_METADATA_BYTES, "Source metadata")
     sources: list[ManifestSource] = []
     seen_ids: set[str] = set()
     for order, raw_source in enumerate(raw_sources):
