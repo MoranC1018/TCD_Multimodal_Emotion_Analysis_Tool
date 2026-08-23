@@ -20,7 +20,10 @@ from analysis.combined_summary import (
 )
 from analysis.inference import add_probability_mirrors
 from analysis.metadata import load_source_metadata
+from analysis.native_face import NATIVE_FACE_METRICS
 from analysis.profile import AnalysisProfile, ManualGroup, ProfileMember
+from analysis.video import CanonicalVideoResult, DetectedVideoSource
+from analysis.video_contract import VIDEO_NORMALIZATION_VERSION
 from analysis.workflow import ModalityRequest, WorkflowError, WorkflowRequest, run_workflow
 
 
@@ -30,13 +33,23 @@ def _write_report(
     base: float = 10.0,
     *,
     metrics: tuple[str, ...] = AUDIO_METRICS,
+    imotions_metadata: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         for metric_index, metric in enumerate(metrics):
             writer.writerow([metric])
-            writer.writerow(["classification", "core", "category", "emotion", "unit", "score"])
+            writer.writerow(
+                [
+                    "classification",
+                    "FEA(Affectiva AFFDEX)" if imotions_metadata else "core",
+                    "category",
+                    "emotion",
+                    "unit",
+                    "score",
+                ]
+            )
             writer.writerow(["metric", *sources])
             writer.writerow(["count", *([10] * len(sources))])
             writer.writerow(["missing", *([0] * len(sources))])
@@ -157,7 +170,7 @@ def test_profile_workbook_orders_more_than_twelve_sources_and_keeps_metric_contr
     assert audio[cells.speaker_cells[0][0] + "1"].value == "'=Research formula"
     assert audio[cells.overall].value.startswith("=AVERAGE(")
     guide = book["Measure Guide"]
-    assert guide.max_row == 44
+    assert guide.max_row == 34
     assert {guide.cell(row, 1).value for row in range(2, guide.max_row + 1)} == {
         "Emotions",
         "Sentiment",
@@ -165,6 +178,71 @@ def test_profile_workbook_orders_more_than_twelve_sources_and_keeps_metric_contr
         "Dimensions",
     }
     assert (_digest(manifest), _digest(metadata.metadata_path)) == sidecar_hashes
+
+
+def test_profile_video_provider_keeps_dynamic_order_filters_and_one_sheet(
+    tmp_path: Path,
+) -> None:
+    manifest = _write_manifest(tmp_path / "run", 14)
+    metadata = load_source_metadata(manifest)
+    report = tmp_path / "reports" / "Researcher Alpha" / "descriptive_statistics.csv"
+    _write_report(
+        report,
+        [f"source-{index:04d}" for index in range(1, 15)],
+        metrics=NATIVE_FACE_METRICS,
+    )
+    detected = DetectedVideoSource(
+        "pyfeat_native_face",
+        manifest.parent.resolve(),
+        "import",
+        ("Verified imported Py-Feat reports.",),
+    )
+    canonical = CanonicalVideoResult(
+        "pyfeat_native_face",
+        tuple(f"source-{index:04d}" for index in range(1, 15)),
+        tuple({metric: None for metric in VIDEO_METRICS} for _ in range(14)),
+        detected.evidence,
+        detected.warnings,
+        VIDEO_NORMALIZATION_VERSION,
+    )
+    provenance_builder = getattr(canonical, "output_provenance", None)
+    assert provenance_builder is not None
+    source_hashes = (_digest(manifest), _digest(metadata.metadata_path))
+    profile = AnalysisProfile(
+        source_manifest=manifest,
+        source_manifest_sha256=metadata.manifest_sha256,
+        sort_fields=("Country", "Wave"),
+        automatic_group_field="Country",
+        metadata_filters=(("Country", ("Ireland",)),),
+    )
+
+    result = build_combined_workbook(
+        {
+            "native_face": (
+                CombinedSource(
+                    "native_face",
+                    "researcheralpha",
+                    "Researcher Alpha",
+                    report,
+                    video_provenance=provenance_builder(detected),
+                ),
+            )
+        },
+        tmp_path / "profiled-video.xlsx",
+        analysis_profile=profile,
+    )
+
+    book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+    assert result.quantitative_sheets == ("Video",)
+    assert not any("native face" in name.casefold() for name in book.sheetnames)
+    cells = result.source_cells["Video|Anger"]
+    assert cells.speaker_ids == tuple(f"source-{index:04d}" for index in range(1, 15, 2))
+    assert book["Video"][cells.overall].value.startswith("=AVERAGE(")
+    engagement = result.source_cells["Video|Engagement"]
+    assert all(book["Video"][coordinate].value is None for coordinate in engagement.speaker_cells)
+    assert book["Video"][engagement.overall].value is None
+    assert result.video_manifest_payload["sources"][0]["resolved_provider"] == "pyfeat_native_face"
+    assert (_digest(manifest), _digest(metadata.metadata_path)) == source_hashes
 
 
 def test_default_workbook_has_no_twelve_speaker_or_four_group_limit(tmp_path: Path) -> None:
@@ -307,7 +385,12 @@ def test_profile_manifest_is_authoritative_for_audio_sidecars_and_sidecarless_le
         / "other_findings"
         / "descriptive_statistics.csv"
     )
-    _write_report(video_report, ["source-0001_Interview_01"], metrics=VIDEO_METRICS)
+    _write_report(
+        video_report,
+        ["source-0001_Interview_01"],
+        metrics=VIDEO_METRICS,
+        imotions_metadata=True,
+    )
 
     text_root = tmp_path / "ordinary-text-export"
     text_summary = text_root / "multimodal" / "speaker_level_summary.csv"
@@ -338,7 +421,7 @@ def test_profile_manifest_is_authoritative_for_audio_sidecars_and_sidecarless_le
             output_root=tmp_path / "analysis-output",
             modalities=(
                 ModalityRequest("audio", "import", audio_root),
-                ModalityRequest("imotions", "import", video_root),
+                ModalityRequest("video", "import", video_root),
                 ModalityRequest("text", "import", text_root),
             ),
             speaker_groups=(),
@@ -397,8 +480,13 @@ def test_explicit_profile_manifest_supports_all_sidecarless_legacy_imports(
             / "other_findings"
             / "descriptive_statistics.csv"
         )
-        _write_report(video_report, ["source-0001_Interview_01"], metrics=VIDEO_METRICS)
-        modalities.insert(0, ModalityRequest("imotions", "import", video_root))
+        _write_report(
+            video_report,
+            ["source-0001_Interview_01"],
+            metrics=VIDEO_METRICS,
+            imotions_metadata=True,
+        )
+        modalities.insert(0, ModalityRequest("video", "import", video_root))
 
     result = run_workflow(
         WorkflowRequest(

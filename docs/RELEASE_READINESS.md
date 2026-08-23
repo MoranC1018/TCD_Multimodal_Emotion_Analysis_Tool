@@ -68,9 +68,10 @@ is not a diagnostic system.
   termination now includes child processes.
 - Focus local FFmpeg extraction emitted excessive banner/progress noise. It now
   keeps researcher-facing progress while suppressing routine FFmpeg banners.
-- The Windows launcher could select Python 3.11 despite the documented 3.12+
-  requirement and did not prefer a project environment. It now validates
-  Python 3.12+ and selects the ignored repository `.venv` first.
+- The Windows launcher did not prefer a project environment, and its interpreter
+  policy later drifted from the pinned stack's compatibility floor. It now
+  selects the ignored repository `.venv` first, accepts Python 3.11 or newer,
+  and prefers the tested and recommended Python 3.12 during fallback discovery.
 
 ## Supported Inputs
 

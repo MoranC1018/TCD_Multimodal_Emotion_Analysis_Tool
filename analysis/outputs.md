@@ -32,24 +32,26 @@ The combined workbook separates measures into four direct semantic sections:
 - **Emotions:** Audio Anger, Contempt, Disgust, Fear, Joy, Sadness, Surprise,
   Neutral, and Other are `0..100` (source probability `0..1` multiplied by
   100; source `Happiness` becomes Joy). Video Anger, Contempt, Disgust, Fear,
-  Joy, Sadness, Surprise, Neutral, and Confusion are `0..100`. The separate
-  `Py-Feat / Native Face` provider maps Happy to Joy and Sad to Sadness and
-  maps its seven primary-face probabilities to `0..100`; Contempt and
-  Confusion remain blank.
+  Joy, Sadness, Surprise, Neutral, and Confusion are `0..100`. A detected
+  Py-Feat native Face source maps Happy to Joy and Sad to Sadness and maps its
+  seven primary-face probabilities to `0..100`; measures that provider does
+  not produce, including Contempt and Confusion, remain blank.
 - **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
   Negative Sentiment are `0..1`. Text imports also accept legacy
   `Positive valence` and `Negative valence` headers, while preferring canonical
   sentiment headers when both are present.
 - **Valence:** Audio Valence converts source `0..1` to `-100..100` using
   `(raw * 200) - 100`. Video Valence and Adaptive Valence are `-100..100`.
-  Native Face valence and arousal convert source `-1..1` to `-100..100`.
+  Native Face valence converts source `-1..1` to `-100..100`.
   Text Valence is `(Positive Sentiment - Negative Sentiment) / (Positive
   Sentiment + Negative Sentiment)` on `-1..1` and is blank when its denominator
   is zero. Joy and Valence are never used as Positive/Negative Sentiment proxies.
 - **Dimensions:** Audio Arousal and Dominance convert source `0..1` to
-  `0..100`. Video Engagement and Adaptive Engagement are `0..100`. Text
-  Arousal / Activation, Dominance / Power, and Affiliation / Social
-  orientation are `-1..1`.
+  `0..100`. iMotions Video Engagement and Adaptive Engagement are `0..100`.
+  Native Face Arousal converts source `-1..1` to `-100..100` and remains
+  explicitly named `Arousal`; it is never relabelled or substituted as
+  Engagement. Text Arousal / Activation, Dominance / Power, and Affiliation /
+  Social orientation are `-1..1`.
 
 The **Measure Guide** sheet is non-quantitative and has the columns Section,
 Modality, Display measure, Imported source label, Workbook sheet, Output range,
@@ -60,12 +62,12 @@ plus one warning; new full reports retain all nine audio emotions. Action
 units, muscles, and tones remain in detailed/raw outputs rather than this
 combined emotional workbook.
 
-Native Face reads only manifest-verified `face_core.csv` rows where
+Both supported providers populate the same canonical `Video` worksheet; no
+provider-specific quantitative sheet is retained. Missing provider measures
+are blank. Native Face reads only manifest-verified `face_core.csv` rows where
 `face_detected=true` and `is_primary_face=true`. No-face rows are missing
-observations. Its worksheet name is `Py-Feat - Native Face` because Excel sheet
-names cannot contain `/`; the Measure Guide retains the exact provider label
-`Py-Feat / Native Face`. Source columns use the actual selected count, including
-small, large, and greater-than-twelve profiles.
+observations. Source columns use the actual selected count, including small,
+large, and greater-than-twelve profiles.
 
 Native Text summaries are bound to the explicit postprocessing run-root source
 sidecars, their exact hashes, catalog digest, ordered source-context hashes,
@@ -77,14 +79,30 @@ artifacts nor source sidecars are modified.
 
 ---
 
+## `video_column_manifest.csv`
+
+Written beside `combined_analysis.xlsx` whenever Video is selected. Each row
+serializes the canonical Video column identity supplied by the provider-neutral
+loader, including original source fields and channel availability. The workflow
+does not infer provider identity from worksheet shape.
+
+`combined_analysis_manifest.json` records requested modality `video` plus the
+resolved provider, detection evidence, warnings, provider/version availability,
+original fields, channel availability, and the exact serialized column-manifest
+rows. On rerun, the fixed-name Video column manifest is archived and hash-bound
+with its workbook and workflow manifest. Imported source trees, procurement
+manifests, and sidecars remain byte-identical.
+
+---
+
 ## `histograms.csv` and `histograms.xlsx`
 
 Frequency distributions of every emotion and affect metric, with one column per
 video source and one row per bin. Bins are fixed-width (5 units) and cover the
 full scale of each metric type:
 
-- **Core emotions and other 0–100 metrics** — bins from 0 to 100 (20 bins)
-- **Valence** — bins from −100 to 100 (40 bins)
+- **Core emotions and other 0–100 metrics** - bins from 0 to 100 (20 bins)
+- **Valence** - bins from −100 to 100 (40 bins)
 
 The CSV uses section headers to separate metrics. The Excel workbook splits the
 same data across three sheets: Core emotions, Other 0-100 findings, and Valence.
@@ -93,7 +111,7 @@ A `total` column shows the row sum across all sources.
 
 **What to look for:** The shape of the distribution. Most facial-expression
 scores spend the majority of frames near 0 (no expression detected). A source
-with a noticeably different shape — heavier tail, earlier peak — is where the
+with a noticeably different shape - heavier tail, earlier peak - is where the
 per-source statistical tests will flag differences.
 
 ---
@@ -109,12 +127,12 @@ sources. One block per metric, structured as follows:
 x_squared,  df,  p_value
 ```
 
-- **x_squared** — sum of `(observed − expected)² / expected` across all bins
+- **x_squared** - sum of `(observed − expected)² / expected` across all bins
   and sources. Larger values mean the distributions are further from being
   identical.
-- **df** — degrees of freedom = `(bins − 1) × (sources − 1)`. Determines which
+- **df** - degrees of freedom = `(bins − 1) × (sources − 1)`. Determines which
   chi-squared distribution is used to compute the p-value.
-- **p_value** — probability of observing a chi-squared this large or larger if
+- **p_value** - probability of observing a chi-squared this large or larger if
   all sources came from the same distribution. Values below 0.05 indicate
   significant differences.
 
@@ -122,12 +140,12 @@ x_squared,  df,  p_value
 
 Three source × source matrices covering every pair of videos:
 
-- **Pairwise X-squared matrix** — the chi-squared statistic for each pair.
+- **Pairwise X-squared matrix** - the chi-squared statistic for each pair.
   Higher values mean a more dissimilar pair.
-- **Pairwise df matrix** — usually `bins − 1` (19 for 0-to-100 metrics). A
+- **Pairwise df matrix** - usually `bins − 1` (19 for 0-to-100 metrics). A
   value one lower than expected means a bin where both sources had zero counts
   was dropped for that pair.
-- **Pairwise p-value matrix** — significance for each pair independently.
+- **Pairwise p-value matrix** - significance for each pair independently.
 
 ### Observed vs expected table
 
@@ -143,7 +161,7 @@ Row-level detail for the overall test:
 | `pearson_residual` | `(observed − expected) / sqrt(expected)`. Removes the effect of differing sample sizes. Values beyond ±2 are notable; beyond ±5 are strongly anomalous. |
 
 **What to look for:** Large residuals in specific bins point to where a source
-deviates from the group pattern — for example, a video that spends unusually
+deviates from the group pattern - for example, a video that spends unusually
 little time in low-anger bins.
 
 ---
@@ -154,10 +172,10 @@ Spearman rank correlations between every pair of video sources, computed on the
 histogram bin counts (not raw frame values). One block per metric, with three
 pairwise matrices:
 
-- **Spearman rho matrix** — rank correlation coefficient (−1 to 1). Values near
+- **Spearman rho matrix** - rank correlation coefficient (−1 to 1). Values near
   1 mean the two sources have similarly shaped distributions.
-- **p-value matrix** — significance of each rho via Student's t-distribution.
-- **n matrix** — number of bins used for that pair (usually equal to the total
+- **p-value matrix** - significance of each rho via Student's t-distribution.
+- **n matrix** - number of bins used for that pair (usually equal to the total
   bin count).
 
 **Chi-squared vs Spearman:** Chi-squared tests whether distributions differ.
@@ -191,7 +209,7 @@ treat its distribution statistics with caution.
 
 **Structural columns** (Row, Timestamp, EventSource, SampleNumber, Duration)
 appear here but are excluded from histograms and statistical tests. Their
-statistics are not analytically meaningful — they are iMotions bookkeeping
+statistics are not analytically meaningful - they are iMotions bookkeeping
 fields.
 
 ---

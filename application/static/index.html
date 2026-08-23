@@ -18,11 +18,11 @@
         </button>
         <div class="mode-home-head">
           <img
-            class="trinity-main-logo"
-            src="/static/trinity-main-logo.jpg"
-            alt="Trinity College Dublin, the University of Dublin"
-            width="1713"
-            height="591"
+            class="trinity-shield"
+            src="/static/trinity-shield.png"
+            alt="Trinity College Dublin crest"
+            width="512"
+            height="512"
           >
           <div>
             <h1>Multimodal Emotion Analysis Tool</h1>
@@ -35,19 +35,22 @@
             <span class="tile-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
             </span>
-            <strong>Procurement — source collection and preprocessing</strong>
+            <strong class="stage-title">Procurement</strong>
+            <small class="stage-subtitle">Source collection and preprocessing</small>
           </button>
           <button id="openProcessingButton" class="mode-tile" type="button">
             <span class="tile-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path><path d="M8 5v4M14 10v4M11 15v4"></path></svg>
             </span>
-            <strong>Processing — generate or import modality results</strong>
+            <strong class="stage-title">Processing</strong>
+            <small class="stage-subtitle">Generate or import modality results</small>
           </button>
           <button id="openAnalysisButton" class="mode-tile" type="button">
             <span class="tile-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M4 19V5"></path><path d="M8 17v-6"></path><path d="M13 17V7"></path><path d="M18 17v-3"></path><path d="M3 19h18"></path></svg>
             </span>
-            <strong>Analysis — postprocessing and reporting</strong>
+            <strong class="stage-title">Analysis</strong>
+            <small class="stage-subtitle">Postprocessing and reporting</small>
           </button>
         </div>
         <section class="workflow-planner" aria-labelledby="workflowPlannerTitle">
@@ -66,15 +69,15 @@
             <div class="workflow-stage-grid">
               <label class="check-option compact">
                 <input id="workflowProcurementToggle" type="checkbox" checked>
-                <span><strong>Procurement — source collection and preprocessing</strong></span>
+                <span><strong class="stage-title">Procurement</strong><small class="stage-subtitle">Source collection and preprocessing</small></span>
               </label>
               <label class="check-option compact">
                 <input id="workflowProcessingToggle" type="checkbox" checked>
-                <span><strong>Processing — generate or import modality results</strong></span>
+                <span><strong class="stage-title">Processing</strong><small class="stage-subtitle">Generate or import modality results</small></span>
               </label>
               <label class="check-option compact">
                 <input id="workflowAnalysisToggle" type="checkbox" checked>
-                <span><strong>Analysis — postprocessing and reporting</strong></span>
+                <span><strong class="stage-title">Analysis</strong><small class="stage-subtitle">Postprocessing and reporting</small></span>
               </label>
             </div>
             <div class="workflow-process-grid">
@@ -393,8 +396,8 @@
         <section id="faceInputScreen" class="screen" data-screen="face-input">
           <div class="screen-head">
             <div>
-              <h2>Face Processing — Py-Feat / Native Face</h2>
-              <p>Run the native Py-Feat detector over one video, a folder tree, or selected catalog sources.</p>
+              <h2>Face Processing</h2>
+              <p class="stage-subtitle">Run Py-Feat or import native Face outputs. Process one video, a folder tree, or selected catalog sources.</p>
             </div>
             <button id="backFromFaceButton" type="button" class="secondary-button">Back to processing</button>
           </div>
@@ -554,51 +557,33 @@
                 </div>
               </div>
               <div class="analysis-modality-grid">
-                <article class="analysis-modality-card" data-analysis-modality="native_face">
+                <article class="analysis-modality-card" data-analysis-modality="video">
                   <div class="analysis-modality-head">
                     <label class="check-option compact">
-                      <input id="analysisNativeFaceEnabled" type="checkbox">
-                      <span><strong>Py-Feat / Native Face</strong><small>Native primary-face emotions, valence, and arousal.</small></span>
-                    </label>
-                  </div>
-                  <div class="analysis-source-method" role="radiogroup" aria-label="Native Face source method">
-                    <label><input id="analysisNativeFaceRunMethod" type="radio" name="analysisNativeFaceSourceMethod" value="run" checked><span>Run analysis</span></label>
-                    <label><input id="analysisNativeFaceImportMethod" type="radio" name="analysisNativeFaceSourceMethod" value="import"><span>Use existing results</span></label>
-                  </div>
-                  <label for="analysisNativeFaceSourcePath">Py-Feat / Native Face source folder</label>
-                  <div class="path-row">
-                    <input id="analysisNativeFaceSourcePath" type="text" placeholder="Native Face processing or Analysis reports">
-                    <button id="browseAnalysisNativeFaceSource" type="button" class="secondary-button">Browse</button>
-                  </div>
-                  <small class="analysis-source-help" data-analysis-help="native_face">Choose completed native Face processing outputs.</small>
-                </article>
-
-                <article class="analysis-modality-card" data-analysis-modality="imotions">
-                  <div class="analysis-modality-head">
-                    <label class="check-option compact">
-                      <input id="analysisImotionsEnabled" type="checkbox" checked>
+                      <input id="analysisVideoEnabled" type="checkbox">
                       <span>
-                        <strong>Video / iMotions</strong>
-                        <small>Emotions, action units, landmarks, and movement.</small>
+                        <strong>Video</strong>
+                        <small>Canonical facial measures from a detected supported provider.</small>
                       </span>
                     </label>
                   </div>
-                  <div class="analysis-source-method" role="radiogroup" aria-label="Video and iMotions source method">
+                  <div class="analysis-source-method" role="radiogroup" aria-label="Video source method">
                     <label>
-                      <input id="analysisImotionsRunMethod" type="radio" name="analysisImotionsSourceMethod" value="run" checked>
+                      <input id="analysisVideoRunMethod" type="radio" name="analysisVideoSourceMethod" value="run">
                       <span>Run analysis</span>
                     </label>
                     <label>
-                      <input id="analysisImotionsImportMethod" type="radio" name="analysisImotionsSourceMethod" value="import">
+                      <input id="analysisVideoImportMethod" type="radio" name="analysisVideoSourceMethod" value="import" checked>
                       <span>Use existing results</span>
                     </label>
                   </div>
-                  <label for="analysisImotionsSourcePath">Video / iMotions source folder</label>
+                  <label for="analysisVideoSourcePath">Video source folder</label>
                   <div class="path-row">
-                    <input id="analysisImotionsSourcePath" type="text" placeholder="iMotions exports or existing video reports">
-                    <button id="browseAnalysisImotionsSource" type="button" class="secondary-button">Browse</button>
+                    <input id="analysisVideoSourcePath" type="text" placeholder="iMotions, Py-Feat, or existing canonical Video results">
+                    <button id="browseAnalysisVideoSource" type="button" class="secondary-button">Browse</button>
                   </div>
-                  <small class="analysis-source-help" data-analysis-help="imotions">Choose the folder containing iMotions CSV exports.</small>
+                  <small class="analysis-source-help" data-analysis-help="video">Choose one supported Video provider source.</small>
+                  <p id="analysisVideoProviderStatus" class="analysis-provider-status hidden" role="status" aria-live="polite"></p>
                 </article>
 
                 <article class="analysis-modality-card" data-analysis-modality="audio">

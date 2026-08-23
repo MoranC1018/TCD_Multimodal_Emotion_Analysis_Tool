@@ -481,13 +481,14 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn('audioSourcePathInput.addEventListener("input", clearAudioCatalogSelection)', self.javascript)
 
     def test_stage_tiles_use_research_workflow_wording(self) -> None:
-        for expected in (
-            "Procurement — source collection and preprocessing",
-            "Processing — generate or import modality results",
-            "Analysis — postprocessing and reporting",
+        for title, subtitle in (
+            ("Procurement", "Source collection and preprocessing"),
+            ("Processing", "Generate or import modality results"),
+            ("Analysis", "Postprocessing and reporting"),
         ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, self.html)
+            with self.subTest(title=title):
+                self.assertIn(f'<strong class="stage-title">{title}</strong>', self.html)
+                self.assertIn(f'<small class="stage-subtitle">{subtitle}</small>', self.html)
 
     def test_readme_does_not_reference_removed_real_data_captures(self) -> None:
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
@@ -558,11 +559,19 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn('api("/api/validate-path"', self.javascript)
         self.assertIn("runMatchesUi", self.javascript)
 
-    def test_analysis_has_two_runnable_modalities_and_import_only_text(self) -> None:
+    def test_analysis_has_exactly_video_audio_and_text_cards(self) -> None:
+        self.assertEqual(self.html.count('class="analysis-modality-card"'), 3)
+        self.assertEqual(
+            self.html.count('data-analysis-modality="video"'),
+            1,
+        )
+        self.assertEqual(self.html.count('data-analysis-modality="audio"'), 1)
+        self.assertEqual(self.html.count('data-analysis-modality="text"'), 1)
         for element_id in (
-            "analysisImotionsEnabled",
-            "analysisImotionsSourcePath",
-            "browseAnalysisImotionsSource",
+            "analysisVideoEnabled",
+            "analysisVideoSourcePath",
+            "browseAnalysisVideoSource",
+            "analysisVideoProviderStatus",
             "analysisAudioEnabled",
             "analysisAudioSourcePath",
             "browseAnalysisAudioSource",
@@ -577,9 +586,13 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertNotIn('id="analysisTextRunMethod"', self.html)
         self.assertIn("Import completed transcript construct results.", self.html)
         self.assertNotIn('name="analysisMode"', self.html)
+        self.assertNotIn('data-analysis-modality="imotions"', self.html.lower())
+        self.assertNotIn('data-analysis-modality="native_face"', self.html.lower())
+        self.assertNotIn('id="analysisImotions', self.html)
+        self.assertNotIn('id="analysisNativeFace', self.html)
 
     def test_analysis_cards_have_independent_source_methods(self) -> None:
-        for modality in ("Imotions", "Audio"):
+        for modality in ("Video", "Audio"):
             with self.subTest(modality=modality):
                 self.assertIn(f'name="analysis{modality}SourceMethod"', self.html)
                 self.assertIn(f'id="analysis{modality}RunMethod"', self.html)
@@ -663,7 +676,8 @@ class ReleaseUiContractTests(unittest.TestCase):
 
     def test_analysis_guided_hydration_keeps_modalities_independent(self) -> None:
         self.assertIn("hydrateAnalysisModalitiesFromImports", self.javascript)
-        self.assertIn("hydrateAnalysisModality(analysisImotionsControls", self.javascript)
+        self.assertIn("analysisVideoControls", self.javascript)
+        self.assertNotIn("analysisNativeFaceControls", self.javascript)
         self.assertIn("hydrateAnalysisModality(analysisAudioControls", self.javascript)
         self.assertIn("hydrateAnalysisModality(analysisTextControls", self.javascript)
         self.assertIn("resetAnalysisForNewWorkflow", self.javascript)
@@ -681,9 +695,15 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn("hasCompleteAnalysisModality", self.javascript)
         self.assertIn("analysisProfileIssues", self.javascript)
         self.assertIn("runAnalysisButton.disabled", self.javascript)
-        self.assertIn("Enable Video / iMotions, Audio, or Text.", self.javascript)
+        self.assertIn("Enable Video, Audio, or Text.", self.javascript)
+        self.assertNotIn("Enable Video / iMotions, Audio, or Text.", self.javascript)
+        self.assertIn(
+            'const labels = { video: "Video", audio: "Audio", text: "Text" };',
+            self.javascript,
+        )
+        self.assertNotIn('const labels = { imotions:', self.javascript)
         self.assertIn("String(analysisDefaultReferenceInput.value).trim()", self.javascript)
-        self.assertIn('analysisModalityPayload("text"', self.javascript)
+        self.assertIn("buildCanonicalAnalysisModalities(state.analysis)", self.javascript)
 
     def test_analysis_behavior_contract_executes_production_logic(self) -> None:
         """Run the logic harness through the shared portable Node resolver."""
@@ -785,10 +805,10 @@ class ReleaseUiContractTests(unittest.TestCase):
             r"analysisOutputRootInput\.value = payload\.defaultAnalysisOutputRoot;\s+updateAnalysisForm\(\);",
         )
 
-    def test_analysis_modality_grid_responds_four_two_one(self) -> None:
+    def test_analysis_modality_grid_responds_three_two_one(self) -> None:
         self.assertRegex(
             self.styles,
-            r"\.analysis-modality-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\);",
+            r"\.analysis-modality-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);",
         )
         self.assertRegex(
             self.styles,
@@ -876,7 +896,7 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertNotIn("Multimodal Emotion Analysis Pipeline", self.html)
         self.assertNotIn("MultimodalEmotionAnalysisPipeline", self.javascript)
 
-    def test_authorized_trinity_branding_uses_the_official_assets(self) -> None:
+    def test_authorized_trinity_branding_uses_the_compact_transparent_shield(self) -> None:
         expected_sha256 = {
             "trinity-main-logo.jpg": "640730cdb5df84408350754c71cc9176b3a3afebc7ea9719ae6fddff2eb3cf75",
             "trinity-shield.png": "c7f9c4e88db12c9dcc36a05fcd6e015d19590758a5ddbd4f2be2a07f3794a23e",
@@ -888,14 +908,55 @@ class ReleaseUiContractTests(unittest.TestCase):
                 self.assertTrue(asset_path.is_file())
                 self.assertEqual(hashlib.sha256(asset_path.read_bytes()).hexdigest(), expected_digest)
         self.assertIn('rel="icon" type="image/png" href="/static/trinity-shield.png"', self.html)
-        self.assertIn('class="trinity-main-logo"', self.html)
-        self.assertIn('src="/static/trinity-main-logo.jpg"', self.html)
-        self.assertIn('alt="Trinity College Dublin, the University of Dublin"', self.html)
+        self.assertIn('class="trinity-shield"', self.html)
+        self.assertIn('src="/static/trinity-shield.png"', self.html)
+        self.assertIn('alt="Trinity College Dublin crest"', self.html)
+        self.assertNotIn('class="trinity-main-logo"', self.html)
+        self.assertNotIn('src="/static/trinity-main-logo.jpg"', self.html)
+        self.assertRegex(
+            self.styles,
+            r"\.mode-home-head\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;",
+        )
+        self.assertRegex(
+            self.styles,
+            r"\.trinity-shield\s*\{[^}]*width:\s*[0-9]+px;[^}]*height:\s*auto;",
+        )
         self.assertIn(
             "School of Computer Science, Trinity College Dublin, the University of Dublin",
             self.html,
         )
         self.assertIn('APP_ICON = STATIC_ROOT / "trinity-shield.ico"', self.launcher)
+
+    def test_stage_and_face_headings_keep_explanations_in_semantic_subtitles(self) -> None:
+        expected_stages = {
+            "Procurement": "Source collection and preprocessing",
+            "Processing": "Generate or import modality results",
+            "Analysis": "Postprocessing and reporting",
+        }
+        for title, subtitle in expected_stages.items():
+            with self.subTest(stage=title):
+                self.assertGreaterEqual(
+                    self.html.count(f'<strong class="stage-title">{title}</strong>'),
+                    2,
+                )
+                self.assertGreaterEqual(
+                    self.html.count(f'<small class="stage-subtitle">{subtitle}</small>'),
+                    2,
+                )
+        self.assertIn('<h2>Face Processing</h2>', self.html)
+        self.assertIn(
+            '<p class="stage-subtitle">Run Py-Feat or import native Face outputs.',
+            self.html,
+        )
+        em_dash = chr(0x2014)
+        for combined_title in (
+            f"Procurement {em_dash} source collection and preprocessing",
+            f"Processing {em_dash} generate or import modality results",
+            f"Analysis {em_dash} postprocessing and reporting",
+            f"Face Processing {em_dash} Py-Feat / Native Face",
+        ):
+            with self.subTest(combined_title=combined_title):
+                self.assertNotIn(combined_title, self.html)
 
     def test_native_shell_keeps_native_browse_and_fullscreen_controls(self) -> None:
         self.assertIn("window.pywebview?.api?.browse_for_path", self.javascript)

@@ -14,6 +14,44 @@ These reports contain measurements and statistical summaries, not diagnoses or
 direct observations of a person's internal state. Interpretation and any
 resulting action remain the researcher's responsibility.
 
+## Stable Workflow And Expert Entry Points
+
+Use the provider-neutral workflow CLI for coordinated Analysis runs. A Video
+source may be an iMotions/AFFDEX export or a verified Py-Feat native Face run;
+the workflow detects which provider is present before creating, archiving, or
+publishing anything in the output directory:
+
+```bash
+python -m analysis.workflow \
+  --output-root OUTPUT_FOLDER \
+  --video-source VIDEO_FOLDER --video-method run \
+  --audio-source AUDIO_FOLDER --audio-method import
+```
+
+Use `--video-method run` for provider source data that still needs statistical
+Analysis and `--video-method import` for an existing Analysis report tree.
+`--imotions-source` / `--imotions-method` and `--native_face-source` /
+`--native_face-method` remain deprecated compatibility aliases for one release.
+They normalize to the same single Video request and print a deprecation warning.
+Do not combine canonical flags with an alias or supply both provider aliases.
+
+The documented command-line layers are:
+
+```bash
+python -m processing.face_analysis --help
+python -m processing.text_analysis --help
+python processing/audio_analysis/run_audio_analysis.py --help
+python -m analysis.imotions --help
+python -m analysis.native_face --help
+python -m analysis.audio --help
+python -m analysis.workflow --help
+```
+
+The three `analysis.<provider>` commands remain available as lower-level expert
+tools. `analysis.workflow` is the stable coordinated interface and exposes only
+the modality names `video`, `audio`, and `text` in its normalized request and
+manifest.
+
 For the calculation details behind each generated file, including
 chi-squared expected counts, the pairwise df matrix, Spearman matrices,
 descriptive statistics, and logscale histograms, see
@@ -188,7 +226,7 @@ explicitly in **Customize output** before loading source metadata.
 `text.py` has two subcommands: `split` (split a combined export by speaker)
 and `analyse` (run histogram and stats reports on per-speaker CSVs).
 
-### Step 1 — Split a combined export by speaker
+### Step 1 - Split a combined export by speaker
 
 RockSteady typically produces one combined CSV for all speeches. Split it into
 one file per speaker using the `rocksteady_input/` folder as a reference:
@@ -205,7 +243,7 @@ the speech `.txt` files used as RockSteady input. The script matches rows by
 title stem and writes one `<Speaker>.csv` per speaker. Unmatched rows go to
 `unmatched.csv`.
 
-### Step 2 — Analyse per-speaker CSVs
+### Step 2 - Analyse per-speaker CSVs
 
 ```bash
 python -m analysis.text analyse analysis/text_output/MY_RUN

@@ -73,7 +73,7 @@ analysis-facing display label.
 
 Selected local media is streamed once into a temporary snapshot. The SHA-256
 and byte count recorded in the manifest and per-source context describe that
-snapshot—the bytes actually supplied to Procurement—not a later reopening of a
+snapshot-the bytes actually supplied to Procurement-not a later reopening of a
 mutable original path. Clean-speaker processing revalidates that snapshot's
 digest and byte count immediately before use. Its successful catalog result is
 atomically copied from the private reusable cache to `stitched_imotions.mp4`

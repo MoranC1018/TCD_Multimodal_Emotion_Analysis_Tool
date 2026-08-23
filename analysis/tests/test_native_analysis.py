@@ -208,6 +208,41 @@ def test_native_face_reader_filters_primary_rows_scales_values_and_names_provide
     assert {export.info[name].provided_by for name in NATIVE_FACE_METRICS} == {"Py-Feat / Native Face"}
 
 
+def test_native_face_emotion_report_keeps_arousal_as_arousal(tmp_path: Path) -> None:
+    _write_source_sidecars(tmp_path)
+    _write_face_video(tmp_path)
+    _write_face_run_manifest(tmp_path)
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    result = analyse_native_face_folder(
+        tmp_path,
+        output_root=tmp_path.parent / f"{tmp_path.name}-analysis",
+        write_graphs=False,
+    )
+
+    combined = next(
+        path
+        for path in result.domain_output_dirs["emotion"].rglob("descriptive_statistics.csv")
+        if path.parent.parent.name == "combined"
+    )
+    rows = list(csv.reader(combined.open("r", encoding="utf-8-sig", newline="")))
+    section_names = tuple(row[0] for row in rows if len(row) == 1 and row[0])
+    assert "Arousal" in section_names
+    assert "Engagement" not in section_names
+    arousal_index = next(index for index, row in enumerate(rows) if row == ["Arousal"])
+    arousal_mean = next(row for row in rows[arousal_index + 1 :] if row and row[0] == "mean")
+    assert arousal_mean[1:] == ["75"]
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    } == before
+
+
 def test_native_face_catalog_evidence_requires_the_root_run_manifest(tmp_path: Path) -> None:
     _write_source_sidecars(tmp_path)
     _write_face_video(tmp_path)

@@ -435,14 +435,14 @@ def transcribe_file(
     )
 
     if task == "bilingual":
-        print(f"  Pass 1/2 — transcribing original: {video_path.name} ...")
+        print(f"  Pass 1/2 - transcribing original: {video_path.name} ...")
         result_fr = model.transcribe(
             str(video_path),
             **whisper_decode_options(
                 device=device, requested_language=language, task="transcribe"
             ),
         )
-        print(f"  Pass 2/2 — translating to English: {video_path.name} ...")
+        print(f"  Pass 2/2 - translating to English: {video_path.name} ...")
         result_en = model.transcribe(
             str(video_path),
             **whisper_decode_options(
@@ -717,7 +717,7 @@ def transcribe_bilingual_to_paths(
     else:
         if model is None:
             raise RuntimeError("Whisper model is required to generate the missing original pass.")
-        print(f"  Pass 1/2 — transcribing original: {video_path.name} ...")
+        print(f"  Pass 1/2 - transcribing original: {video_path.name} ...")
         raw_original = model.transcribe(
             str(video_path),
             **whisper_decode_options(
@@ -752,7 +752,7 @@ def transcribe_bilingual_to_paths(
     else:
         if model is None:
             raise RuntimeError("Whisper model is required to generate the missing English pass.")
-        print(f"  Pass 2/2 — translating to English: {video_path.name} ...")
+        print(f"  Pass 2/2 - translating to English: {video_path.name} ...")
         raw_english = model.transcribe(
             str(video_path),
             **whisper_decode_options(

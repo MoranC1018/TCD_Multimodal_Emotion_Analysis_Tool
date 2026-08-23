@@ -2,12 +2,12 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const path = require("path");
 const vm = require("vm");
 
-const sourcePath = process.argv[2] || process.argv[1];
-if (!sourcePath) {
-  throw new Error("Pass the production app.js path to this harness.");
-}
+const sourcePath = process.argv[2]
+  || (process.argv[1]?.endsWith("app.js") ? process.argv[1] : null)
+  || path.join(__dirname, "..", "static", "app.js");
 
 const source = fs.readFileSync(sourcePath, "utf8");
 const startMarker = "// ANALYSIS_UI_LOGIC_START";
@@ -20,6 +20,10 @@ const logic = source.slice(start + startMarker.length, end);
 const context = { console };
 vm.createContext(context);
 vm.runInContext(`${logic}\nthis.analysisTestApi = {
+  createCanonicalAnalysisState: typeof createCanonicalAnalysisState === "function" ? createCanonicalAnalysisState : null,
+  buildCanonicalAnalysisModalities: typeof buildCanonicalAnalysisModalities === "function" ? buildCanonicalAnalysisModalities : null,
+  applyValidatedVideoStatus: typeof applyValidatedVideoStatus === "function" ? applyValidatedVideoStatus : null,
+  videoProviderStatusMessage: typeof videoProviderStatusMessage === "function" ? videoProviderStatusMessage : null,
   analysisSpeakerGroupIssues,
   analysisRunGateReasons,
   resolveAnalysisHydration,
@@ -39,6 +43,10 @@ vm.runInContext(`${logic}\nthis.analysisTestApi = {
 };`, context);
 
 const {
+  createCanonicalAnalysisState,
+  buildCanonicalAnalysisModalities,
+  applyValidatedVideoStatus,
+  videoProviderStatusMessage,
   analysisSpeakerGroupIssues,
   analysisRunGateReasons,
   resolveAnalysisHydration,
@@ -56,6 +64,40 @@ const {
   buildAnalysisProfilePayload,
   resolveAnalysisProfilePreview,
 } = context.analysisTestApi;
+
+assert.strictEqual(typeof createCanonicalAnalysisState, "function", "Canonical Analysis state factory is missing.");
+assert.strictEqual(typeof buildCanonicalAnalysisModalities, "function", "Canonical Analysis payload builder is missing.");
+assert.strictEqual(typeof applyValidatedVideoStatus, "function", "Validated Video provider reducer is missing.");
+assert.strictEqual(typeof videoProviderStatusMessage, "function", "Video provider status formatter is missing.");
+
+const canonicalAnalysis = createCanonicalAnalysisState();
+assert.deepStrictEqual(JSON.parse(JSON.stringify(canonicalAnalysis)), {
+  video: { enabled: false, method: "import", source: "", provider: null },
+  audio: { enabled: false, method: "run", source: "" },
+  text: { enabled: false, method: "import", source: "" },
+});
+canonicalAnalysis.video = {
+  enabled: true,
+  method: "run",
+  source: "C:\\video-results",
+  provider: "imotions_affdex",
+};
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(buildCanonicalAnalysisModalities(canonicalAnalysis))),
+  [{ name: "video", sourceMethod: "run", sourcePath: "C:\\video-results" }],
+  "The browser payload must expose one canonical Video modality without provider aliases.",
+);
+const validatedPyFeat = applyValidatedVideoStatus(canonicalAnalysis.video, {
+  provider: "pyfeat_native_face",
+  sourceMethod: "run",
+  sourcePath: "C:\\validated\\face-output",
+  evidence: ["Accepted Py-Feat summary."],
+  warnings: [],
+});
+assert.strictEqual(validatedPyFeat.source, "C:\\video-results", "Backend provenance must not rewrite the selected source.");
+assert.strictEqual(validatedPyFeat.provider, "pyfeat_native_face");
+assert.match(videoProviderStatusMessage({ provider: "imotions_affdex", evidence: [], warnings: [] }), /iMotions AFFDEX/);
+assert.match(videoProviderStatusMessage({ provider: "pyfeat_native_face", evidence: [], warnings: [] }), /Py-Feat/);
 
 const profileContext = {
   sourceManifest: "C:\\run\\source_manifest.json",
@@ -286,7 +328,7 @@ assert.strictEqual(Object.prototype.hasOwnProperty.call(request, "text"), false)
 const mixedRequest = buildAnalysisWorkflowRequest({
   modalities: [
     ...importModality,
-    { name: "imotions", sourceMethod: "run", sourcePath: "C:\\imotions" },
+    { name: "video", sourceMethod: "run", sourcePath: "C:\\video" },
     { name: "text", sourceMethod: "import", sourcePath: "C:\\text" },
   ],
   outputRoot: "C:\\output",

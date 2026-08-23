@@ -17,6 +17,7 @@ from docx import Document
 from analysis.combined_summary import AUDIO_METRICS, AUDIO_REQUIRED_METRICS, VIDEO_METRICS
 from analysis.profile import AnalysisProfile, ManualGroup, ProfileMember
 from application import backend
+from processing.face_analysis.outputs import AU_NAMES, artifact_metadata
 
 
 class ProcurementUiBackendTests(unittest.TestCase):
@@ -321,6 +322,60 @@ class ProcurementUiBackendTests(unittest.TestCase):
             )
             self.assertEqual(self._tree_hash(root), before)
 
+    def test_analysis_speaker_discovery_accepts_provider_tagged_pyfeat_reports(self) -> None:
+        from analysis.tests.test_video import _write_pyfeat_analysis_reports
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            reports = _write_pyfeat_analysis_reports(
+                root / "pyfeat-analysis-reports",
+                (
+                    ("Speaker A", "source-0001", 0.2, 0.75),
+                    ("Speaker B", "source-0002", 0.6, -0.25),
+                ),
+                titles=("Interview 1", "Interview 1"),
+            )
+            before = self._tree_hash(reports)
+
+            result = backend.discover_analysis_speakers(
+                (backend.AnalysisModalityRunRequest("video", "import", reports),)
+            )
+
+            self.assertEqual(
+                result["speakers"],
+                [
+                    {"key": "speakera", "name": "Speaker A", "availableIn": ["video"]},
+                    {"key": "speakerb", "name": "Speaker B", "availableIn": ["video"]},
+                ],
+            )
+            self.assertEqual(result["warnings"], [])
+            self.assertEqual(self._tree_hash(reports), before)
+
+    def test_analysis_speaker_discovery_rejects_mixed_pyfeat_formats_without_writing(self) -> None:
+        from analysis.native_face import analyse_native_face_folder
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            mixed = root / "mixed-pyfeat-import"
+            _write_verified_pyfeat_run(mixed)
+            staged_reports = root / "mixed-pyfeat-reports-stage"
+            analyse_native_face_folder(mixed, output_root=staged_reports, write_graphs=False)
+            for item in staged_reports.iterdir():
+                item.rename(mixed / item.name)
+            staged_reports.rmdir()
+            before = self._tree_hash(mixed)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "both raw artifacts and provider-tagged Analysis reports.*exactly one format root",
+            ):
+                backend.discover_analysis_speakers(
+                    (backend.AnalysisModalityRunRequest("video", "import", mixed),)
+                )
+
+            self.assertEqual(self._tree_hash(mixed), before)
+
     def test_analysis_speaker_discovery_keeps_arbitrary_imported_speakers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             imported = Path(temp_dir) / "imported"
@@ -361,7 +416,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(result["speakers"][0]["key"], "speakera")
         self.assertEqual(result["warnings"], [])
 
-    def test_analysis_speaker_discovery_unions_fresh_imotions_and_audio_in_canonical_order(self) -> None:
+    def test_analysis_speaker_discovery_unions_fresh_video_and_audio_in_canonical_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             imotions = root / "imotions"
@@ -374,7 +429,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
             result = backend.discover_analysis_speakers(
                 (
                     backend.AnalysisModalityRunRequest("audio", "run", audio),
-                    backend.AnalysisModalityRunRequest("imotions", "run", imotions),
+                    backend.AnalysisModalityRunRequest("video", "run", imotions),
                 )
             )
             self.assertEqual(self._tree_hash(root), before)
@@ -384,7 +439,7 @@ class ProcurementUiBackendTests(unittest.TestCase):
             {
                 "speakers": [
                     {"key": "speakera", "name": "Speaker A", "availableIn": ["audio"]},
-                    {"key": "speakerb", "name": "Speaker B", "availableIn": ["imotions", "audio"]},
+                    {"key": "speakerb", "name": "Speaker B", "availableIn": ["video", "audio"]},
                 ],
                 "warnings": [],
             },
@@ -518,6 +573,39 @@ class ProcurementUiBackendTests(unittest.TestCase):
                     [1, 0, *(emotion_value for _ in VIDEO_METRICS)],
                 ]
             )
+
+    @staticmethod
+    def _write_pyfeat_video(root: Path) -> None:
+        video = root / "Speaker A" / "source-0001"
+        video.mkdir(parents=True)
+        core = video / "face_core.csv"
+        header = [
+            "media_id", "frame_index", "timestamp_seconds", "face_detected", "face_count",
+            "face_index", "is_primary_face", "FaceRectX", "FaceRectY", "FaceRectWidth",
+            "FaceRectHeight", "FaceScore", *AU_NAMES, "Neutral", "Happy", "Sad",
+            "Surprise", "Fear", "Disgust", "Anger", "valence", "arousal",
+        ]
+        with core.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(header)
+            writer.writerow(
+                ["source-0001", 0, 0, "true", 1, 0, "true", 0, 0, 1, 1, .95]
+                + [0] * len(AU_NAMES)
+                + [.1, .2, .3, .4, .5, .6, .7, -.25, .75]
+            )
+        (video / "video_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "status": "completed",
+                    "media_id": "source-0001",
+                    "source": {"source_id": "source-0001", "speaker_display": "Speaker A"},
+                    "output_contract_version": "1.0",
+                    "outputs": {"core": artifact_metadata(core, "core")},
+                }
+            ),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _write_header_only_imotions_csv(path: Path) -> None:
@@ -1613,40 +1701,47 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertIn("--logscale", command)
 
     def test_build_analysis_workflow_command_serializes_mixed_modalities_and_groups(self) -> None:
-        command = backend.build_analysis_workflow_command(
-            backend.AnalysisWorkflowRunRequest(
-                output_root=Path(r"C:\reports"),
-                modalities=(
-                    backend.AnalysisModalityRunRequest("imotions", "run", Path(r"C:\videos")),
-                    backend.AnalysisModalityRunRequest("audio", "import", Path(r"C:\audio-reports")),
-                    backend.AnalysisModalityRunRequest("text", "import", Path(r"C:\text-results")),
-                ),
-                speaker_groups=(
-                    backend.AnalysisSpeakerGroupRunRequest(
-                        group_id="group-1",
-                        name="Group 1",
-                        speaker_ids=("speaker_b", "speaker_a"),
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_source = Path(temp_dir) / "video"
+            self._write_imotions_csv(video_source / "Speaker B" / "sample.csv")
+            before = self._tree_hash(video_source)
+            command = backend.build_analysis_workflow_command(
+                backend.AnalysisWorkflowRunRequest(
+                    output_root=Path(r"C:\reports"),
+                    modalities=(
+                        backend.AnalysisModalityRunRequest("video", "run", video_source),
+                        backend.AnalysisModalityRunRequest("audio", "import", Path(r"C:\audio-reports")),
+                        backend.AnalysisModalityRunRequest("text", "import", Path(r"C:\text-results")),
                     ),
+                    speaker_groups=(
+                        backend.AnalysisSpeakerGroupRunRequest(
+                            group_id="group-1",
+                            name="Group 1",
+                            speaker_ids=("speaker_b", "speaker_a"),
+                        ),
+                    ),
+                    default_reference=0.0,
+                    reference_overrides={"zeta": 2.0, "alpha": 1.0},
+                    include_construct_comparison=False,
+                    include_probability_sheets=False,
+                    confidence_level=0.90,
+                    headline_policy="equal",
+                    write_graphs=False,
+                    include_logscale=True,
+                    include_landmarks=True,
+                    include_timing=True,
+                    exclude_geometry=True,
                 ),
-                default_reference=0.0,
-                reference_overrides={"zeta": 2.0, "alpha": 1.0},
-                include_construct_comparison=False,
-                include_probability_sheets=False,
-                confidence_level=0.90,
-                headline_policy="equal",
-                write_graphs=False,
-                include_logscale=True,
-                include_landmarks=True,
-                include_timing=True,
-                exclude_geometry=True,
-            ),
-            repo_root=Path(r"C:\repo"),
-            python_executable=Path(r"C:\Python312\python.exe"),
-        )
+                repo_root=Path(r"C:\repo"),
+                python_executable=Path(r"C:\Python312\python.exe"),
+            )
+            after = self._tree_hash(video_source)
 
         self.assertEqual(command[:3], [r"C:\Python312\python.exe", "-m", "analysis.workflow"])
-        self.assertEqual(command[command.index("--imotions-source") + 1], r"C:\videos")
-        self.assertEqual(command[command.index("--imotions-method") + 1], "run")
+        self.assertEqual(command[command.index("--video-source") + 1], str(video_source.resolve()))
+        self.assertEqual(command[command.index("--video-method") + 1], "run")
+        self.assertNotIn("--imotions-source", command)
+        self.assertNotIn("--native_face-source", command)
         self.assertEqual(command[command.index("--audio-source") + 1], r"C:\audio-reports")
         self.assertEqual(command[command.index("--audio-method") + 1], "import")
         self.assertEqual(command[command.index("--text-source") + 1], r"C:\text-results")
@@ -1669,6 +1764,52 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(command[command.index("--confidence-level") + 1], "0.9")
         self.assertEqual(command[command.index("--headline-policy") + 1], "equal")
         self.assertNotIn("--request-file", command)
+        self.assertEqual(after, before)
+
+    def test_build_analysis_workflow_command_rejects_multiple_video_aliases(self) -> None:
+        aliases = (
+            ("video", "imotions"),
+            ("imotions", "native_face"),
+        )
+        for first, second in aliases:
+            with self.subTest(first=first, second=second), self.assertRaisesRegex(
+                ValueError, "exactly one Video source"
+            ):
+                backend.build_analysis_workflow_command(
+                    backend.AnalysisWorkflowRunRequest(
+                        output_root=Path(r"C:\reports"),
+                        modalities=(
+                            backend.AnalysisModalityRunRequest(first, "run", Path(r"C:\one")),
+                            backend.AnalysisModalityRunRequest(second, "import", Path(r"C:\two")),
+                        ),
+                        write_combined_workbook=False,
+                    ),
+                    repo_root=Path(r"C:\repo"),
+                )
+
+    def test_build_analysis_workflow_command_rejects_imotions_options_for_pyfeat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "face-output"
+            self._write_pyfeat_video(source)
+            before = self._tree_hash(source)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"Py-Feat / Native Face.*--include-landmarks.*Disable these iMotions-only options",
+            ):
+                backend.build_analysis_workflow_command(
+                    backend.AnalysisWorkflowRunRequest(
+                        output_root=Path(temp_dir) / "reports",
+                        modalities=(
+                            backend.AnalysisModalityRunRequest("video", "run", source),
+                        ),
+                        write_combined_workbook=False,
+                        include_landmarks=True,
+                    ),
+                    repo_root=Path(r"C:\repo"),
+                )
+
+            self.assertEqual(self._tree_hash(source), before)
 
     def test_build_analysis_workflow_command_rejects_text_and_duplicate_modalities(self) -> None:
         invalid_modalities = (

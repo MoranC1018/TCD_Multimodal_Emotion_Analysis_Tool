@@ -663,10 +663,10 @@ def assess_video(
 
     final_license = api_label
     if raw_license == "youtube" and has_cc_claim:
-        final_license = "Standard YouTube License — description claims CC/public-domain; manual review"
+        final_license = "Standard YouTube License - description claims CC/public-domain; manual review"
         manual_reasons.append("Description/title contains CC or public-domain wording but YouTube API says Standard.")
     if raw_license == "creativeCommon" and has_restrictive:
-        final_license = "Creative Commons Attribution (CC BY) — conflicting restrictive wording; manual review"
+        final_license = "Creative Commons Attribution (CC BY) - conflicting restrictive wording; manual review"
         manual_reasons.append("YouTube API says Creative Commons but description/title contains restrictive wording.")
     if has_ambiguous:
         manual_reasons.append("Description/title contains ambiguous reuse wording such as fair use, royalty-free, or copyright-free.")

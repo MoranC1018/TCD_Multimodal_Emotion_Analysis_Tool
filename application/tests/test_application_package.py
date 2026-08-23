@@ -7,6 +7,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,30 +39,169 @@ class ApplicationPackageTests(unittest.TestCase):
                 self.assertTrue((APPLICATION_ROOT / relative_path).is_file())
 
     def test_primary_launcher_uses_application_module(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="emotion-tool-launcher-") as raw_root:
+        source = (REPOSITORY_ROOT / "Launch_Video_Processing_Stack.bat").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"%~1" -m application.launcher', source)
+        self.assertNotIn("procurement.ui", source)
+
+    def test_primary_launcher_enforces_simulated_python_version_and_webview_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="emotion-tool-simulated-python311-") as raw_root:
             root = Path(raw_root)
             launcher = root / "Launch_Video_Processing_Stack.bat"
             shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
-            command_dir = root / "commands"
-            command_dir.mkdir()
             record = root / "launcher-invocation.txt"
-            (command_dir / "python.cmd").write_text(
-                "@echo off\n"
-                "if /I \"%~1\"==\"-c\" exit /b 0\n"
-                "if /I \"%~1\"==\"-m\" if /I \"%~2\"==\"application.launcher\" (\n"
-                "  >\"%LAUNCHER_TEST_RECORD%\" echo %1 %2\n"
-                "  exit /b 0\n"
-                ")\n"
-                "exit /b 91\n",
+            controlled_application = root / "application"
+            controlled_application.mkdir()
+            (controlled_application / "__init__.py").write_text("", encoding="utf-8")
+            (controlled_application / "launcher.py").write_text(
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "\n"
+                "Path(os.environ['LAUNCHER_TEST_RECORD']).write_text(\n"
+                "    f\"{sys.version_info[:2]}|\"\n"
+                "    f\"{os.environ.get('PYTHON_MANAGER_AUTOMATIC_INSTALL', '<unset>')}|\"\n"
+                "    '-m application.launcher', encoding='utf-8'\n"
+                ")\n",
                 encoding="utf-8",
             )
             environment = dict(os.environ)
             environment["LOCALAPPDATA"] = str(root / "no-local-python")
+            environment["ProgramFiles"] = str(root / "no-program-files")
             environment["PATH"] = os.pathsep.join(
-                (str(command_dir), str(Path(os.environ["SystemRoot"]) / "System32"))
+                (str(Path(sys.executable).parent), str(Path(os.environ["SystemRoot"]) / "System32"))
             )
             environment["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+            environment["PYTHONPATH"] = str(root)
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["LAUNCHER_TEST_RECORD"] = str(record)
+            environment.pop("PYTHON_MANAGER_AUTOMATIC_INSTALL", None)
+
+            cases = (
+                ((3, 10), True, False),
+                ((3, 11), True, True),
+                ((3, 13), True, True),
+                ((3, 12), False, False),
+            )
+            for (major, minor), has_webview, should_launch in cases:
+                with self.subTest(version=(major, minor), has_webview=has_webview):
+                    record.unlink(missing_ok=True)
+                    (root / "sitecustomize.py").write_text(
+                        "import sys\n"
+                        "\n"
+                        "class ControlledVersionInfo(tuple):\n"
+                        f"    major = {major}\n"
+                        f"    minor = {minor}\n"
+                        "    micro = 9\n"
+                        "    releaselevel = 'final'\n"
+                        "    serial = 0\n"
+                        "\n"
+                        "sys.version_info = ControlledVersionInfo("
+                        f"({major}, {minor}, 9, 'final', 0))\n",
+                        encoding="utf-8",
+                    )
+                    (root / "webview.py").write_text(
+                        "" if has_webview else "raise ModuleNotFoundError('webview blocked by test')\n",
+                        encoding="utf-8",
+                    )
+
+                    simulated_identity = subprocess.run(
+                        [sys.executable, "-c", "import sys; print(sys.version_info[:2])"],
+                        cwd=root,
+                        env=environment,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(
+                        simulated_identity.returncode,
+                        0,
+                        simulated_identity.stdout + simulated_identity.stderr,
+                    )
+                    self.assertEqual(
+                        simulated_identity.stdout.strip(),
+                        f"({major}, {minor})",
+                    )
+
+                    completed = subprocess.run(
+                        [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher)],
+                        cwd=root,
+                        env=environment,
+                        input="\n",
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+
+                    if should_launch:
+                        self.assertEqual(
+                            completed.returncode,
+                            0,
+                            completed.stdout + completed.stderr,
+                        )
+                        self.assertEqual(
+                            record.read_text(encoding="utf-8"),
+                            f"({major}, {minor})|false|-m application.launcher",
+                        )
+                    else:
+                        self.assertNotEqual(completed.returncode, 0)
+                        self.assertFalse(record.exists())
+
+    def test_primary_launcher_prefers_compatible_project_venv(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="emotion-tool-venv-priority-") as raw_root:
+            root = Path(raw_root)
+            launcher = root / "Launch_Video_Processing_Stack.bat"
+            shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
+            venv_python = root / ".venv" / "Scripts" / "python.exe"
+            venv_python.parent.mkdir(parents=True)
+            try:
+                os.link(sys.executable, venv_python)
+            except OSError:
+                shutil.copy2(sys.executable, venv_python)
+
+            record = root / "launcher-invocation.txt"
+            py_record = root / "py-invocation.txt"
+            command_dir = root / "commands"
+            command_dir.mkdir()
+            (command_dir / "py.cmd").write_text(
+                "@echo off\n"
+                f">>\"{py_record}\" echo %*\n"
+                "exit /b 97\n",
+                encoding="utf-8",
+            )
+            (root / "webview.py").write_text("", encoding="utf-8")
+            controlled_application = root / "application"
+            controlled_application.mkdir()
+            (controlled_application / "__init__.py").write_text("", encoding="utf-8")
+            (controlled_application / "launcher.py").write_text(
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['LAUNCHER_TEST_RECORD']).write_text(\n"
+                "    f\"{sys.executable}|\"\n"
+                "    f\"{os.environ.get('PYTHON_MANAGER_AUTOMATIC_INSTALL', '<unset>')}\",\n"
+                "    encoding='utf-8',\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["LOCALAPPDATA"] = str(root / "no-local-python")
+            environment["ProgramFiles"] = str(root / "no-program-files")
+            environment["PATH"] = os.pathsep.join(
+                (
+                    str(command_dir),
+                    str(Path(sys.executable).parent),
+                    str(Path(os.environ["SystemRoot"]) / "System32"),
+                )
+            )
+            environment["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+            environment["PYTHONHOME"] = sys.base_prefix
+            environment["PYTHONPATH"] = str(root)
+            environment["LAUNCHER_TEST_RECORD"] = str(record)
+            environment.pop("PYTHON_MANAGER_AUTOMATIC_INSTALL", None)
 
             completed = subprocess.run(
                 [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher)],
@@ -74,7 +214,84 @@ class ApplicationPackageTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertEqual(record.read_text(encoding="utf-8").strip(), "-m application.launcher")
+            selected, automatic_install = record.read_text(encoding="utf-8").split("|")
+            self.assertEqual(Path(selected).resolve(), venv_python.resolve())
+            self.assertEqual(automatic_install, "false")
+            self.assertFalse(py_record.exists(), "py must not be probed before a compatible .venv")
+
+    def test_primary_launcher_lists_registered_runtimes_without_launching_py(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="emotion-tool-registered-python-") as raw_root:
+            root = Path(raw_root)
+            launcher = root / "Launch_Video_Processing_Stack.bat"
+            shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
+            registered_313 = root / "registered-313" / "python.exe"
+            registered_312 = root / "registered-312" / "python.exe"
+            for target in (registered_313, registered_312):
+                target.parent.mkdir(parents=True)
+                try:
+                    os.link(sys.executable, target)
+                except OSError:
+                    shutil.copy2(sys.executable, target)
+
+            record = root / "launcher-invocation.txt"
+            py_record = root / "py-invocation.txt"
+            command_dir = root / "commands"
+            command_dir.mkdir()
+            (command_dir / "py.cmd").write_text(
+                "@echo off\n"
+                f">>\"{py_record}\" echo %*;%PYTHON_MANAGER_AUTOMATIC_INSTALL%\n"
+                "if /I not \"%~1\"==\"-0p\" exit /b 97\n"
+                f"echo  -3.13-64        {registered_313}\n"
+                f"echo  -3.12-64        {registered_312}\n"
+                "exit /b 0\n",
+                encoding="utf-8",
+            )
+            (root / "webview.py").write_text("", encoding="utf-8")
+            controlled_application = root / "application"
+            controlled_application.mkdir()
+            (controlled_application / "__init__.py").write_text("", encoding="utf-8")
+            (controlled_application / "launcher.py").write_text(
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['LAUNCHER_TEST_RECORD']).write_text(\n"
+                "    f\"{sys.executable}|\"\n"
+                "    f\"{os.environ.get('PYTHON_MANAGER_AUTOMATIC_INSTALL', '<unset>')}\",\n"
+                "    encoding='utf-8',\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            environment["LOCALAPPDATA"] = str(root / "no-local-python")
+            environment["ProgramFiles"] = str(root / "no-program-files")
+            environment["PATH"] = os.pathsep.join(
+                (
+                    str(command_dir),
+                    str(Path(sys.executable).parent),
+                    str(Path(os.environ["SystemRoot"]) / "System32"),
+                )
+            )
+            environment["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+            environment["PYTHONHOME"] = sys.base_prefix
+            environment["PYTHONPATH"] = str(root)
+            environment["LAUNCHER_TEST_RECORD"] = str(record)
+            environment.pop("PYTHON_MANAGER_AUTOMATIC_INSTALL", None)
+
+            completed = subprocess.run(
+                [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher)],
+                cwd=root,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            selected, automatic_install = record.read_text(encoding="utf-8").split("|")
+            self.assertEqual(Path(selected).resolve(), registered_312.resolve())
+            self.assertEqual(automatic_install, "false")
+            self.assertEqual(py_record.read_text(encoding="utf-8").strip(), "-0p;false")
 
     def test_application_modules_are_importable(self) -> None:
         for module_name in (

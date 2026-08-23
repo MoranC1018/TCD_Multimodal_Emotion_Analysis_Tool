@@ -4,8 +4,8 @@ The **Multimodal Emotion Analysis Tool** was developed at the School of Computer
 
 ## Development
 
-- Conor Moran — Developer
-- Jiaming Liu — Developer
+- Conor Moran - Developer
+- Jiaming Liu - Developer
 
 ## Academic Direction
 

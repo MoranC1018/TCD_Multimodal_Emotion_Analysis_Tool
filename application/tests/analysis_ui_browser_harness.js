@@ -106,8 +106,8 @@ async function waitFor(predicate, message, timeoutMs = 5000) {
 function speakerPayload(prefix = "Speaker") {
   return {
     speakers: [
-      { key: `${prefix.toLowerCase()}_a`, name: `${prefix} A`, availableIn: ["imotions"] },
-      { key: `${prefix.toLowerCase()}_b`, name: `${prefix} B`, availableIn: ["imotions"] },
+      { key: `${prefix.toLowerCase()}_a`, name: `${prefix} A`, availableIn: ["video"] },
+      { key: `${prefix.toLowerCase()}_b`, name: `${prefix} B`, availableIn: ["video"] },
     ],
     warnings: [],
   };
@@ -163,6 +163,9 @@ async function createTestPage(browser, origin, viewport) {
     holdStateOnNextRun: false,
     stateGate: null,
     stateWaitCount: 0,
+    validatePathError: "",
+    videoStatusWarnings: [],
+    videoProvider: "imotions_affdex",
   };
 
   await page.route(`${origin}/api/**`, async (route) => {
@@ -177,6 +180,9 @@ async function createTestPage(browser, origin, viewport) {
     }
     if (pathname === "/api/validate-path") {
       const body = request.postDataJSON();
+      if (backend.validatePathError) {
+        return responseJson(route, { error: backend.validatePathError }, 400);
+      }
       return responseJson(route, { valid: true, path: body.path });
     }
     if (pathname === "/api/analysis-speakers") {
@@ -203,7 +209,8 @@ async function createTestPage(browser, origin, viewport) {
       return responseJson(route, payload);
     }
     if (pathname === "/api/run-analysis-workflow") {
-      backend.runBodies.push(request.postDataJSON());
+      const body = request.postDataJSON();
+      backend.runBodies.push(body);
       backend.running = true;
       backend.status = "running";
       backend.runId = ++backend.nextRunId;
@@ -212,7 +219,17 @@ async function createTestPage(browser, origin, viewport) {
         backend.holdStateOnNextRun = false;
         backend.stateGate = deferred();
       }
-      return responseJson(route, { runId: backend.runId });
+      const video = body.modalities.find((modality) => modality.name === "video");
+      const videoStatus = video
+        ? {
+          provider: backend.videoProvider,
+          sourceMethod: video.sourceMethod,
+          sourcePath: video.sourcePath,
+          evidence: [backend.videoProvider === "pyfeat_native_face" ? "Accepted Py-Feat summary." : "Accepted iMotions AFFDEX CSV."],
+          warnings: [...backend.videoStatusWarnings],
+        }
+        : null;
+      return responseJson(route, { runId: backend.runId, ...(videoStatus ? { videoStatus } : {}) });
     }
     if (pathname === "/api/processing-catalog") {
       return responseJson(route, {
@@ -259,12 +276,13 @@ async function createTestPage(browser, origin, viewport) {
 async function staleDiscoveryAndGroupAccessibility(browser, origin) {
   const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
   try {
-    await page.fill("#analysisImotionsSourcePath", "C:\\source-a");
+    await page.check("#analysisVideoEnabled");
+    await page.fill("#analysisVideoSourcePath", "C:\\source-a");
     await page.click("#openAnalysisCustomizeButton");
     await waitFor(() => backend.discoveries.length === 1, "First discovery did not start.");
 
     await page.click("#backFromAnalysisCustomizeButton");
-    await page.fill("#analysisImotionsSourcePath", "C:\\source-b");
+    await page.fill("#analysisVideoSourcePath", "C:\\source-b");
     await page.click("#openAnalysisCustomizeButton");
     await waitFor(() => backend.discoveries.length === 2, "Second discovery did not start.");
     backend.discoveries[1].resolve(profileContextPayload("Researcher"));
@@ -301,8 +319,9 @@ async function staleDiscoveryAndGroupAccessibility(browser, origin) {
 async function submissionLockAndPayloads(browser, origin) {
   const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
   try {
-    await page.fill("#analysisImotionsSourcePath", "C:\\imported-reports");
-    await page.check("#analysisImotionsImportMethod");
+    await page.check("#analysisVideoEnabled");
+    await page.fill("#analysisVideoSourcePath", "C:\\imported-reports");
+    await page.check("#analysisVideoImportMethod");
     assert.strictEqual(await page.locator("#analysisGraphsOption").isHidden(), true);
     assert.strictEqual(await page.locator("#analysisLogscaleOption").isHidden(), true);
     await page.uncheck("#analysisWriteCombinedToggle");
@@ -315,7 +334,7 @@ async function submissionLockAndPayloads(browser, origin) {
     await waitFor(() => backend.stateWaitCount > 0, "Run-screen state transition was not held.");
     assert.strictEqual(await page.locator("#analysisInputScreen").getAttribute("class"), "screen active");
     assert.strictEqual(await page.locator("#runAnalysisButton").isDisabled(), true);
-    assert.strictEqual(await page.locator("#analysisImotionsSourcePath").isDisabled(), true);
+    assert.strictEqual(await page.locator("#analysisVideoSourcePath").isDisabled(), true);
     await page.evaluate(() => document.querySelector("#runAnalysisButton").click());
     await page.waitForTimeout(75);
     assert.strictEqual(backend.runBodies.length, 1, "A repeated click submitted a competing run.");
@@ -335,16 +354,16 @@ async function submissionLockAndPayloads(browser, origin) {
     await page.click("#backToAnalysisInputButton");
     await page.waitForSelector("#analysisInputScreen.active");
     assert.strictEqual(await page.locator("#runAnalysisButton").isDisabled(), true);
-    assert.strictEqual(await page.locator("#analysisImotionsSourcePath").isDisabled(), true);
+    assert.strictEqual(await page.locator("#analysisVideoSourcePath").isDisabled(), true);
 
     backend.running = false;
     backend.status = "complete";
     backend.progress = { mode: "analysis-workflow", label: "Complete" };
     await page.evaluate(() => pollState());
-    await page.waitForFunction(() => !document.querySelector("#analysisImotionsSourcePath").disabled);
+    await page.waitForFunction(() => !document.querySelector("#analysisVideoSourcePath").disabled);
     assert.strictEqual(await page.locator("#runAnalysisButton").isEnabled(), true);
 
-    await page.check("#analysisImotionsRunMethod");
+    await page.check("#analysisVideoRunMethod");
     await page.check("#analysisWriteCombinedToggle");
     backend.autoProfileContext = profileContextPayload("Researcher");
     await page.click("#openAnalysisCustomizeButton");
@@ -386,7 +405,8 @@ async function responsiveSmoke(browser, origin) {
     );
     assert.ok(desktopBoxes.every((box) => Math.abs(box.y - desktopBoxes[0].y) < 2));
     backend.autoProfileContext = profileContextPayload("Researcher");
-    await page.fill("#analysisImotionsSourcePath", "C:\\source");
+    await page.check("#analysisVideoEnabled");
+    await page.fill("#analysisVideoSourcePath", "C:\\source");
     await page.click("#openAnalysisCustomizeButton");
     await page.waitForSelector("#analysisCustomizeScreen.active");
     await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
@@ -404,6 +424,82 @@ async function responsiveSmoke(browser, origin) {
     const narrowPath = path.join(screenshotDir, "analysis-customize-narrow.png");
     await page.screenshot({ path: narrowPath, fullPage: true });
     assert.ok(fs.statSync(narrowPath).size > 10000);
+  } finally {
+    await page.close();
+  }
+}
+
+async function providerStatusFollowsBackendValidation(browser, origin) {
+  const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 900 });
+  try {
+    const providerStatus = page.locator("#analysisVideoProviderStatus");
+    assert.strictEqual(await providerStatus.isHidden(), true);
+    assert.strictEqual(await page.locator("#analysisFaceAdvanced").isHidden(), true);
+    for (const selector of [
+      "#analysisLandmarksToggle",
+      "#analysisTimingToggle",
+      "#analysisExcludeGeometryToggle",
+    ]) {
+      assert.strictEqual(await page.locator(selector).isDisabled(), true);
+    }
+
+    await page.check("#analysisVideoEnabled");
+    await page.check("#analysisVideoRunMethod");
+    await page.fill("#analysisVideoSourcePath", "C:\\imotions-run");
+    await page.uncheck("#analysisWriteCombinedToggle");
+    assert.strictEqual(await providerStatus.isHidden(), true, "A path alone must not claim a provider.");
+    await page.click("#runAnalysisButton");
+    await page.waitForSelector("#analysisRunScreen.active");
+    assert.deepStrictEqual(backend.runBodies[0].modalities, [
+      { name: "video", sourceMethod: "run", sourcePath: "C:\\imotions-run" },
+    ]);
+    assert.strictEqual(Object.hasOwn(backend.runBodies[0].modalities[0], "provider"), false);
+
+    backend.running = false;
+    backend.status = "complete";
+    backend.progress = { mode: "analysis-workflow", label: "Complete" };
+    await page.evaluate(() => pollState());
+    await page.click("#backToAnalysisInputButton");
+    await page.waitForSelector("#analysisInputScreen.active");
+    assert.match(await providerStatus.textContent(), /Detected provider: iMotions AFFDEX/);
+    assert.strictEqual(await providerStatus.isVisible(), true);
+    assert.strictEqual(await page.locator("#analysisFaceAdvanced").isVisible(), true);
+    assert.strictEqual(await page.locator("#analysisLandmarksToggle").isEnabled(), true);
+
+    await page.evaluate(async () => {
+      state.pendingFaceOutput = "C:\\imotions-run";
+      await importNativeFaceIntoAnalysis();
+    });
+    assert.strictEqual(await page.locator("#analysisVideoSourcePath").inputValue(), "C:\\imotions-run");
+    assert.strictEqual(
+      await page.evaluate(() => state.analysis.video.provider),
+      null,
+      "A same-source Native Face handoff must clear the previously validated provider.",
+    );
+    assert.strictEqual(await providerStatus.textContent(), "");
+    assert.strictEqual(await providerStatus.isHidden(), true, "Every native handoff still requires backend validation.");
+    assert.strictEqual(await page.locator("#analysisFaceAdvanced").isHidden(), true);
+    for (const selector of [
+      "#analysisLandmarksToggle",
+      "#analysisTimingToggle",
+      "#analysisExcludeGeometryToggle",
+    ]) {
+      assert.strictEqual(await page.locator(selector).isDisabled(), true);
+    }
+    backend.videoProvider = "pyfeat_native_face";
+    await page.click("#runAnalysisButton");
+    await page.waitForSelector("#analysisRunScreen.active");
+
+    backend.running = false;
+    backend.status = "complete";
+    backend.progress = { mode: "analysis-workflow", label: "Complete" };
+    await page.evaluate(() => pollState());
+    await page.click("#backToAnalysisInputButton");
+    await page.waitForSelector("#analysisInputScreen.active");
+    assert.match(await providerStatus.textContent(), /Detected provider: Py-Feat/);
+    assert.strictEqual(await providerStatus.isVisible(), true);
+    assert.strictEqual(await page.locator("#analysisFaceAdvanced").isHidden(), true);
+    assert.strictEqual(await page.locator("#analysisLandmarksToggle").isDisabled(), true);
   } finally {
     await page.close();
   }
@@ -441,8 +537,8 @@ async function nativeProcessingScreens(browser, origin) {
     assert.strictEqual(backend.nativeRunBodies[0].body.catalogSha256, "c".repeat(64));
     assert.strictEqual(await page.locator("#faceRunScreen").getAttribute("class"), "screen active");
     await page.evaluate(() => importNativeFaceIntoAnalysis());
-    assert.strictEqual(await page.locator("#analysisNativeFaceEnabled").isChecked(), true);
-    assert.strictEqual(await page.locator("#analysisNativeFaceSourcePath").inputValue(), "C:\\output\\face");
+    assert.strictEqual(await page.locator("#analysisVideoEnabled").isChecked(), true);
+    assert.strictEqual(await page.locator("#analysisVideoSourcePath").inputValue(), "C:\\output\\face");
 
     await page.evaluate(() => showProcessingHub());
     await page.click("#openTextProcessingButton");
@@ -471,41 +567,83 @@ async function homeBrandingResponsive(browser, origin) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   try {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    const logo = page.locator(".trinity-main-logo");
+    const logo = page.locator(".trinity-shield");
     await logo.waitFor({ state: "visible" });
     await page.waitForFunction(() => {
-      const image = document.querySelector(".trinity-main-logo");
+      const image = document.querySelector(".trinity-shield");
       return image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0;
     });
-    const desktop = await logo.evaluate((image) => {
+    const desktop = await page.evaluate(() => {
+      const image = document.querySelector(".trinity-shield");
+      const title = document.querySelector(".mode-home-head h1");
+      const head = document.querySelector(".mode-home-head");
       const rect = image.getBoundingClientRect();
+      const titleRect = title.getBoundingClientRect();
       return {
         naturalWidth: image.naturalWidth,
         naturalHeight: image.naturalHeight,
         width: rect.width,
         height: rect.height,
         right: rect.right,
+        titleLeft: titleRect.left,
+        headDisplay: getComputedStyle(head).display,
       };
     });
+    assert.strictEqual(await page.locator('img[src="/static/trinity-main-logo.jpg"]').count(), 0);
     assert.deepStrictEqual(
       [desktop.naturalWidth, desktop.naturalHeight],
-      [1713, 591],
-      "The home screen must render the complete official horizontal Trinity logo.",
+      [512, 512],
+      "The home screen must use the existing transparent Trinity shield.",
     );
-    assert.ok(desktop.width >= 500);
-    assert.ok(Math.abs(desktop.width / desktop.height - 1713 / 591) < 0.02);
+    assert.ok(desktop.width >= 56 && desktop.width <= 96);
+    assert.ok(Math.abs(desktop.width / desktop.height - desktop.naturalWidth / desktop.naturalHeight) < 0.02);
+    assert.strictEqual(desktop.headDisplay, "flex");
+    assert.ok(desktop.titleLeft > desktop.right, "The title must sit beside the shield.");
     assert.ok(desktop.right <= 1440);
     assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
 
-    await page.setViewportSize({ width: 390, height: 844 });
-    const narrow = await logo.evaluate((image) => {
+    await page.setViewportSize({ width: 320, height: 844 });
+    const narrow = await page.evaluate(() => {
+      const image = document.querySelector(".trinity-shield");
+      const title = document.querySelector(".mode-home-head h1");
       const rect = image.getBoundingClientRect();
-      return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+      const titleRect = title.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        left: rect.left,
+        right: rect.right,
+        titleLeft: titleRect.left,
+        titleRight: titleRect.right,
+      };
     });
-    assert.ok(narrow.width >= 300);
-    assert.ok(Math.abs(narrow.width / narrow.height - 1713 / 591) < 0.02);
-    assert.ok(narrow.left >= 0 && narrow.right <= 390);
+    assert.ok(narrow.width >= 44 && narrow.width <= 72);
+    assert.ok(Math.abs(narrow.width / narrow.height - desktop.naturalWidth / desktop.naturalHeight) < 0.02);
+    assert.ok(narrow.left >= 0 && narrow.right < narrow.titleLeft && narrow.titleRight <= 320);
     assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+
+    const semanticStages = await page.evaluate(() => ({
+      tileTitles: Array.from(document.querySelectorAll(".mode-tile-grid .stage-title"), (node) => node.textContent.trim()),
+      tileSubtitles: Array.from(document.querySelectorAll(".mode-tile-grid .stage-subtitle"), (node) => node.textContent.trim()),
+      railTitles: Array.from(document.querySelectorAll(".workflow-stage-grid .stage-title"), (node) => node.textContent.trim()),
+      railSubtitles: Array.from(document.querySelectorAll(".workflow-stage-grid .stage-subtitle"), (node) => node.textContent.trim()),
+      faceTitle: document.querySelector("#faceInputScreen .screen-head h2")?.textContent.trim(),
+      faceSubtitle: document.querySelector("#faceInputScreen .screen-head .stage-subtitle")?.textContent.trim(),
+    }));
+    assert.deepStrictEqual(semanticStages.tileTitles, ["Procurement", "Processing", "Analysis"]);
+    assert.deepStrictEqual(semanticStages.railTitles, ["Procurement", "Processing", "Analysis"]);
+    assert.deepStrictEqual(semanticStages.tileSubtitles, [
+      "Source collection and preprocessing",
+      "Generate or import modality results",
+      "Postprocessing and reporting",
+    ]);
+    assert.deepStrictEqual(semanticStages.railSubtitles, semanticStages.tileSubtitles);
+    assert.strictEqual(semanticStages.faceTitle, "Face Processing");
+    assert.ok(semanticStages.faceSubtitle.includes("Py-Feat"));
+    console.log(
+      `home branding 1440px: shield ${desktop.width}x${desktop.height}, title-left ${desktop.titleLeft}; `
+      + `320px: shield ${narrow.width}x${narrow.height}, title ${narrow.titleLeft}-${narrow.titleRight}`,
+    );
   } finally {
     await page.close();
   }
@@ -588,10 +726,129 @@ async function invalidSourceErrorStaysContained(browser, origin) {
   }
 }
 
+async function analysisInvalidSourceAndStatusStayContained(browser, origin) {
+  const invalidSource = `https://invalid.example/${"malformed-source-segment".repeat(100)}`;
+  const longStatusTail = `UNBROKEN_VALIDATION_DETAIL_${"x".repeat(1800)}`;
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 320, height: 844 },
+  ]) {
+    const { page, backend } = await createTestPage(browser, origin, viewport);
+    try {
+      backend.validatePathError = `Video source is invalid: ${invalidSource} ${longStatusTail}`;
+      await page.check("#analysisVideoEnabled");
+      await page.check("#analysisVideoRunMethod");
+      await page.fill("#analysisVideoSourcePath", invalidSource);
+      await page.uncheck("#analysisWriteCombinedToggle");
+      await page.locator("#analysisVideoSourcePath").focus();
+      await page.keyboard.press("Tab");
+      assert.strictEqual(
+        await page.evaluate(() => document.activeElement?.id),
+        "browseAnalysisVideoSource",
+        `The Video source and Browse control lost keyboard order at ${viewport.width}px.`,
+      );
+      await page.click("#runAnalysisButton");
+      await page.waitForFunction(
+        (tail) => document.querySelector("#statusLabel")?.textContent.includes(tail),
+        longStatusTail,
+      );
+
+      const invalidGeometry = await page.evaluate(() => {
+        const probe = (selector) => {
+          const element = document.querySelector(selector);
+          const rect = element.getBoundingClientRect();
+          return {
+            clientWidth: element.clientWidth,
+            scrollWidth: element.scrollWidth,
+            left: rect.left,
+            right: rect.right,
+          };
+        };
+        return {
+          viewportWidth: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          status: probe("#statusLabel"),
+          brand: probe(".brand"),
+          rail: probe(".step-rail"),
+          videoCard: probe('[data-analysis-modality="video"]'),
+          pathRow: probe('[data-analysis-modality="video"] .path-row'),
+          sourceInput: probe("#analysisVideoSourcePath"),
+          browseButton: probe("#browseAnalysisVideoSource"),
+          outputCard: probe(".analysis-output-panel"),
+          runButton: probe("#runAnalysisButton"),
+        };
+      });
+      for (const [name, box] of Object.entries(invalidGeometry).filter(([name]) => !name.endsWith("Width"))) {
+        assert.ok(box.left >= 0 && box.right <= invalidGeometry.viewportWidth, `${name} escaped ${viewport.width}px: ${JSON.stringify(invalidGeometry)}`);
+      }
+      for (const name of ["status", "brand", "rail", "videoCard", "pathRow", "outputCard"]) {
+        const box = invalidGeometry[name];
+        assert.ok(box.scrollWidth <= box.clientWidth, `${name} overflowed at ${viewport.width}px: ${JSON.stringify(invalidGeometry)}`);
+      }
+      assert.ok(invalidGeometry.documentWidth <= invalidGeometry.viewportWidth, `The page widened at ${viewport.width}px.`);
+
+      backend.validatePathError = "";
+      backend.videoStatusWarnings = [longStatusTail];
+      await page.click("#runAnalysisButton");
+      await page.waitForSelector("#analysisRunScreen.active");
+      backend.running = false;
+      backend.status = "complete";
+      backend.progress = { mode: "analysis-workflow", label: "Complete" };
+      await page.evaluate(() => pollState());
+      await page.click("#backToAnalysisInputButton");
+      await page.waitForSelector("#analysisInputScreen.active");
+      await page.waitForFunction(() => {
+        const status = document.querySelector("#analysisVideoProviderStatus");
+        return status && !status.classList.contains("hidden") && status.textContent.includes("Warnings:");
+      });
+      const providerGeometry = await page.evaluate(() => {
+        const status = document.querySelector("#analysisVideoProviderStatus");
+        const card = document.querySelector('[data-analysis-modality="video"]');
+        const statusRect = status.getBoundingClientRect();
+        const cardRect = card.getBoundingClientRect();
+        return {
+          viewportWidth: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+          statusClientWidth: status.clientWidth,
+          statusScrollWidth: status.scrollWidth,
+          statusLeft: statusRect.left,
+          statusRight: statusRect.right,
+          cardClientWidth: card.clientWidth,
+          cardScrollWidth: card.scrollWidth,
+          cardLeft: cardRect.left,
+          cardRight: cardRect.right,
+        };
+      });
+      assert.ok(
+        providerGeometry.statusScrollWidth <= providerGeometry.statusClientWidth,
+        `The provider log overflowed at ${viewport.width}px: ${JSON.stringify(providerGeometry)}`,
+      );
+      assert.ok(
+        providerGeometry.cardScrollWidth <= providerGeometry.cardClientWidth,
+        `The Video card overflowed at ${viewport.width}px: ${JSON.stringify(providerGeometry)}`,
+      );
+      assert.ok(providerGeometry.statusLeft >= providerGeometry.cardLeft);
+      assert.ok(providerGeometry.statusRight <= providerGeometry.cardRight);
+      assert.ok(providerGeometry.documentWidth <= providerGeometry.viewportWidth);
+      console.log(
+        `analysis containment ${viewport.width}px: invalid document ${invalidGeometry.documentWidth}/${invalidGeometry.viewportWidth}, `
+        + `top status ${invalidGeometry.status.scrollWidth}/${invalidGeometry.status.clientWidth}, `
+        + `Video card ${invalidGeometry.videoCard.scrollWidth}/${invalidGeometry.videoCard.clientWidth}; `
+        + `provider status ${providerGeometry.statusScrollWidth}/${providerGeometry.statusClientWidth}, `
+        + `provider card ${providerGeometry.cardScrollWidth}/${providerGeometry.cardClientWidth}`,
+      );
+    } finally {
+      await page.close();
+    }
+  }
+}
+
 async function textGroupingPreflight(browser, origin) {
   const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
   try {
-    await page.fill("#analysisImotionsSourcePath", "C:\\video-reports");
+    await page.check("#analysisVideoEnabled");
+    await page.fill("#analysisVideoSourcePath", "C:\\video-reports");
     await page.check("#analysisTextEnabled");
     await page.fill("#analysisTextSourcePath", "C:\\text-results");
     backend.autoProfileContext = sharedSpeakerProfileContext();
@@ -612,7 +869,7 @@ async function sidecarlessManifestSelection(browser, origin) {
   try {
     backend.requireSourceManifest = true;
     backend.autoProfileContext = profileContextPayload("Legacy");
-    await page.uncheck("#analysisImotionsEnabled");
+    assert.strictEqual(await page.locator("#analysisVideoEnabled").isChecked(), false);
     await page.check("#analysisTextEnabled");
     await page.fill("#analysisTextSourcePath", "C:\\ordinary-text-results");
     await page.click("#openAnalysisCustomizeButton");
@@ -633,14 +890,14 @@ async function sidecarlessManifestSelection(browser, origin) {
     );
 
     await page.click("#backFromAnalysisCustomizeButton");
-    await page.check("#analysisImotionsEnabled");
-    await page.check("#analysisImotionsImportMethod");
-    await page.fill("#analysisImotionsSourcePath", "C:\\ordinary-imotions-results");
+    await page.check("#analysisVideoEnabled");
+    await page.check("#analysisVideoImportMethod");
+    await page.fill("#analysisVideoSourcePath", "C:\\ordinary-imotions-results");
     await page.click("#openAnalysisCustomizeButton");
     await page.waitForFunction(() => document.querySelector("#analysisSpeakerDiscoveryStatus").textContent.includes("2 sources"));
     assert.deepStrictEqual(
       backend.profileContextBodies.at(-1).modalities.map((item) => item.name).sort(),
-      ["imotions", "text"],
+      ["text", "video"],
     );
     assert.strictEqual(
       backend.profileContextBodies.at(-1).sourceManifest,
@@ -654,8 +911,9 @@ async function sidecarlessManifestSelection(browser, origin) {
 async function workflowFailureDetail(browser, origin) {
   const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
   try {
-    await page.fill("#analysisImotionsSourcePath", "C:\\imported-reports");
-    await page.check("#analysisImotionsImportMethod");
+    await page.check("#analysisVideoEnabled");
+    await page.fill("#analysisVideoSourcePath", "C:\\imported-reports");
+    await page.check("#analysisVideoImportMethod");
     await page.uncheck("#analysisWriteCombinedToggle");
     await page.click("#runAnalysisButton");
     await page.waitForSelector("#analysisRunScreen.active");
@@ -700,8 +958,10 @@ async function main() {
   for (const [name, scenario] of [
     ["home branding responsive", homeBrandingResponsive],
     ["invalid source error remains contained", invalidSourceErrorStaysContained],
+    ["Analysis invalid source and status remain contained", analysisInvalidSourceAndStatusStayContained],
     ["discovery and accessibility", staleDiscoveryAndGroupAccessibility],
     ["submission lock and payloads", submissionLockAndPayloads],
+    ["provider status follows backend validation", providerStatusFollowsBackendValidation],
     ["workflow failure detail", workflowFailureDetail],
     ["responsive rendering", responsiveSmoke],
     ["native processing screens", nativeProcessingScreens],

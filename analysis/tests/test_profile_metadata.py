@@ -20,6 +20,8 @@ from analysis.profile import (
     load_analysis_profile,
     write_analysis_profile,
 )
+from analysis.video import CanonicalVideoResult, DetectedVideoSource
+from analysis.video_contract import VIDEO_METRICS, VIDEO_NORMALIZATION_VERSION
 
 
 def _sha256(path: Path) -> str:
@@ -101,6 +103,41 @@ def _write_sidecars(root: Path, count: int = 14) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return manifest_path, metadata_path
+
+
+def test_video_provenance_payload_is_json_safe_and_preserves_profile_sidecars(
+    tmp_path: Path,
+) -> None:
+    manifest, metadata = _write_sidecars(tmp_path / "run", 1)
+    before = (manifest.read_bytes(), metadata.read_bytes())
+    detected = DetectedVideoSource(
+        "pyfeat_native_face",
+        manifest.parent.resolve(),
+        "import",
+        ("Verified imported native provider metadata.",),
+        ("Legacy Native Face request migrated to canonical Video.",),
+    )
+    canonical = CanonicalVideoResult(
+        "pyfeat_native_face",
+        ("source-0001",),
+        ({metric: None for metric in VIDEO_METRICS},),
+        detected.evidence,
+        detected.warnings,
+        VIDEO_NORMALIZATION_VERSION,
+    )
+    provenance_builder = getattr(canonical, "output_provenance", None)
+    assert provenance_builder is not None
+
+    payload = provenance_builder(detected).to_manifest_payload()
+
+    assert json.loads(json.dumps(payload)) == payload
+    assert payload["requested_modality"] == "video"
+    assert payload["resolved_provider"] == "pyfeat_native_face"
+    assert payload["detection_warnings"] == [
+        "Legacy Native Face request migrated to canonical Video."
+    ]
+    assert len(payload["canonical_availability"]) == len(VIDEO_METRICS)
+    assert (manifest.read_bytes(), metadata.read_bytes()) == before
 
 
 @pytest.mark.parametrize("count", [1, 7, 14])

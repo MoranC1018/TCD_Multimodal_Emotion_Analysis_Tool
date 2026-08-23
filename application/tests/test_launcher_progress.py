@@ -19,6 +19,18 @@ from application import manual_segments
 from analysis.combined_summary import AUDIO_METRICS, AUDIO_REQUIRED_METRICS
 
 
+def write_imotions_video_source(root: Path) -> None:
+    path = root / "Speaker A" / "video.csv"
+    path.parent.mkdir(parents=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["#INFO"])
+        writer.writerow(["#Category", "Timestamp", "FEA(Emotions)", "FEA(Emotions)"])
+        writer.writerow(["#DATA"])
+        writer.writerow(["Row", "Timestamp", "Anger", "Engagement"])
+        writer.writerow([1, 0, 10, 20])
+
+
 def write_catalog_audio_run(
     run_root: Path,
     *,
@@ -578,6 +590,23 @@ class LauncherProgressTests(unittest.TestCase):
         )
         self.assertEqual(len(five_groups.speaker_groups), 5)
 
+    def test_analysis_workflow_payload_normalizes_one_legacy_video_alias(self) -> None:
+        modalities = launcher._analysis_modalities_from_payload(
+            [{"name": "native_face", "sourceMethod": "run", "sourcePath": r"C:\face"}]
+        )
+
+        self.assertEqual(
+            modalities,
+            (backend.AnalysisModalityRunRequest("video", "run", Path(r"C:\face")),),
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one Video source"):
+            launcher._analysis_modalities_from_payload(
+                [
+                    {"name": "video", "sourceMethod": "run", "sourcePath": r"C:\video"},
+                    {"name": "imotions", "sourceMethod": "run", "sourcePath": r"C:\imotions"},
+                ]
+            )
+
     def test_analysis_workflow_payload_accepts_a_valid_reusable_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             run = Path(temp_dir) / "run"
@@ -669,6 +698,102 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(start_process.call_args.kwargs, {"mode": "analysis-workflow", "total": 0})
         self.assertTrue(responses[0]["started"])
         self.assertEqual(responses[0]["runId"], 37)
+
+    def test_analysis_workflow_handler_returns_read_only_video_detection_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "video"
+            output = root / "reports"
+            write_imotions_video_source(source)
+            before = tuple(
+                (path.relative_to(source), path.read_bytes() if path.is_file() else None)
+                for path in sorted(source.rglob("*"))
+            )
+            payload = {
+                "outputRoot": str(output),
+                "writeCombinedWorkbook": False,
+                "defaultReference": 0,
+                "referenceOverrides": {},
+                "includeConstructComparison": True,
+                "includeProbabilitySheets": True,
+                "confidenceLevel": 0.95,
+                "headlinePolicy": "weighted",
+                "speakerGroups": [],
+                "writeGraphs": True,
+                "includeLogscale": False,
+                "includeLandmarks": False,
+                "includeTiming": False,
+                "excludeGeometry": False,
+                "modalities": [
+                    {"name": "video", "sourceMethod": "run", "sourcePath": str(source)}
+                ],
+            }
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+
+            with (
+                patch.object(launcher, "start_process", return_value=73) as start_process,
+                patch.object(launcher.APP_STATE, "log"),
+            ):
+                handler.handle_run_analysis_workflow(payload)
+
+            after = tuple(
+                (path.relative_to(source), path.read_bytes() if path.is_file() else None)
+                for path in sorted(source.rglob("*"))
+            )
+
+        command = responses[0]["command"]
+        self.assertIn("--video-source", command)
+        self.assertNotIn("--imotions-source", command)
+        self.assertEqual(
+            responses[0]["videoStatus"],
+            {
+                "provider": "imotions_affdex",
+                "sourceMethod": "run",
+                "sourcePath": str(source.resolve()),
+                "evidence": ["Accepted iMotions CSV: Speaker A/video.csv (1 usable data row)."],
+                "warnings": [],
+            },
+        )
+        self.assertEqual(after, before)
+        start_process.assert_called_once()
+
+    def test_analysis_workflow_handler_detects_invalid_video_before_starting_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "empty-video"
+            output = root / "reports"
+            source.mkdir()
+            payload = {
+                "outputRoot": str(output),
+                "writeCombinedWorkbook": False,
+                "defaultReference": 0,
+                "referenceOverrides": {},
+                "includeConstructComparison": True,
+                "includeProbabilitySheets": True,
+                "confidenceLevel": 0.95,
+                "headlinePolicy": "weighted",
+                "speakerGroups": [],
+                "writeGraphs": True,
+                "includeLogscale": False,
+                "includeLandmarks": False,
+                "includeTiming": False,
+                "excludeGeometry": False,
+                "modalities": [
+                    {"name": "video", "sourceMethod": "run", "sourcePath": str(source)}
+                ],
+            }
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            handler.send_json = Mock()
+
+            with patch.object(launcher, "start_process") as start_process, self.assertRaisesRegex(
+                ValueError, "No supported Video provider evidence"
+            ):
+                handler.handle_run_analysis_workflow(payload)
+
+            self.assertFalse(output.exists())
+        start_process.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
     def test_analysis_workflow_handler_keeps_lexical_output_for_child_junction_rejection(

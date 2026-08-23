@@ -123,24 +123,15 @@ class NativeProcessingBackendTests(unittest.TestCase):
                 repo_root=Path("repo"),
             )
 
-    def test_analysis_payload_and_command_accept_native_face(self) -> None:
+    def test_analysis_payload_normalizes_native_face_alias_to_video(self) -> None:
         modalities = launcher._analysis_modalities_from_payload(
             [{"name": "native_face", "sourceMethod": "import", "sourcePath": r"C:\face-output"}]
         )
-        request = backend.AnalysisWorkflowRunRequest(
-            output_root=Path(r"C:\reports"),
-            modalities=modalities,
-            write_combined_workbook=False,
-        )
 
-        command = backend.build_analysis_workflow_command(
-            request,
-            repo_root=Path(r"C:\repo"),
-            python_executable=Path("python.exe"),
+        self.assertEqual(
+            modalities,
+            (backend.AnalysisModalityRunRequest("video", "import", Path(r"C:\face-output")),),
         )
-
-        self.assertIn("--native_face-source", command)
-        self.assertIn("--native_face-method", command)
 
     def test_launcher_parses_native_payloads_without_coercing_credentials(self) -> None:
         face = launcher.face_processing_request_from_payload(
@@ -415,8 +406,26 @@ class NativeProcessingUiContractTests(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint):
                 self.assertIn(endpoint, self.javascript)
-        self.assertIn('name: "native_face"', self.javascript)
+        self.assertIn('name: "video"', self.javascript)
+        self.assertNotIn('name: "native_face"', self.javascript)
         self.assertIn("textContent", self.javascript)
+
+    def test_completed_face_processing_hands_off_to_the_single_video_analysis_source(self) -> None:
+        self.assertNotIn('data-analysis-modality="native_face"', self.html)
+        self.assertEqual(self.html.count('data-analysis-modality="video"'), 1)
+        self.assertIn('id="analysisVideoEnabled"', self.html)
+        self.assertIn('id="analysisVideoSourcePath"', self.html)
+        self.assertNotIn('id="analysisImotions', self.html)
+        handoff = self.javascript.split(
+            "async function importNativeFaceIntoAnalysis()", 1
+        )[1].split("async function importNativeTextIntoAnalysis()", 1)[0]
+        self.assertIn("analysisVideoEnabled.checked = true", handoff)
+        self.assertIn(
+            "analysisVideoSourcePath.value = state.pendingFaceOutput || faceOutputRootInput.value.trim()",
+            handoff,
+        )
+        self.assertIn('setAnalysisSourceMethod(analysisVideoControls, "run")', handoff)
+        self.assertNotIn("analysisNativeFace", handoff)
 
     def test_starting_audio_does_not_discard_completed_native_handoffs(self) -> None:
         audio_function = self.javascript.split(

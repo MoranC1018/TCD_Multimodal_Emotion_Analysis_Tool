@@ -1102,42 +1102,14 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_json({"opened": True, "path": str(folder)})
 
     def handle_run_analysis(self, payload: dict[str, object]) -> None:
-        """Start the existing post-processing analysis scripts from the UI."""
+        """Reject the retired provider-specific HTTP analysis surface."""
 
-        raw_source_path = required_payload_text(payload, "sourcePath")
-        if raw_source_path is None:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, "Choose an analysis source first.")
-            return
-        source_path = Path(raw_source_path)
-
-        output_root = Path(
-            backend.clean_user_supplied_path(str(payload.get("outputRoot") or backend.default_analysis_output_root(REPO_ROOT)))
-        ).expanduser()
-        mode = str(payload.get("mode") or "imotions")
-        validate_processing_paths(
-            source_path,
-            output_root,
-            label="Analysis",
-            source_kind="folder",
+        _ = payload
+        self.send_error_json(
+            HTTPStatus.GONE,
+            "This legacy analysis endpoint is gone. Use /api/run-analysis-workflow "
+            "with the canonical Video modality.",
         )
-        request = backend.AnalysisRunRequest(
-            mode=mode,
-            source_path=source_path,
-            output_root=output_root,
-            write_graphs=payload_bool(payload, "writeGraphs", True),
-            include_logscale=payload_bool(payload, "includeLogscale", False),
-            include_landmarks=payload_bool(payload, "includeLandmarks", False),
-            include_timing=payload_bool(payload, "includeTiming", False),
-            exclude_geometry=payload_bool(payload, "excludeGeometry", False),
-        )
-        command = backend.build_analysis_command(request, repo_root=REPO_ROOT)
-        APP_STATE.log(f"Starting {mode} analysis from {source_path.expanduser().resolve()}.")
-        APP_STATE.log(f"Analysis output root: {output_root.expanduser().resolve()}")
-        run_id = start_process(command, mode=f"analysis-{mode}", total=0)
-        if run_id is None:
-            self.send_error_json(HTTPStatus.CONFLICT, "A pipeline run is already active.")
-            return
-        self.send_json({"started": True, "runId": run_id, "command": command})
 
     def handle_run_analysis_workflow(self, payload: dict[str, object]) -> None:
         """Start one combined analysis coordinator for reviewed modality inputs."""
@@ -1157,7 +1129,15 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         if run_id is None:
             self.send_error_json(HTTPStatus.CONFLICT, "A pipeline run is already active.")
             return
-        self.send_json({"started": True, "runId": run_id, "command": command})
+        response: dict[str, object] = {
+            "started": True,
+            "runId": run_id,
+            "command": command,
+        }
+        video_status = backend.analysis_video_status(request.detected_video_source)
+        if video_status is not None:
+            response["videoStatus"] = video_status
+        self.send_json(response)
 
     def handle_analysis_speakers(self, payload: dict[str, object]) -> None:
         """Return selectable canonical speakers from existing analysis sources."""
@@ -1697,6 +1677,7 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
     headline_policy = _workflow_required_text(payload["headlinePolicy"], "headlinePolicy").casefold()
     if headline_policy not in {"weighted", "equal"}:
         raise ValueError("headlinePolicy must be weighted or equal.")
+    detected_video_source = backend.detect_analysis_video_source(modalities)
     return backend.AnalysisWorkflowRunRequest(
         output_root=output_root,
         modalities=modalities,
@@ -1720,6 +1701,7 @@ def analysis_workflow_request_from_payload(payload: dict[str, object]) -> backen
         include_landmarks=_workflow_bool(payload["includeLandmarks"], "includeLandmarks"),
         include_timing=_workflow_bool(payload["includeTiming"], "includeTiming"),
         exclude_geometry=_workflow_bool(payload["excludeGeometry"], "excludeGeometry"),
+        detected_video_source=detected_video_source,
     )
 
 
@@ -1772,10 +1754,18 @@ def _analysis_modalities_from_payload(
     for item in modalities_value:
         if not isinstance(item, dict) or set(item) != {"name", "sourceMethod", "sourcePath"}:
             raise ValueError("Each modality must contain only name, sourceMethod, and sourcePath.")
-        name = _workflow_required_text(item["name"], "modalities.name").casefold()
-        if name not in {"imotions", "native_face", "audio", "text"}:
-            raise ValueError(f"Unsupported analysis workflow modality: {name}")
+        requested_name = _workflow_required_text(item["name"], "modalities.name").casefold()
+        if requested_name in {"video", "imotions", "native_face"}:
+            name = "video"
+        elif requested_name in {"audio", "text"}:
+            name = requested_name
+        else:
+            raise ValueError(f"Unsupported analysis workflow modality: {requested_name}")
         if name in modality_names:
+            if name == "video":
+                raise ValueError(
+                    "Supply exactly one Video source; canonical and legacy provider aliases cannot be combined."
+                )
             raise ValueError(f"Duplicate analysis workflow modality: {name}")
         source_method = _workflow_required_text(item["sourceMethod"], "modalities.sourceMethod").casefold()
         if source_method not in {"run", "import"}:

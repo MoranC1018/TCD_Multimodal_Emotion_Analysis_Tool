@@ -9,7 +9,7 @@ emotion-word distributions instead of one whole-speech aggregate. For bilingual
 JSONs, the original-language text (`text_original`) is used by default; for
 standard JSONs, the `text` field is used.
 
-**Batch mode** mirrors the input directory structure in the output — so if your
+**Batch mode** mirrors the input directory structure in the output - so if your
 JSONs live in nested folders (e.g. one subfolder per speaker), the segment
 `.txt` files come out in the same layout.
 
@@ -17,14 +17,15 @@ JSONs live in nested folders (e.g. one subfolder per speaker), the segment
 
 ## Requirements
 
-- **Python 3.12**
-- No additional packages — standard library only (`argparse`, `json`, `pathlib`)
+- **Python 3.11 or newer** (Python 3.12 is tested and recommended; other
+  versions compatible with the pinned stack are accepted)
+- No additional packages - standard library only (`argparse`, `json`, `pathlib`)
 
 ---
 
 ## Usage
 
-### Basic — single file
+### Basic - single file
 
 ```bash
 python -m processing.text_analysis.prepare_input.whisper_to_rocksteady path/to/video.json
@@ -33,7 +34,7 @@ python -m processing.text_analysis.prepare_input.whisper_to_rocksteady path/to/v
 Writes files like `rocksteady_input_segments/video/video__segment_000001.txt`,
 `rocksteady_input_segments/video/video__segment_000002.txt`, and so on by default.
 
-### Batch — whole folder
+### Batch - whole folder
 
 ```bash
 python -m processing.text_analysis.prepare_input.whisper_to_rocksteady \\
@@ -83,7 +84,7 @@ kept for compatibility with older JSONs and fall back to `text_original`.
 | `-o` / `--output` | `rocksteady_input_segments/` (next to this script) | Root output folder; structure mirrors input |
 | `--lang` | `original` | Output language for bilingual JSONs: `original` or `en`; language codes are accepted for older JSONs and fall back to original text |
 | `--join-segments` | off | Write one full-speech `.txt` per JSON, matching the old behavior |
-| `--inventory` | — | Completed `selection_manifest.json`; restricts input to its exact identity set and verifies every selected JSON hash |
+| `--inventory` | - | Completed `selection_manifest.json`; restricts input to its exact identity set and verifies every selected JSON hash |
 | `--batch-manifest` | `<output parent>/_manifests/<output>_prepare_run_manifest.json` | Structured batch status, lineage and artifact inventory |
 | `--help` | | Show all options |
 

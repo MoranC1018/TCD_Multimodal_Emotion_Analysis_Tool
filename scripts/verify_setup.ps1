@@ -22,7 +22,17 @@ $requiredContracts = [ordered]@{
     "exact FFmpeg package" = 'Gyan.FFmpeg.Shared'
     "exact FFmpeg release" = '8.1.2'
     "JDK package with compiler" = 'EclipseAdoptium.Temurin.21.JDK'
-    "Python 3.12 package" = 'Python.Python.3.12'
+    "Python 3.11-or-newer compatibility probe" = 'sys.version_info[:2] >= (3, 11)'
+    "Python manager discovery is non-installing" = '$env:PYTHON_MANAGER_AUTOMATIC_INSTALL = "false"'
+    "compatible Python details probe" = 'function Get-CompatiblePythonDetails'
+    "compatible Python validator" = 'function Test-CompatiblePython'
+    "registered Python discovery" = 'function Get-RegisteredPythonCandidates'
+    "non-installing Python runtime listing" = 'Arguments @("-0p")'
+    "compatible Python discovery" = 'function Find-CompatiblePython'
+    "Python 3.12 selection preference" = 'if ($_.Version.Major -eq 3 -and $_.Version.Minor -eq 12)'
+    "compatible virtual environment reuse" = 'Reusing the existing compatible Python environment'
+    "Python 3.12 automatic installation fallback" = 'Python.Python.3.12'
+    "automatic Python fallback install" = 'Invoke-WinGetInstall -PackageId $pythonPackageId'
     "exact-version install guard" = 'This branch is reached only after the exact on-disk runtime'
     "WinGet noninteractive mode" = '--disable-interactivity'
     "matched Torch CPU/CUDA selector" = 'TorchRuntime'
@@ -45,6 +55,34 @@ foreach ($contract in $requiredContracts.GetEnumerator()) {
     if (-not $source.Contains([string]$contract.Value)) {
         throw "setup.ps1 is missing the $($contract.Key) contract: $($contract.Value)"
     }
+}
+$forbiddenPythonContracts = [ordered]@{
+    "exact Python 3.12 version gate" = 'sys.version_info[:2] == (3, 12)'
+    "exact Python 3.12 validator" = 'function Test-Python312'
+    "exact Python 3.12 discovery" = 'function Find-Python312'
+    "exact Python 3.12 confirmation" = 'function Confirm-Python312'
+    "side-effectful Python 3.12 launcher probe" = '"-3.12", "-c"'
+    "side-effectful generic Python launcher probe" = '"-3", "-c"'
+}
+foreach ($contract in $forbiddenPythonContracts.GetEnumerator()) {
+    if ($source.Contains([string]$contract.Value)) {
+        throw "setup.ps1 retains the $($contract.Key) contract: $($contract.Value)"
+    }
+}
+$nonInstallingIndex = $source.IndexOf('$env:PYTHON_MANAGER_AUTOMATIC_INSTALL = "false"')
+$discoveryIndex = $source.IndexOf('function Find-CompatiblePython')
+if ($nonInstallingIndex -lt 0 -or $discoveryIndex -le $nonInstallingIndex) {
+    throw "setup.ps1 must disable Python Manager auto-install before interpreter discovery."
+}
+if ($source -match 'sys\.version_info(?:\[:2\])?\s*(?:<|<=)\s*\(') {
+    throw "setup.ps1 must not impose an upper Python version gate."
+}
+$pythonFallbackCount = [regex]::Matches(
+    $source,
+    'Invoke-WinGetInstall\s+-PackageId\s+\$pythonPackageId'
+).Count
+if ($pythonFallbackCount -ne 1) {
+    throw "setup.ps1 must have exactly one explicit Python WinGet fallback."
 }
 $prepareModelsIndex = $source.IndexOf('"processing.face_analysis", "--prepare-models"')
 $offlineCheckIndex = $source.IndexOf('"processing.face_analysis", "--check"')

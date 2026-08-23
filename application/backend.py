@@ -49,6 +49,7 @@ from analysis.combined_summary import (
     normalized,
     parse_sectioned_csv,
     resolve_speaker,
+    validate_report,
 )
 from analysis.histograms import (
     classify_histogram_columns,
@@ -71,6 +72,8 @@ from analysis.metadata import (
 )
 from analysis.profile import AnalysisProfile, profile_payload
 from analysis.text_results import TextResultsError, discover_text_results
+from analysis.video import DetectedVideoSource, detect_video_source
+from analysis.video_contract import validate_video_provider_options
 from procurement.video_sampling import run_docx_extractions
 from procurement.external_tools import (
     build_yt_dlp_command,
@@ -369,7 +372,7 @@ class AnalysisSpeakerGroupRunRequest:
 
 @dataclass(frozen=True)
 class AnalysisWorkflowRunRequest:
-    """Options for one combined iMotions and audio analysis workflow run."""
+    """Options for one combined Video, Audio, and Text analysis workflow run."""
 
     output_root: Path
     modalities: tuple[AnalysisModalityRunRequest, ...]
@@ -387,6 +390,69 @@ class AnalysisWorkflowRunRequest:
     include_landmarks: bool = False
     include_timing: bool = False
     exclude_geometry: bool = False
+    detected_video_source: DetectedVideoSource | None = None
+
+
+def normalize_analysis_modalities(
+    modalities: Iterable[AnalysisModalityRunRequest],
+) -> tuple[AnalysisModalityRunRequest, ...]:
+    """Normalize one-release Video aliases without exposing provider modalities."""
+
+    normalized: list[AnalysisModalityRunRequest] = []
+    seen: set[str] = set()
+    video_sources = 0
+    for modality in modalities:
+        requested_name = str(modality.name or "").casefold()
+        if requested_name in {"video", "imotions", "native_face"}:
+            name = "video"
+            video_sources += 1
+            if video_sources > 1:
+                raise ValueError(
+                    "Supply exactly one Video source; canonical and legacy provider aliases cannot be combined."
+                )
+        elif requested_name in {"audio", "text"}:
+            name = requested_name
+        else:
+            raise ValueError(f"Unsupported analysis workflow modality: {modality.name}")
+        if name in seen:
+            raise ValueError(f"Duplicate analysis workflow modality: {name}")
+        seen.add(name)
+        normalized.append(
+            AnalysisModalityRunRequest(name, modality.source_method, modality.source_path)
+        )
+    return tuple(normalized)
+
+
+def detect_analysis_video_source(
+    modalities: Iterable[AnalysisModalityRunRequest],
+) -> DetectedVideoSource | None:
+    """Detect the canonical Video provider without mutating the selected source."""
+
+    normalized = normalize_analysis_modalities(modalities)
+    video = next((modality for modality in normalized if modality.name == "video"), None)
+    if video is None:
+        return None
+    source_method = str(video.source_method or "").casefold()
+    if source_method not in {"run", "import"}:
+        raise ValueError(f"Unsupported source method for video: {video.source_method}")
+    try:
+        return detect_video_source(video.source_path, source_method)
+    except (NotADirectoryError, OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def analysis_video_status(detected: DetectedVideoSource | None) -> dict[str, object] | None:
+    """Return JSON-ready provider status while keeping Video as the modality name."""
+
+    if detected is None:
+        return None
+    return {
+        "provider": detected.provider,
+        "sourceMethod": detected.source_method,
+        "sourcePath": str(detected.source_path),
+        "evidence": list(detected.evidence),
+        "warnings": list(detected.warnings),
+    }
 
 
 def discover_analysis_speakers(
@@ -397,9 +463,10 @@ def discover_analysis_speakers(
     available_in: dict[str, set[str]] = {}
     discovered_speakers: dict[str, Speaker] = {}
     warnings: list[str] = []
-    by_name = {str(modality.name).casefold(): modality for modality in modalities}
+    normalized_modalities = normalize_analysis_modalities(modalities)
+    by_name = {str(modality.name).casefold(): modality for modality in normalized_modalities}
 
-    for name in ("imotions", "native_face", "audio", "text"):
+    for name in ("video", "audio", "text"):
         modality = by_name.get(name)
         if modality is None:
             continue
@@ -422,10 +489,21 @@ def discover_analysis_speakers(
                 )
             continue
         if source_method == "import":
-            report_modality = (
-                "video" if name == "imotions" else "native_face" if name == "native_face" else "audio"
+            detected_video = None
+            if name == "video":
+                try:
+                    detected_video = detect_video_source(modality.source_path, "import")
+                except (NotADirectoryError, OSError, RuntimeError, ValueError) as exc:
+                    raise ValueError(f"Invalid Video source: {exc}") from exc
+                warnings.extend(detected_video.warnings)
+            report_modality = "video" if name == "video" else "audio"
+            labels = _discover_imported_speaker_labels(
+                modality.source_path,
+                report_modality,
+                name,
+                warnings,
+                video_provider=(detected_video.provider if detected_video is not None else None),
             )
-            labels = _discover_imported_speaker_labels(modality.source_path, report_modality, name, warnings)
             for label in labels:
                 _add_discovered_speaker(
                     label,
@@ -437,7 +515,27 @@ def discover_analysis_speakers(
                 )
             continue
 
-        if name == "imotions":
+        if name == "video":
+            try:
+                detected_video = detect_video_source(modality.source_path, "run")
+            except (NotADirectoryError, OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(f"Invalid Video source: {exc}") from exc
+            warnings.extend(detected_video.warnings)
+            if detected_video.provider == "pyfeat_native_face":
+                try:
+                    exports = read_native_face_folder(modality.source_path)
+                except (NotADirectoryError, ValueError) as exc:
+                    raise ValueError(f"Invalid Video source: {exc}") from exc
+                for export in exports:
+                    _add_discovered_speaker(
+                        str(export.speaker or export.source),
+                        name,
+                        "Py-Feat / Native Face Video source",
+                        discovered_speakers,
+                        available_in,
+                        warnings,
+                    )
+                continue
             selected_paths, _ = discover_csv_inputs(modality.source_path)
             if not selected_paths:
                 raise ValueError(f"No usable iMotions CSV inputs found under {modality.source_path}.")
@@ -453,23 +551,7 @@ def discover_analysis_speakers(
                 _add_discovered_speaker(
                     label,
                     name,
-                    "iMotions speaker folder",
-                    discovered_speakers,
-                    available_in,
-                    warnings,
-                )
-            continue
-
-        if name == "native_face":
-            try:
-                exports = read_native_face_folder(modality.source_path)
-            except (NotADirectoryError, ValueError) as exc:
-                raise ValueError(f"Invalid Py-Feat / Native Face output: {exc}") from exc
-            for export in exports:
-                _add_discovered_speaker(
-                    str(export.speaker or export.source),
-                    name,
-                    "Py-Feat / Native Face source",
+                    "Video speaker folder",
                     discovered_speakers,
                     available_in,
                     warnings,
@@ -515,7 +597,7 @@ def discover_analysis_speakers(
                 "name": speaker.display_name,
                 "availableIn": [
                     name
-                    for name in ("imotions", "audio", "text")
+                    for name in ("video", "audio", "text")
                     if name in available_in[speaker.speaker_id]
                 ],
             }
@@ -646,6 +728,8 @@ def _discover_imported_speaker_labels(
     report_modality: str,
     source_name: str,
     warnings: list[str],
+    *,
+    video_provider: str | None = None,
 ) -> list[str]:
     root_path = root.expanduser().resolve()
     grouped: dict[str, list[tuple[str, Path]]] = {}
@@ -659,7 +743,11 @@ def _discover_imported_speaker_labels(
         except InputError as exc:
             warnings.append(f"Unrecognized imported {source_name} speaker: {label} ({exc})")
             continue
-        _validate_imported_report(path, report_modality)
+        _validate_imported_report(
+            path,
+            report_modality,
+            video_provider=video_provider,
+        )
         speakers.setdefault(speaker.speaker_id, speaker)
         grouped.setdefault(speaker.speaker_id, []).append((label, path))
 
@@ -688,6 +776,8 @@ def _imported_report_speaker_label(root_path: Path, path: Path) -> str | None:
     relative = path.relative_to(root_path)
     if len(relative.parts) == 5:
         domain, supplied_speaker, combined, findings, filename = relative.parts
+    elif len(relative.parts) == 6:
+        domain, _run_name, supplied_speaker, combined, findings, filename = relative.parts
     elif len(relative.parts) == 4 and normalized(root_path.parent.name) == "emotion":
         domain = "emotion"
         supplied_speaker, combined, findings, filename = relative.parts
@@ -705,7 +795,15 @@ def _imported_report_speaker_label(root_path: Path, path: Path) -> str | None:
     return supplied_speaker
 
 
-def _validate_imported_report(path: Path, modality: str) -> None:
+def _validate_imported_report(
+    path: Path,
+    modality: str,
+    *,
+    video_provider: str | None = None,
+) -> None:
+    if modality == "video" and video_provider == "pyfeat_native_face":
+        validate_report(path, modality, video_provider=video_provider)
+        return
     metrics = parse_sectioned_csv(path)
     required = AUDIO_REQUIRED_METRICS if modality == "audio" else VIDEO_METRICS
     missing = [metric for metric in required if metric not in metrics]
@@ -2979,9 +3077,26 @@ def build_analysis_workflow_command(
 
     _ = repo_root
     python_executable = python_executable or Path(sys.executable)
-    modalities = tuple(request.modalities)
+    modalities = normalize_analysis_modalities(request.modalities)
     if not modalities:
-        raise ValueError("Choose at least one Video / iMotions, Native Face, Audio, or Text modality.")
+        raise ValueError("Choose at least one Video, Audio, or Text modality.")
+    video_modality = next((modality for modality in modalities if modality.name == "video"), None)
+    detected_video = request.detected_video_source
+    if video_modality is not None:
+        if detected_video is None:
+            detected_video = detect_analysis_video_source((video_modality,))
+        elif (
+            detected_video.source_path != video_modality.source_path.expanduser().resolve()
+            or detected_video.source_method != str(video_modality.source_method).casefold()
+        ):
+            raise ValueError("Detected Video status does not match the selected Video source.")
+        assert detected_video is not None
+        validate_video_provider_options(
+            detected_video.provider,
+            include_landmarks=request.include_landmarks,
+            include_timing=request.include_timing,
+            exclude_geometry=request.exclude_geometry,
+        )
     if request.write_combined_workbook and not request.speaker_groups and request.analysis_profile is None:
         raise ValueError("Choose an output profile or at least one speaker group for the combined workbook.")
     if request.analysis_profile is not None and request.speaker_groups:
@@ -3014,19 +3129,13 @@ def build_analysis_workflow_command(
         "--output-root",
         str(Path(os.path.abspath(request.output_root.expanduser()))),
     ]
-    seen_modalities: set[str] = set()
     for modality in modalities:
         name = str(modality.name or "").casefold()
-        if name not in {"imotions", "native_face", "audio", "text"}:
-            raise ValueError(f"Unsupported analysis workflow modality: {modality.name}")
-        if name in seen_modalities:
-            raise ValueError(f"Duplicate analysis workflow modality: {name}")
         source_method = str(modality.source_method or "").casefold()
         if source_method not in {"run", "import"}:
             raise ValueError(f"Unsupported source method for {name}: {modality.source_method}")
         if name == "text" and source_method != "import":
             raise ValueError("Text results are import-only in the combined workflow.")
-        seen_modalities.add(name)
         command.extend(
             [
                 f"--{name}-source",
@@ -3050,7 +3159,7 @@ def build_analysis_workflow_command(
         # Native SourceID-grain Text validates splits against its own manifest
         # during workflow execution. The legacy speaker-grain restriction is
         # retained there, after the actual Text grain is known.
-        if "text" in seen_modalities:
+        if any(modality.name == "text" for modality in modalities):
             text_modality = next(modality for modality in modalities if modality.name.casefold() == "text")
             has_native_summary = any(text_modality.source_path.rglob("video_level_summary.csv"))
             if has_native_summary:

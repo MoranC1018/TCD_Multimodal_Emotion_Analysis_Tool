@@ -4,9 +4,12 @@ Installs and validates the single supported Windows environment.
 
 .DESCRIPTION
 The default setup makes Face processing ready and also validates Text when the
-licensed RockSteady JAR is present. The script is safe to rerun: it reuses a
-valid Python 3.12 environment and installs FFmpeg only when the exact supported
-8.1.2 full-shared runtime is absent.
+licensed RockSteady JAR is present. The pinned stack requires Python 3.11 or
+newer. Python 3.12 is tested and recommended, while other compatible versions
+are accepted. The script is safe to rerun: it reuses a compatible environment
+and installs FFmpeg only when the exact supported 8.1.2 full-shared runtime is
+absent. If no compatible Python is installed, the automatic fallback installs
+Python 3.12.
 
 .PARAMETER TorchRuntime
 Use auto (default), cpu, or the matched CUDA 12.8 PyTorch package family.
@@ -21,7 +24,8 @@ Require treats that as an error; Skip explicitly omits JDK/Text setup.
 Do not install FFmpeg. The exact-runtime validation and Face smoke still run.
 
 .PARAMETER SkipPythonInstall
-Do not install Python when 3.12 is absent; fail with an explicit prerequisite.
+Do not install the Python 3.12 fallback when no compatible Python is present;
+fail with an explicit prerequisite instead.
 
 .PARAMETER SkipJdkInstall
 Do not install a JDK when Text needs one; fail unless java and javac already work.
@@ -68,6 +72,10 @@ $jdkPackageId = "EclipseAdoptium.Temurin.21.JDK"
 $pythonPackageId = "Python.Python.3.12"
 $minimumCu128WindowsDriver = [version]"528.33"
 $minimumCu128ComputeCapability = [version]"7.5"
+
+# Discovery must never let the current Python Install Manager auto-install a
+# runtime. Confirm-CompatiblePython owns the sole installation fallback below.
+$env:PYTHON_MANAGER_AUTOMATIC_INSTALL = "false"
 
 function Invoke-NativeCommand {
     param(
@@ -243,64 +251,146 @@ function Add-ProcessPathPrefix {
     $env:PATH = (@($Directory) + $parts) -join [IO.Path]::PathSeparator
 }
 
-function Test-Python312 {
+function Get-CompatiblePythonDetails {
     param([Parameter(Mandatory = $true)][string]$Candidate)
 
     if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
-        return $false
+        return $null
     }
     $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @(
         "-c",
-        "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+        "import sys; ok = sys.version_info[:2] >= (3, 11); " +
+        "print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}') if ok else None; " +
+        "raise SystemExit(0 if ok else 1)"
     )
-    return $probe.ExitCode -eq 0
+    if ($probe.ExitCode -ne 0 -or $probe.Output.Count -eq 0) {
+        return $null
+    }
+    try {
+        $version = [version]([string]($probe.Output | Select-Object -Last 1)).Trim()
+    }
+    catch {
+        return $null
+    }
+    if ($version -lt [version]"3.11") {
+        return $null
+    }
+    return [pscustomobject]@{
+        Path = (Resolve-Path -LiteralPath $Candidate).Path
+        Version = $version
+    }
 }
 
-function Find-Python312 {
-    $candidates = [System.Collections.Generic.List[string]]::new()
+function Test-CompatiblePython {
+    param([Parameter(Mandatory = $true)][string]$Candidate)
+
+    $details = Get-CompatiblePythonDetails -Candidate $Candidate
+    return $null -ne $details
+}
+
+function Get-RegisteredPythonCandidates {
     $launcher = Get-Command "py.exe" -ErrorAction SilentlyContinue
-    if ($null -ne $launcher) {
-        $probe = Invoke-NativeProbe -Executable $launcher.Source -Arguments @(
-            "-3.12", "-c", "import sys; print(sys.executable)"
+    if ($null -eq $launcher) {
+        return @()
+    }
+
+    # -0p is the non-installing legacy-compatible listing interface supported
+    # by both py.exe and the current Python Install Manager.
+    $probe = Invoke-NativeProbe -Executable $launcher.Source -Arguments @("-0p")
+    if ($probe.ExitCode -ne 0) {
+        return @()
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $probe.Output) {
+        $match = [regex]::Match(
+            [string]$line,
+            '(?<path>(?:[A-Za-z]:\\|\\\\).+?python(?:\d+(?:\.\d+)*)?\.exe)',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
-        if ($probe.ExitCode -eq 0 -and $probe.Output.Count -gt 0) {
-            $candidates.Add(([string]($probe.Output | Select-Object -Last 1)).Trim())
+        if ($match.Success) {
+            $candidates.Add($match.Groups["path"].Value.Trim())
         }
     }
-    $pythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
-    if ($null -ne $pythonCommand) {
-        $candidates.Add($pythonCommand.Source)
-    }
+    return @($candidates)
+}
+
+function Find-CompatiblePython {
+    $candidates = [System.Collections.Generic.List[string]]::new()
     if ($env:LOCALAPPDATA) {
         $candidates.Add((Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"))
     }
     if ($env:ProgramFiles) {
         $candidates.Add((Join-Path $env:ProgramFiles "Python312\python.exe"))
     }
-
-    foreach ($candidate in $candidates) {
-        if (Test-Python312 $candidate) {
-            return (Resolve-Path -LiteralPath $candidate).Path
+    foreach ($registered in Get-RegisteredPythonCandidates) {
+        $candidates.Add($registered)
+    }
+    $pythonCommand = Get-Command "python.exe" -ErrorAction SilentlyContinue
+    if ($null -ne $pythonCommand) {
+        $candidates.Add($pythonCommand.Source)
+    }
+    $installRoots = [System.Collections.Generic.List[string]]::new()
+    if ($env:LOCALAPPDATA) {
+        $installRoots.Add((Join-Path $env:LOCALAPPDATA "Programs\Python"))
+    }
+    if ($env:ProgramFiles) {
+        $installRoots.Add($env:ProgramFiles)
+    }
+    foreach ($installRoot in $installRoots) {
+        if (-not $installRoot -or -not (Test-Path -LiteralPath $installRoot -PathType Container)) {
+            continue
+        }
+        foreach ($installation in Get-ChildItem -LiteralPath $installRoot -Directory `
+            -Filter "Python3*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending) {
+            $candidates.Add((Join-Path $installation.FullName "python.exe"))
         }
     }
-    return $null
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $compatible = [System.Collections.Generic.List[object]]::new()
+    foreach ($candidate in $candidates) {
+        if (-not $candidate -or -not $seen.Add($candidate)) {
+            continue
+        }
+        $details = Get-CompatiblePythonDetails -Candidate $candidate
+        if ($null -ne $details) {
+            $compatible.Add($details)
+        }
+    }
+    if ($compatible.Count -eq 0) {
+        return $null
+    }
+
+    $selected = $compatible | Sort-Object `
+        @{ Expression = {
+            if ($_.Version.Major -eq 3 -and $_.Version.Minor -eq 12) { 0 } else { 1 }
+        } }, `
+        @{ Expression = { $_.Version }; Descending = $true }, `
+        @{ Expression = { $_.Path } } | Select-Object -First 1
+    return $selected.Path
 }
 
-function Confirm-Python312 {
-    $resolved = Find-Python312
+function Confirm-CompatiblePython {
+    $resolved = Find-CompatiblePython
     if ($null -ne $resolved) {
         return $resolved
     }
     if ($SkipPythonInstall) {
-        throw "Python 3.12 was not found and installation was explicitly skipped."
+        throw "Python 3.11 or newer was not found and installation was explicitly skipped."
     }
 
-    Write-Host "Python 3.12 was not found; installing $pythonPackageId with WinGet."
+    Write-Host (
+        "Python 3.11 or newer was not found; installing the recommended " +
+        "$pythonPackageId fallback with WinGet."
+    )
     Invoke-WinGetInstall -PackageId $pythonPackageId
     Refresh-ProcessPath
-    $resolved = Find-Python312
+    $resolved = Find-CompatiblePython
     if ($null -eq $resolved) {
-        throw "WinGet completed, but Python 3.12 could not be resolved in the current process."
+        throw "WinGet completed, but a compatible Python could not be resolved in the current process."
     }
     return $resolved
 }
@@ -309,7 +399,7 @@ function Test-VirtualEnvironment {
     if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
         return $false
     }
-    return (Test-Python312 $pythonPath)
+    return (Test-CompatiblePython $pythonPath)
 }
 
 function Move-IncompatibleEnvironmentAside {
@@ -549,16 +639,16 @@ try {
 
     if (-not (Test-VirtualEnvironment)) {
         Move-IncompatibleEnvironmentAside
-        $basePython = Confirm-Python312
-        Write-Host "Creating the Python 3.12 project environment at $environmentPath"
+        $basePython = Confirm-CompatiblePython
+        Write-Host "Creating the compatible Python project environment at $environmentPath"
         Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
-            -FailureMessage "Could not create the Python 3.12 project environment."
+            -FailureMessage "Could not create the compatible Python project environment."
         if (-not (Test-VirtualEnvironment)) {
-            throw "The new .venv did not contain a working Python 3.12 interpreter."
+            throw "The new .venv did not contain a working Python 3.11-or-newer interpreter."
         }
     }
     else {
-        Write-Host "Reusing the existing Python 3.12 environment at $environmentPath"
+        Write-Host "Reusing the existing compatible Python environment at $environmentPath"
     }
 
     Invoke-NativeCommand -Executable $pythonPath `

@@ -32,6 +32,12 @@ NATIVE_FACE_EMOTIONS = (
 NATIVE_FACE_DIMENSIONS = ("Valence", "Arousal")
 NATIVE_FACE_METRICS = (*NATIVE_FACE_EMOTIONS, *NATIVE_FACE_DIMENSIONS)
 NATIVE_FACE_HEADER = ["Row", "Timestamp", *NATIVE_FACE_METRICS]
+NATIVE_FACE_SOURCE_CHANNELS = {
+    "Joy": "Happy",
+    "Sadness": "Sad",
+    "Valence": "valence",
+    "Arousal": "arousal",
+}
 
 
 def analyse_native_face_folder(
@@ -118,9 +124,10 @@ def build_native_face_column_info() -> dict[str, ColumnInfo]:
         ),
     }
     for name in NATIVE_FACE_EMOTIONS:
+        source_channel = NATIVE_FACE_SOURCE_CHANNELS.get(name, name)
         info[name] = ColumnInfo(
             unique_name=name,
-            original_name=name,
+            original_name=source_channel,
             display_name=name,
             category="NATIVE FACE(Py-Feat Emotion)",
             group="Emotion",
@@ -131,20 +138,25 @@ def build_native_face_column_info() -> dict[str, ColumnInfo]:
                 else f"{name} is unsupported by the native Py-Feat contract and remains blank."
             ),
             provided_by=NATIVE_FACE_PROVIDER,
-            channel_identifier=f"NATIVE_FACE_Emotion_{name}",
+            channel_identifier=f"NATIVE_FACE_Emotion_{source_channel}",
             scale_hint="0_to_100",
         )
     for name in NATIVE_FACE_DIMENSIONS:
+        source_channel = NATIVE_FACE_SOURCE_CHANNELS.get(name, name)
         info[name] = ColumnInfo(
             unique_name=name,
-            original_name=name,
+            original_name=source_channel,
             display_name=name,
-            category="NATIVE FACE(Py-Feat Affect)",
+            category=(
+                "NATIVE FACE(Py-Feat Dimensional Affect)"
+                if name == "Arousal"
+                else "NATIVE FACE(Py-Feat Affect)"
+            ),
             group="Affect",
             unit="Index",
             description=f"Py-Feat primary-face {name}, scaled from -1..1 to -100..100.",
             provided_by=NATIVE_FACE_PROVIDER,
-            channel_identifier=f"NATIVE_FACE_Affect_{name}",
+            channel_identifier=f"NATIVE_FACE_Affect_{source_channel}",
             scale_hint="minus100_to_100",
         )
     return info

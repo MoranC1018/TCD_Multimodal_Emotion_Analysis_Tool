@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -301,9 +302,11 @@ def tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-def write_full_imotions_csv(path: Path) -> None:
+def write_full_imotions_csv(path: Path, *, include_arousal: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = list(VIDEO_METRICS)
+    columns = [
+        metric for metric in VIDEO_METRICS if include_arousal or metric != "Arousal"
+    ]
     metadata = [
         ["#INFO"],
         ["#Study name", "Workflow test"],
@@ -328,6 +331,26 @@ def write_full_imotions_csv(path: Path) -> None:
         writer.writerow([2, 40, *range(2, len(columns) + 2)])
 
 
+def write_imotions_provider_manifest(root: Path) -> Path:
+    manifest = root / "column_manifest.csv"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    with manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("source", "statistic", "source_column", "provided_by"),
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "source": "001",
+                "statistic": "Anger",
+                "source_column": "Anger",
+                "provided_by": "iMotions AFFDEX",
+            }
+        )
+    return manifest
+
+
 def write_compact_audio_csv(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -350,6 +373,143 @@ def write_compact_audio_csv(path: Path) -> None:
                 ],
             ]
         )
+
+
+class WorkflowCliVideoRequestTests(unittest.TestCase):
+    def test_help_exposes_canonical_video_flags_and_one_release_aliases(self) -> None:
+        from analysis.workflow import build_parser
+
+        help_text = build_parser().format_help()
+
+        self.assertIn("--video-source VIDEO_SOURCE", help_text)
+        self.assertIn("--video-method {run,import}", help_text)
+        self.assertIn("--imotions-source IMOTIONS_SOURCE", help_text)
+        self.assertIn("--native_face-source NATIVE_FACE_SOURCE", help_text)
+
+    def test_every_documented_analysis_entrypoint_has_working_help(self) -> None:
+        repository = Path(__file__).resolve().parents[2]
+        entrypoints = (
+            ("processing face", "-m", "processing.face_analysis", "--help"),
+            ("processing text", "-m", "processing.text_analysis", "--help"),
+            (
+                "processing audio",
+                "processing/audio_analysis/run_audio_analysis.py",
+                "--help",
+            ),
+            ("expert imotions", "-m", "analysis.imotions", "--help"),
+            ("expert native face", "-m", "analysis.native_face", "--help"),
+            ("expert audio", "-m", "analysis.audio", "--help"),
+            ("stable workflow", "-m", "analysis.workflow", "--help"),
+        )
+
+        for label, *arguments in entrypoints:
+            with self.subTest(entrypoint=label):
+                completed = subprocess.run(
+                    [sys.executable, *arguments],
+                    cwd=repository,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("usage:", completed.stdout.casefold())
+
+    def test_canonical_video_run_and_import_normalize_to_one_video_request(self) -> None:
+        from analysis.workflow import request_from_cli
+
+        for method in ("run", "import"):
+            with self.subTest(method=method):
+                request = request_from_cli(
+                    [
+                        "--output-root",
+                        "output",
+                        "--video-source",
+                        "provider-input",
+                        "--video-method",
+                        method,
+                        "--no-combined-workbook",
+                    ]
+                )
+                self.assertEqual(len(request.modalities), 1)
+                self.assertEqual(request.modalities[0].name, "video")
+                self.assertEqual(request.modalities[0].source_method, method)
+                self.assertEqual(request.warnings, ())
+
+    def test_legacy_video_aliases_normalize_to_video_and_warn(self) -> None:
+        from analysis.workflow import request_from_cli
+
+        for alias in ("imotions", "native_face"):
+            with self.subTest(alias=alias):
+                request = request_from_cli(
+                    [
+                        "--output-root",
+                        "output",
+                        f"--{alias}-source",
+                        "provider-input",
+                        f"--{alias}-method",
+                        "import",
+                        "--no-combined-workbook",
+                    ]
+                )
+                self.assertEqual(request.modalities[0].name, "video")
+                self.assertEqual(request.modalities[0].source_method, "import")
+                self.assertEqual(len(request.warnings), 1)
+                self.assertIn("deprecated", request.warnings[0].casefold())
+                self.assertIn(f"--{alias}-source", request.warnings[0])
+
+    def test_duplicate_canonical_or_provider_alias_video_requests_fail_clearly(self) -> None:
+        from analysis.workflow import WorkflowError, request_from_cli
+
+        cases = (
+            (
+                "canonical plus alias",
+                (
+                    "--video-source", "canonical", "--video-method", "import",
+                    "--imotions-source", "legacy", "--imotions-method", "import",
+                ),
+            ),
+            (
+                "both aliases",
+                (
+                    "--imotions-source", "imotions", "--imotions-method", "run",
+                    "--native_face-source", "native", "--native_face-method", "run",
+                ),
+            ),
+        )
+        for label, arguments in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(WorkflowError, "one Video source"):
+                    request_from_cli(
+                        ["--output-root", "output", *arguments, "--no-combined-workbook"]
+                    )
+
+    def test_incomplete_or_conflicting_legacy_aliases_fail_clearly(self) -> None:
+        from analysis.workflow import WorkflowError, request_from_cli
+
+        cases = (
+            (
+                "method without source",
+                ("--imotions-method", "run"),
+                "--imotions-source and --imotions-method must be supplied together",
+            ),
+            (
+                "source without method",
+                ("--native_face-source", "native"),
+                "--native_face-source and --native_face-method must be supplied together",
+            ),
+            (
+                "crossed aliases",
+                ("--imotions-source", "imotions", "--native_face-method", "import"),
+                "provider aliases cannot be combined",
+            ),
+        )
+        for label, arguments, message in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(WorkflowError, message):
+                    request_from_cli(
+                        ["--output-root", "output", *arguments, "--no-combined-workbook"]
+                    )
 
 
 class WorkflowTests(unittest.TestCase):
@@ -391,6 +551,8 @@ class WorkflowTests(unittest.TestCase):
         metrics = AUDIO_METRICS if modality == "audio" else VIDEO_METRICS
         report = root / "emotion" / "Andy Burnham" / "combined" / "other_findings" / "descriptive_statistics.csv"
         write_sectioned_report(report, metrics)
+        if modality == "video":
+            write_imotions_provider_manifest(root)
         return root
 
     def _request(
@@ -399,7 +561,7 @@ class WorkflowTests(unittest.TestCase):
         groups: tuple[SpeakerGroupDefinition, ...] | None = None,
         reverse: bool = False,
     ):
-        modality_names = ("imotions", "audio")[: len(methods)]
+        modality_names = ("video", "audio")[: len(methods)]
         if reverse:
             modality_names = tuple(reversed(modality_names))
         modalities = tuple(
@@ -407,7 +569,7 @@ class WorkflowTests(unittest.TestCase):
                 name,
                 method,
                 (
-                    self.video_import_root if name == "imotions" else self.audio_import_root
+                    self.video_import_root if name == "video" else self.audio_import_root
                 ) if method == "import" else self.root / f"{name}-input",
             )
             for name, method in zip(modality_names, methods)
@@ -415,6 +577,8 @@ class WorkflowTests(unittest.TestCase):
         for modality in modalities:
             if modality.source_method == "run":
                 modality.source_path.mkdir()
+                if modality.name == "video":
+                    write_full_imotions_csv(modality.source_path / "workflow.csv")
         return self.WorkflowRequest(
             output_root=self.output_root,
             modalities=modalities,
@@ -803,8 +967,8 @@ class WorkflowTests(unittest.TestCase):
 
         result = run_workflow(self._request("run", "run", reverse=True), progress=events.append)
 
-        self.assertEqual(events[:2], ["Starting Video / iMotions analysis", "video analyser"])
-        self.assertEqual(events[2], f"Completed Video / iMotions analysis: {video_root.resolve()}")
+        self.assertEqual(events[:2], ["Starting Video analysis", "video analyser"])
+        self.assertEqual(events[2], f"Completed Video analysis: {video_root.resolve()}")
         self.assertEqual(events[3], "Starting Audio analysis")
         self.assertTrue(result.workbook_path.is_file())
         self.assertEqual(run_video.call_args.kwargs["output_root"], self.output_root / "video")
@@ -892,6 +1056,59 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(manifest["request"]["confidence_level"], 0.90)
         self.assertEqual(manifest["request"]["headline_policy"], "equal")
 
+    def test_audio_only_workflow_omits_video_provenance(self) -> None:
+        from analysis.workflow import run_workflow
+
+        before = tree_hash(self.audio_import_root)
+        request = self.WorkflowRequest(
+            output_root=self.root / "audio-only-output",
+            modalities=(
+                self.ModalityRequest("audio", "import", self.audio_import_root),
+            ),
+            speaker_groups=self.groups,
+        )
+
+        result = run_workflow(request)
+
+        self.assertEqual(tree_hash(self.audio_import_root), before)
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["modality_roots"],
+            {"audio": str(self.audio_import_root.resolve())},
+        )
+        self.assertIsNone(manifest["video"])
+        self.assertIsNone(manifest["video_column_manifest_path"])
+        self.assertEqual(manifest["video_column_manifest_rows"], [])
+        self.assertFalse((result.output_root / "video_column_manifest.csv").exists())
+
+    def test_text_only_workflow_omits_video_provenance(self) -> None:
+        from analysis.workflow import run_workflow
+
+        text_root = self.root / "text-only-results"
+        write_text_construct_summary(
+            text_root / "text_output" / "multimodal" / "speaker_level_summary.csv"
+        )
+        before = tree_hash(text_root)
+        request = self.WorkflowRequest(
+            output_root=self.root / "text-only-output",
+            modalities=(self.ModalityRequest("text", "import", text_root),),
+            speaker_groups=self.groups,
+            include_probability_sheets=False,
+        )
+
+        result = run_workflow(request)
+
+        self.assertEqual(tree_hash(text_root), before)
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["modality_roots"],
+            {"text": str(text_root.resolve())},
+        )
+        self.assertIsNone(manifest["video"])
+        self.assertIsNone(manifest["video_column_manifest_path"])
+        self.assertEqual(manifest["video_column_manifest_rows"], [])
+        self.assertFalse((result.output_root / "video_column_manifest.csv").exists())
+
     def test_successful_rerun_archives_a_self_contained_matching_workbook_manifest_pair(self) -> None:
         from analysis.workflow import run_workflow
 
@@ -921,6 +1138,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(current_manifest["request"]["default_reference"], 1.0)
         current_hash = hashlib.sha256(second.workbook_path.read_bytes()).hexdigest()
         self.assertNotEqual(current_hash, first_workbook_hash)
+
+    def test_successful_video_rerun_archives_its_physical_column_manifest(self) -> None:
+        from analysis.workflow import run_workflow
+
+        request = self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(
+                self.ModalityRequest("video", "import", self.video_import_root),
+            ),
+            speaker_groups=self.groups,
+        )
+        first = run_workflow(request)
+        first_column_manifest = self.output_root / "video_column_manifest.csv"
+        before = first_column_manifest.read_bytes()
+
+        second = run_workflow(request)
+
+        current = json.loads(second.manifest_path.read_text(encoding="utf-8"))
+        archive = Path(current["stale_artifact_policy"]["archive_directory"])
+        archived_column_manifest = archive / "video_column_manifest.csv"
+        archived_manifest = json.loads(
+            (archive / "combined_analysis_manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(archived_column_manifest.read_bytes(), before)
+        self.assertEqual(
+            archived_manifest["video_column_manifest_path"],
+            str(archived_column_manifest.resolve()),
+        )
+        self.assertEqual(
+            current["video_column_manifest_path"],
+            str((self.output_root / "video_column_manifest.csv").resolve()),
+        )
+        self.assertTrue(first.workbook_path and second.workbook_path)
 
     def test_manifest_records_versioned_accepted_and_rejected_discovery_provenance(self) -> None:
         from analysis.workflow import run_workflow
@@ -1050,10 +1300,14 @@ class WorkflowTests(unittest.TestCase):
 
         input_dir = self.root / "iMotions_Run" / "Andy Burnham" / "Sensor Data"
         for index in range(1, 6):
-            write_full_imotions_csv(input_dir / f"{index:03}_Workflow.csv")
+            write_full_imotions_csv(
+                input_dir / f"{index:03}_Workflow.csv",
+                include_arousal=False,
+            )
+        before = tree_hash(input_dir.parent.parent)
         request = self.WorkflowRequest(
             output_root=self.output_root,
-            modalities=(self.ModalityRequest("imotions", "run", input_dir.parent.parent, write_graphs=False),),
+            modalities=(self.ModalityRequest("video", "run", input_dir.parent.parent, write_graphs=False),),
             speaker_groups=self.groups,
         )
 
@@ -1066,7 +1320,519 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertTrue(report.is_file())
         manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["request"]["modalities"][0]["name"], "video")
+        self.assertEqual(manifest["video"]["requested_modality"], "video")
+        self.assertEqual(
+            manifest["video"]["sources"][0]["resolved_provider"],
+            "imotions_affdex",
+        )
+        self.assertTrue(manifest["video"]["sources"][0]["detection_evidence"])
+        self.assertEqual(manifest["video"]["sources"][0]["source_method"], "run")
+        self.assertEqual(manifest["video"]["sources"][0]["source_path"], str(input_dir.parent.parent.resolve()))
         self.assertEqual(manifest["modality_roots"]["video"], str((self.output_root / "video").resolve()))
+        column_manifest = self.output_root / "video_column_manifest.csv"
+        with column_manifest.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(tuple(row["canonical_measure"] for row in rows), VIDEO_METRICS)
+        self.assertTrue(all(row["requested_modality"] == "video" for row in rows))
+        self.assertTrue(all(row["resolved_provider"] == "imotions_affdex" for row in rows))
+        self.assertEqual(
+            next(row for row in rows if row["canonical_measure"] == "Arousal")[
+                "provider_availability"
+            ],
+            "conditionally available",
+        )
+        self.assertEqual(tree_hash(input_dir.parent.parent), before)
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        video_sheet = book["Video"]
+        arousal_row = 2 + VIDEO_METRICS.index("Arousal")
+        engagement_row = 2 + VIDEO_METRICS.index("Engagement")
+        self.assertIsNone(video_sheet.cell(arousal_row, 4).value)
+        self.assertIsNotNone(video_sheet.cell(engagement_row, 4).value)
+
+    def test_fresh_native_face_run_uses_the_canonical_video_workflow(self) -> None:
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+        from analysis.workflow import run_workflow
+
+        source_root = self.root / "native-face-run"
+        _write_verified_pyfeat_run(source_root)
+        before = tree_hash(source_root)
+        request = self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(
+                self.ModalityRequest("video", "run", source_root, write_graphs=False),
+            ),
+            speaker_groups=(
+                SpeakerGroupDefinition("native", "Native", ("Speaker A",)),
+            ),
+        )
+
+        result = run_workflow(request)
+
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["request"]["modalities"][0]["name"], "video")
+        self.assertEqual(
+            manifest["video"]["sources"][0]["resolved_provider"],
+            "pyfeat_native_face",
+        )
+        self.assertEqual(result.modality_roots, {"video": (self.output_root / "video").resolve()})
+        self.assertEqual(tree_hash(source_root), before)
+        self.assertEqual(openpyxl.load_workbook(result.workbook_path).sheetnames.count("Video"), 1)
+        self.assertFalse(
+            any("native face" in name.casefold() for name in openpyxl.load_workbook(result.workbook_path).sheetnames)
+        )
+
+    def test_cli_imports_provider_tagged_pyfeat_reports_through_canonical_and_legacy_flags(self) -> None:
+        from analysis.tests.test_video import _write_pyfeat_analysis_reports
+
+        reports = _write_pyfeat_analysis_reports(
+            self.root / "pyfeat-analysis-reports",
+            (
+                ("Speaker A", "source-0001", 0.2, 0.75),
+                ("Speaker B", "source-0002", 0.6, -0.25),
+            ),
+            titles=("Interview 1", "Interview 1"),
+        )
+        before = tree_hash(reports)
+        repository = Path(__file__).resolve().parents[2]
+        aliases = (
+            ("canonical", "--video-source", "--video-method"),
+            ("legacy", "--native_face-source", "--native_face-method"),
+        )
+
+        for label, source_flag, method_flag in aliases:
+            output_root = self.root / f"pyfeat-{label}-import-output"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "analysis.workflow",
+                    "--output-root",
+                    str(output_root),
+                    source_flag,
+                    str(reports),
+                    method_flag,
+                    "import",
+                    "--no-combined-workbook",
+                ],
+                cwd=repository,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            with self.subTest(alias=label):
+                self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+                manifest = json.loads(
+                    (output_root / "combined_analysis_manifest.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(manifest["request"]["modalities"][0]["name"], "video")
+                self.assertEqual(manifest["request"]["modalities"][0]["source_method"], "import")
+                self.assertEqual(
+                    manifest["video"]["sources"][0]["resolved_provider"],
+                    "pyfeat_native_face",
+                )
+                self.assertEqual(
+                    tuple(item["display_speaker"] for item in manifest["accepted_reports"]),
+                    ("Speaker A", "Speaker B"),
+                )
+                self.assertEqual(
+                    tuple(
+                        item["source_id"]
+                        for item in manifest["video"]["sources"][0]["original_columns"]
+                        if item["canonical_measure"] == "Joy"
+                    ),
+                    ("Speaker A::Interview_1", "Speaker B::Interview_1"),
+                )
+                if label == "legacy":
+                    self.assertIn("deprecated compatibility aliases", completed.stderr)
+                self.assertEqual(tree_hash(reports), before)
+
+    def test_pyfeat_report_import_keeps_namespaced_ids_in_workbook_and_provenance(self) -> None:
+        from analysis.tests.test_video import _write_pyfeat_analysis_reports
+        from analysis.workflow import run_workflow
+
+        reports = _write_pyfeat_analysis_reports(
+            self.root / "colliding-pyfeat-analysis-reports",
+            (
+                ("Speaker A", "source-0001", 0.2, 0.75),
+                ("Speaker B", "source-0002", 0.6, -0.25),
+            ),
+            titles=("Interview 1", "Interview 1"),
+        )
+        before = tree_hash(reports)
+        request = self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(self.ModalityRequest("video", "import", reports),),
+            speaker_groups=(
+                SpeakerGroupDefinition("native", "Native", ("Speaker A", "Speaker B")),
+            ),
+        )
+
+        result = run_workflow(request)
+
+        expected = ("Speaker A::Interview_1", "Speaker B::Interview_1")
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            tuple(
+                item["source_id"]
+                for item in manifest["video"]["sources"][0]["original_columns"]
+                if item["canonical_measure"] == "Joy"
+            ),
+            expected,
+        )
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        joy_row = 2 + VIDEO_METRICS.index("Joy")
+        self.assertEqual(
+            (
+                book["Video"].cell(joy_row, 4).value,
+                book["Video"].cell(joy_row, 5).value,
+            ),
+            (20, 60),
+        )
+        inputs = book["Inference Inputs"]
+        input_rows = {
+            inputs.cell(row, 1).value: row
+            for row in range(2, inputs.max_row + 1)
+        }
+        self.assertEqual(
+            inputs.cell(input_rows["Video|Joy|speakera"], 2).value,
+            expected[0],
+        )
+        self.assertEqual(
+            inputs.cell(input_rows["Video|Joy|speakerb"], 2).value,
+            expected[1],
+        )
+        self.assertEqual(tree_hash(reports), before)
+
+    def test_mixed_verified_raw_and_pyfeat_reports_fail_before_output_writes(self) -> None:
+        from analysis.native_face import analyse_native_face_folder
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+        from analysis.workflow import WorkflowError, run_workflow
+
+        mixed = self.root / "mixed-pyfeat-import"
+        _write_verified_pyfeat_run(mixed)
+        staged_reports = self.root / "mixed-pyfeat-reports-stage"
+        analyse_native_face_folder(mixed, output_root=staged_reports, write_graphs=False)
+        for item in staged_reports.iterdir():
+            item.rename(mixed / item.name)
+        staged_reports.rmdir()
+        before = tree_hash(mixed)
+        output_root = self.root / "mixed-pyfeat-output"
+        request = self.WorkflowRequest(
+            output_root=output_root,
+            modalities=(self.ModalityRequest("video", "import", mixed),),
+            speaker_groups=(),
+            write_combined_workbook=False,
+        )
+
+        with self.assertRaisesRegex(
+            WorkflowError,
+            "both raw artifacts and provider-tagged Analysis reports.*exactly one format root",
+        ):
+            run_workflow(request)
+
+        self.assertEqual(tree_hash(mixed), before)
+        self.assertFalse(output_root.exists())
+
+    def test_mixed_tampered_raw_hash_failure_wins_before_output_writes(self) -> None:
+        from analysis.native_face import analyse_native_face_folder
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+        from analysis.workflow import WorkflowError, run_workflow
+
+        mixed = self.root / "mixed-tampered-pyfeat-import"
+        core = _write_verified_pyfeat_run(mixed)
+        staged_reports = self.root / "mixed-tampered-pyfeat-reports-stage"
+        analyse_native_face_folder(mixed, output_root=staged_reports, write_graphs=False)
+        for item in staged_reports.iterdir():
+            item.rename(mixed / item.name)
+        staged_reports.rmdir()
+        core.write_text(
+            core.read_text(encoding="utf-8").replace(",0.2,", ",0.21,", 1),
+            encoding="utf-8",
+        )
+        before = tree_hash(mixed)
+        output_root = self.root / "mixed-tampered-pyfeat-output"
+        request = self.WorkflowRequest(
+            output_root=output_root,
+            modalities=(self.ModalityRequest("video", "import", mixed),),
+            speaker_groups=(),
+            write_combined_workbook=False,
+        )
+
+        with self.assertRaisesRegex(WorkflowError, "hash or schema does not match"):
+            run_workflow(request)
+
+        self.assertEqual(tree_hash(mixed), before)
+        self.assertFalse(output_root.exists())
+
+    def test_invalid_provider_tagged_pyfeat_report_fails_before_output_writes(self) -> None:
+        from analysis.workflow import WorkflowError, run_workflow
+
+        reports = self.root / "invalid-pyfeat-analysis-reports"
+        report = (
+            reports
+            / "emotion"
+            / "Speaker A"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(
+            report,
+            tuple(metric for metric in VIDEO_METRICS if metric != "Arousal"),
+        )
+        with report.with_name("column_manifest.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "source",
+                    "statistic",
+                    "source_column",
+                    "channel_identifier",
+                    "provided_by",
+                ),
+            )
+            writer.writeheader()
+            for metric in VIDEO_METRICS:
+                writer.writerow(
+                    {
+                        "source": "001",
+                        "statistic": metric,
+                        "source_column": metric,
+                        "channel_identifier": f"NATIVE_FACE_{metric}",
+                        "provided_by": "Py-Feat / Native Face",
+                    }
+                )
+        before = tree_hash(reports)
+        output_root = self.root / "invalid-pyfeat-import-output"
+        request = self.WorkflowRequest(
+            output_root=output_root,
+            modalities=(self.ModalityRequest("video", "import", reports),),
+            speaker_groups=(),
+            write_combined_workbook=False,
+        )
+
+        with self.assertRaisesRegex(WorkflowError, "missing required.*Arousal"):
+            run_workflow(request)
+
+        self.assertEqual(tree_hash(reports), before)
+        self.assertFalse(output_root.exists())
+
+    def test_direct_workflow_rejects_each_imotions_only_option_for_pyfeat_before_output(self) -> None:
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+        from analysis.workflow import WorkflowError, run_workflow
+
+        source_root = self.root / "pyfeat-options-source"
+        _write_verified_pyfeat_run(source_root)
+        before = tree_hash(source_root)
+        options = (
+            ("include_landmarks", "--include-landmarks"),
+            ("include_timing", "--include-timing"),
+            ("exclude_geometry", "--exclude-geometry"),
+        )
+
+        for field, option in options:
+            output_root = self.root / f"direct-{field}-output"
+            request = self.WorkflowRequest(
+                output_root=output_root,
+                modalities=(
+                    self.ModalityRequest(
+                        "video",
+                        "run",
+                        source_root,
+                        write_graphs=False,
+                        **{field: True},
+                    ),
+                ),
+                speaker_groups=(),
+                write_combined_workbook=False,
+            )
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(
+                    WorkflowError,
+                    rf"Py-Feat / Native Face.*{re.escape(option)}.*iMotions AFFDEX",
+                ):
+                    run_workflow(request)
+                self.assertEqual(tree_hash(source_root), before)
+                self.assertFalse(output_root.exists())
+
+    def test_cli_rejects_each_imotions_only_option_for_pyfeat_before_output(self) -> None:
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+
+        source_root = self.root / "pyfeat-cli-options-source"
+        _write_verified_pyfeat_run(source_root)
+        before = tree_hash(source_root)
+        repository = Path(__file__).resolve().parents[2]
+
+        for option in ("--include-landmarks", "--include-timing", "--exclude-geometry"):
+            output_root = self.root / f"cli-{option[2:]}-output"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "analysis.workflow",
+                    "--output-root",
+                    str(output_root),
+                    "--video-source",
+                    str(source_root),
+                    "--video-method",
+                    "run",
+                    "--no-combined-workbook",
+                    option,
+                ],
+                cwd=repository,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            with self.subTest(option=option):
+                message = (completed.stderr + completed.stdout).strip()
+                self.assertEqual(completed.returncode, 1, message)
+                self.assertIn("Py-Feat / Native Face", message)
+                self.assertIn(option, message)
+                self.assertIn("iMotions AFFDEX", message)
+                self.assertNotIn("Traceback", message)
+                self.assertEqual(tree_hash(source_root), before)
+                self.assertFalse(output_root.exists())
+
+    def test_multi_speaker_native_face_run_keeps_pyfeat_provenance_for_every_report(self) -> None:
+        from analysis.tests.test_video import _write_verified_pyfeat_run
+        from analysis.workflow import run_workflow
+
+        source_root = self.root / "multi-speaker-native-face-run"
+        _write_verified_pyfeat_run(
+            source_root,
+            (
+                ("Speaker A", "source-0001", 0.2, 0.75),
+                ("Speaker B", "source-0002", 0.6, -0.25),
+            ),
+        )
+        before = tree_hash(source_root)
+        request = self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(
+                self.ModalityRequest("video", "run", source_root, write_graphs=False),
+            ),
+            speaker_groups=(
+                SpeakerGroupDefinition("native", "Native", ("Speaker A", "Speaker B")),
+            ),
+        )
+
+        result = run_workflow(request)
+
+        self.assertEqual(tree_hash(source_root), before)
+        manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest["video"]["sources"]), 1)
+        self.assertEqual(
+            manifest["video"]["sources"][0]["resolved_provider"],
+            "pyfeat_native_face",
+        )
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        video = book["Video"]
+        joy_row = 2 + VIDEO_METRICS.index("Joy")
+        arousal_row = 2 + VIDEO_METRICS.index("Arousal")
+        engagement_row = 2 + VIDEO_METRICS.index("Engagement")
+        self.assertEqual(video.cell(joy_row, 4).value, 20)
+        self.assertEqual(video.cell(joy_row, 5).value, 60)
+        self.assertEqual(video.cell(arousal_row, 4).value, 75)
+        self.assertEqual(video.cell(arousal_row, 5).value, -25)
+        self.assertIsNone(video.cell(engagement_row, 4).value)
+        self.assertIsNone(video.cell(engagement_row, 5).value)
+
+    def test_video_detection_failures_do_not_create_or_archive_outputs(self) -> None:
+        from analysis.tests.test_video import _write_imotions_csv, _write_verified_pyfeat_run
+        from analysis.workflow import WorkflowError, run_workflow
+
+        cases: list[tuple[str, Path]] = []
+        empty = self.root / "no-provider"
+        empty.mkdir()
+        cases.append(("No supported Video provider", empty))
+        both = self.root / "both-providers"
+        _write_verified_pyfeat_run(both)
+        _write_imotions_csv(both, "imotions.csv")
+        cases.append(("both supported Video providers", both))
+
+        for index, (message, source_root) in enumerate(cases):
+            with self.subTest(message=message):
+                output_root = self.root / f"detection-failure-{index}"
+                before = tree_hash(source_root)
+                request = self.WorkflowRequest(
+                    output_root=output_root,
+                    modalities=(
+                        self.ModalityRequest("video", "run", source_root, write_graphs=False),
+                    ),
+                    speaker_groups=(),
+                    write_combined_workbook=False,
+                )
+
+                with self.assertRaisesRegex(WorkflowError, message):
+                    run_workflow(request)
+
+                self.assertEqual(tree_hash(source_root), before)
+                self.assertFalse(output_root.exists())
+
+    def test_run_sources_must_not_overlap_output_root_before_any_write(self) -> None:
+        from analysis.workflow import WorkflowError, run_workflow
+
+        video_equal = self.root / "video-equal"
+        write_full_imotions_csv(video_equal / "source.csv")
+        video_ancestor = self.root / "video-source-ancestor"
+        write_full_imotions_csv(video_ancestor / "source.csv")
+        video_descendant_output = self.root / "video-output-ancestor"
+        video_descendant = video_descendant_output / "video"
+        write_full_imotions_csv(video_descendant / "source.csv")
+        audio_equal = self.root / "audio-equal"
+        write_compact_audio_csv(
+            audio_equal / "Speaker A" / "source-0001" / "audio_analysis.csv"
+        )
+        cases = (
+            ("video equal", "video", video_equal, video_equal),
+            (
+                "video output inside source",
+                "video",
+                video_ancestor,
+                video_ancestor / "workflow-output",
+            ),
+            (
+                "video source inside output",
+                "video",
+                video_descendant,
+                video_descendant_output,
+            ),
+            ("audio equal", "audio", audio_equal, audio_equal),
+        )
+
+        for label, modality, source_root, output_root in cases:
+            with self.subTest(case=label):
+                protected_root = (
+                    output_root if output_root.exists() else source_root
+                )
+                before = tree_hash(protected_root)
+                request = self.WorkflowRequest(
+                    output_root=output_root,
+                    modalities=(
+                        self.ModalityRequest(
+                            modality,
+                            "run",
+                            source_root,
+                            write_graphs=False,
+                        ),
+                    ),
+                    speaker_groups=(),
+                    write_combined_workbook=False,
+                )
+
+                with self.assertRaisesRegex(WorkflowError, "must not overlap"):
+                    run_workflow(request)
+
+                self.assertEqual(tree_hash(protected_root), before)
+                if output_root != protected_root:
+                    self.assertFalse(output_root.exists())
 
     def test_fresh_audio_run_reaches_combined_workbook(self) -> None:
         from analysis.workflow import run_workflow
@@ -1290,6 +2056,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
                     / "descriptive_statistics.csv"
                 )
                 write_sectioned_report(report, metrics, values)
+        write_imotions_provider_manifest(self.video_root)
 
         self.groups = (
             SpeakerGroupDefinition("pair", "Pair", ("Marine Le Pen", "Andy Burnham")),
@@ -1510,7 +2277,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
         request = self.WorkflowRequest(
             output_root=output_root or self.output_root,
             modalities=(
-                self.ModalityRequest("imotions", "import", self.video_root),
+                self.ModalityRequest("video", "import", self.video_root),
                 self.ModalityRequest("audio", "import", self.audio_root),
             ),
             speaker_groups=self.groups,
@@ -1631,7 +2398,11 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
         self.assertTrue(manifest_path.is_file())
         self.assertEqual(
             sorted(path.name for path in cli_output.iterdir()),
-            ["combined_analysis.xlsx", "combined_analysis_manifest.json"],
+            [
+                "combined_analysis.xlsx",
+                "combined_analysis_manifest.json",
+                "video_column_manifest.csv",
+            ],
         )
 
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1648,7 +2419,7 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
                 "output_root": str(cli_output.resolve()),
                 "modalities": [
                     {
-                        "name": "imotions",
+                        "name": "video",
                         "source_method": "import",
                         "source_path": str(self.video_root.resolve()),
                         **modality_options,
@@ -1698,7 +2469,9 @@ class ImportedWorkflowWorkbookIntegrationTests(unittest.TestCase):
         accepted_paths = [entry["path"] for entry in manifest["accepted_reports"]]
         self.assertEqual(len(accepted_paths), len(set(accepted_paths)))
         self.assertEqual(manifest["rejected_reports"], [])
-        self.assertEqual(manifest["warnings"], [])
+        self.assertEqual(len(manifest["warnings"]), 1)
+        self.assertIn("deprecated", manifest["warnings"][0].casefold())
+        self.assertIn("DeprecationWarning", completed.stderr)
         self.assertEqual(manifest["status"], "complete")
         self.assertEqual(manifest["schema_version"], 2)
         self.assertRegex(manifest["software"]["version"], r"^\d+\.\d+\.\d+$")

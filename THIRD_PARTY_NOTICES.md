@@ -35,7 +35,7 @@ covered by the root MIT License.
 When publishing research that uses OpenSMILE, acknowledge the software and
 cite:
 
-> Florian Eyben, Martin Wöllmer, and Björn Schuller. “openSMILE — The Munich
+> Florian Eyben, Martin Wöllmer, and Björn Schuller. “openSMILE - The Munich
 > Versatile and Fast Open-Source Audio Feature Extractor.” Proceedings of ACM
 > Multimedia, 2010. https://doi.org/10.1145/1873951.1874246
 

@@ -24,6 +24,10 @@ The third design is implemented.
 
 Use the project's single environment:
 
+The pinned stack requires Python 3.11 or newer. Python 3.12 is tested and
+recommended, while other compatible versions are accepted; the command below
+selects the recommended version explicitly.
+
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt

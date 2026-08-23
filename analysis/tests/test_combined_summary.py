@@ -1,4 +1,6 @@
 import csv
+import dataclasses
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,9 @@ from unittest.mock import patch
 import openpyxl
 
 from analysis.native_face import NATIVE_FACE_METRICS
+from analysis.video import CanonicalVideoResult, DetectedVideoSource, VideoMetricProvenance
+from analysis.video_contract import VIDEO_NORMALIZATION_VERSION
+from analysis.video_contract import VIDEO_COMMON_METRICS
 from analysis.combined_summary import (
     AUDIO_DIMENSIONS,
     AUDIO_EMOTIONS,
@@ -91,6 +96,191 @@ class CombinedSummaryTests(unittest.TestCase):
         )
         write_sectioned_report(return_path, metrics, base, source_orders)
         return return_path
+
+    def test_video_provider_matrix_writes_one_canonical_sheet_with_union_blanks(self) -> None:
+        """Removing provider-specific branching must not restore a second sheet or zero-fill gaps."""
+
+        established_imotions_metrics = tuple(
+            metric for metric in VIDEO_METRICS if metric != "Arousal"
+        )
+        pyfeat_available = frozenset((*VIDEO_COMMON_METRICS, "Arousal"))
+        cases = (
+            ("imotions_affdex", "video", established_imotions_metrics, {"Arousal"}),
+            (
+                "pyfeat_native_face",
+                "native_face",
+                NATIVE_FACE_METRICS,
+                set(VIDEO_METRICS) - pyfeat_available,
+            ),
+        )
+
+        for provider, modality, report_metrics, unavailable_metrics in cases:
+            for source_count in (1, 7, 14):
+                with self.subTest(provider=provider, source_count=source_count):
+                    source_ids = [
+                        f"source-{index:04d}" for index in range(1, source_count + 1)
+                    ]
+                    report = (
+                        self.root
+                        / f"{provider}-{source_count}"
+                        / "Researcher Alpha"
+                        / "descriptive_statistics.csv"
+                    )
+                    write_sectioned_report(
+                        report,
+                        report_metrics,
+                        10,
+                        sources=source_ids,
+                    )
+                    result = build_combined_workbook(
+                        {
+                            modality: (
+                                CombinedSource(
+                                    modality,
+                                    "researcher-alpha",
+                                    "Researcher Alpha",
+                                    report,
+                                ),
+                            )
+                        },
+                        self.root / f"{provider}-{source_count}.xlsx",
+                        include_construct_comparison=True,
+                    )
+
+                    book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+                    self.assertEqual(result.quantitative_sheets, ("Video",))
+                    self.assertIn("Video", book.sheetnames)
+                    self.assertFalse(
+                        any("native face" in name.casefold() for name in book.sheetnames)
+                    )
+                    self.assertEqual(
+                        tuple(book["Video"].cell(row, 2).value for row in range(2, 2 + len(VIDEO_METRICS))),
+                        VIDEO_METRICS,
+                    )
+                    self.assertEqual(
+                        result.source_cells["Video|Anger"].speaker_observation_labels[0],
+                        tuple(source_ids),
+                    )
+                    for metric in unavailable_metrics:
+                        metric_cells = result.source_cells[f"Video|{metric}"]
+                        self.assertIsNone(book["Video"][metric_cells.speaker_cells[0]].value)
+                        self.assertIsNone(book["Video"][metric_cells.overall].value)
+                    comparison = book["Construct Comparison"]
+                    unavailable_label = next(iter(unavailable_metrics))
+                    comparison_row = next(
+                        row
+                        for row in range(1, comparison.max_row + 1)
+                        if comparison.cell(row, 1).value
+                        in {
+                            f"Dimensions: {unavailable_label}",
+                            f"Emotions: {unavailable_label}",
+                            f"Sentiment: {unavailable_label}",
+                            f"Valence: {unavailable_label}",
+                        }
+                    )
+                    self.assertIsNone(comparison.cell(comparison_row, 2).value)
+
+    def test_video_provenance_flows_to_result_and_measure_guide_without_source_writes(self) -> None:
+        """Omitting provider metadata from CombinedSource must not force Task 4 to inspect sheets."""
+
+        self.assertIn(
+            "video_provenance",
+            {field.name for field in dataclasses.fields(CombinedSource)},
+        )
+        provider_root = self.root / "provider-source"
+        provider_root.mkdir()
+        source_manifest = provider_root / "source_manifest.json"
+        source_metadata = provider_root / "source_metadata.csv"
+        source_manifest.write_text('{"format_version": 1}\n', encoding="utf-8")
+        source_metadata.write_text("SourceID,Country\nsource-0001,Ireland\n", encoding="utf-8")
+        before = (source_manifest.read_bytes(), source_metadata.read_bytes())
+        report = self.root / "provider-report" / "descriptive_statistics.csv"
+        write_sectioned_report(
+            report,
+            tuple(metric for metric in VIDEO_METRICS if metric != "Arousal"),
+            10,
+            sources=["source-0001"],
+        )
+        detected = DetectedVideoSource(
+            provider="imotions_affdex",
+            source_path=provider_root.resolve(),
+            source_method="import",
+            evidence=("Accepted iMotions CSV: source-0001.csv (1 usable data row).",),
+            warnings=("Imported legacy provider metadata was retained.",),
+        )
+        canonical = CanonicalVideoResult(
+            provider="imotions_affdex",
+            source_ids=("source-0001",),
+            rows=({metric: None for metric in VIDEO_METRICS},),
+            evidence=detected.evidence,
+            warnings=detected.warnings,
+            normalization_version=VIDEO_NORMALIZATION_VERSION,
+            provenance=(
+                VideoMetricProvenance(
+                    "source-0001",
+                    "Anger",
+                    "Anger",
+                    "FEA_Emotion_Anger",
+                ),
+            ),
+        )
+        provenance_builder = getattr(canonical, "output_provenance", None)
+        self.assertIsNotNone(provenance_builder)
+        provenance = provenance_builder(detected)
+        source = CombinedSource(
+            "video",
+            "researcher-alpha",
+            "Researcher Alpha",
+            report,
+            video_provenance=provenance,
+        )
+
+        result = build_combined_workbook(
+            {"video": (source,)},
+            self.root / "provider-aware.xlsx",
+        )
+
+        json.dumps(result.video_manifest_payload)
+        self.assertEqual(result.video_manifest_payload["requested_modality"], "video")
+        self.assertEqual(
+            result.video_manifest_payload["sources"][0],
+            provenance.to_manifest_payload(),
+        )
+        self.assertEqual(
+            tuple(row["canonical_measure"] for row in result.video_column_manifest_rows),
+            VIDEO_METRICS,
+        )
+        guide = openpyxl.load_workbook(result.workbook_path, data_only=False)["Measure Guide"]
+        headers = tuple(cell.value for cell in guide[1])
+        expected_metadata_headers = (
+            "Requested modality",
+            "Resolved provider",
+            "Provider availability",
+            "Detection evidence",
+            "Detection warnings",
+            "Normalization contract",
+            "Original provider fields",
+            "Channel identifiers",
+        )
+        for header in expected_metadata_headers:
+            self.assertIn(header, headers)
+        rows = {
+            row[2].value: {headers[index]: cell.value for index, cell in enumerate(row)}
+            for row in guide.iter_rows(min_row=2)
+            if row[1].value == "Video"
+        }
+        self.assertEqual(tuple(rows), VIDEO_METRICS)
+        self.assertEqual(rows["Anger"]["Requested modality"], "video")
+        self.assertEqual(rows["Anger"]["Resolved provider"], "imotions_affdex")
+        self.assertEqual(rows["Anger"]["Original provider fields"], "Anger")
+        self.assertEqual(rows["Anger"]["Channel identifiers"], "FEA_Emotion_Anger")
+        self.assertEqual(
+            rows["Arousal"]["Provider availability"], "conditionally available"
+        )
+        self.assertEqual(
+            (source_manifest.read_bytes(), source_metadata.read_bytes()),
+            before,
+        )
 
     def test_discovers_speaker_combined_reports_only(self) -> None:
         ignored = (
@@ -243,15 +433,21 @@ class CombinedSummaryTests(unittest.TestCase):
         )
 
         sheet = openpyxl.load_workbook(result.workbook_path, data_only=False)["Video"]
-        self.assertEqual(sheet["D17"].value, 30)
-        self.assertEqual(sheet["D18"].value, 15)
-        self.assertAlmostEqual(sheet["D19"].value, 7.0710678118654755)
+        count_row = next(
+            row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 2).value == "COUNT"
+        )
+        detail_row = next(
+            row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 2).value == "Measures"
+        )
+        self.assertEqual(sheet.cell(count_row, 4).value, 30)
+        self.assertEqual(sheet.cell(count_row + 1, 4).value, 15)
+        self.assertAlmostEqual(sheet.cell(count_row + 2, 4).value, 7.0710678118654755)
         self.assertEqual(
-            [sheet[f"D{row}"].value for row in range(21, 26)],
+            [sheet.cell(row, 4).value for row in range(count_row + 4, count_row + 9)],
             [None, None, 10, None, 20],
         )
         self.assertEqual(
-            [sheet[f"D{row}"].value for row in range(27, 32)],
+            [sheet.cell(row, 4).value for row in range(detail_row + 1, detail_row + 6)],
             [None, None, "50.00 (+/- 1.00)", None, "51.00 (+/- 1.00)"],
         )
         self.assertTrue(any("2 of 5" in warning and "Matteo Renzi" in warning for warning in result.warnings))
@@ -292,9 +488,21 @@ class CombinedSummaryTests(unittest.TestCase):
         self.assertEqual(cells.speaker_ids, ("andyburnham", "nigelfarage", "marinelepen"))
         self.assertEqual(cells.speaker_cells, ("D2", "E2", "F2"))
         self.assertEqual(cells.overall, "S2")
-        self.assertEqual([book["Video"][coordinate].value for coordinate in ("D17", "E17", "F17")], [50, 50, 50])
-        self.assertTrue(all(book["Video"][coordinate].value for coordinate in ("D27", "E27", "F27")))
-        self.assertTrue(all(book["Video"][coordinate].value == "0/0/0/0/0" for coordinate in ("D98", "E98", "F98")))
+        sheet = book["Video"]
+        count_row = next(
+            row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 2).value == "COUNT"
+        )
+        detail_row = next(
+            row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 2).value == "Measures"
+        )
+        kurtosis_row = next(
+            row for row in range(1, sheet.max_row + 1) if sheet.cell(row, 2).value == "Kurtosis"
+        )
+        self.assertEqual([sheet.cell(count_row, column).value for column in (4, 5, 6)], [50, 50, 50])
+        self.assertTrue(all(sheet.cell(detail_row + 1, column).value for column in (4, 5, 6)))
+        self.assertTrue(
+            all(sheet.cell(kurtosis_row + 1, column).value == "0/0/0/0/0" for column in (4, 5, 6))
+        )
 
     def test_multiple_groups_share_modality_sheets_and_keep_linked_blocks_together(self) -> None:
         groups = (
@@ -385,12 +593,13 @@ class CombinedSummaryTests(unittest.TestCase):
         expected_ranges = {
             **{("Audio", metric): "0..100" for metric in (*AUDIO_EMOTIONS, *AUDIO_DIMENSIONS)},
             **{("Audio", metric): "-100..100" for metric in AUDIO_VALENCE},
-            **{("Video", metric): "0..100" for metric in (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, *VIDEO_DIMENSIONS)},
-            **{("Video", metric): "-100..100" for metric in VIDEO_VALENCE},
+            **{
+                ("Video", metric): "0..100"
+                for metric in (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, "Engagement", "Adaptive Engagement")
+            },
+            **{("Video", metric): "-100..100" for metric in (*VIDEO_VALENCE, "Arousal")},
             **{("Text", metric): "0..1" for metric in TEXT_SENTIMENT[:2]},
             ("Text", "Text Valence"): "-1..1",
-            **{("Py-Feat / Native Face", metric): "0..100" for metric in NATIVE_FACE_METRICS[:9]},
-            **{("Py-Feat / Native Face", metric): "-100..100" for metric in NATIVE_FACE_METRICS[9:]},
             **{("Text", metric): "-1..1" for metric in TEXT_DIMENSIONS},
         }
         self.assertEqual({key: row[5] for key, row in rows.items()}, expected_ranges)

@@ -77,7 +77,7 @@ The supported desktop path is Windows 10 or Windows 11.
 
 Install:
 
-- Python 3.12 or newer.
+- Python 3.11 or newer.
 - [FFmpeg](https://ffmpeg.org/download.html), including `ffmpeg` and
   `ffprobe`, on `PATH`.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed by
@@ -87,6 +87,11 @@ Install:
 - The bundled OpenSMILE 3.0.0 Windows distribution for audio acoustic
   features. Keep its complete `LICENSE` and `licenses/` tree. `OPENSMILE_HOME`
   can select a separately installed compatible distribution when required.
+
+Python 3.11 or newer is required by the pinned dependency stack. Python 3.12 is
+tested and recommended, while other compatible versions are accepted. If
+`scripts\setup.ps1` cannot find a compatible interpreter and installation is
+allowed, its automatic fallback installs Python 3.12.
 
 Confirm the external commands:
 
@@ -113,9 +118,9 @@ For automated tests:
 python -m pip install -r requirements-dev.txt
 ```
 
-The launcher prefers `.venv\Scripts\python.exe`, then supported per-user Python
-installations. Keeping a repository-local environment makes package versions
-predictable.
+The launcher prefers `.venv\Scripts\python.exe`, then prefers Python 3.12 while
+discovering other Python 3.11-or-newer installations with `pywebview`. Keeping
+a repository-local environment makes package versions predictable.
 
 ### 3. Optional CUDA Setup
 
@@ -509,7 +514,7 @@ python processing\audio_analysis\run_audio_analysis.py batch "C:\path\to\videos"
 python processing\audio_analysis\run_audio_analysis.py single "C:\path\to\video.mp4"
 ```
 
-Run native Face, iMotions, and audio Analysis:
+Run lower-level expert native Face, iMotions, and audio Analysis:
 
 ```powershell
 python -m analysis.imotions "C:\path\to\imotions_csvs" --logscale
@@ -517,13 +522,14 @@ python -m analysis.native_face "C:\path\to\native_face_output" --logscale
 python -m analysis.audio "C:\path\to\audio_outputs" --logscale
 ```
 
-Run the combined workflow from existing Analysis reports:
+Run the stable combined workflow. Video is one canonical modality; its source
+may contain iMotions/AFFDEX or verified Py-Feat native Face data and is detected
+before any output is created or archived:
 
 ```powershell
 python -m analysis.workflow `
   --output-root "C:\path\to\combined_output" `
-  --imotions-source "C:\path\to\video_reports" --imotions-method import `
-  --native_face-source "C:\path\to\native_face_output" --native_face-method run `
+  --video-source "C:\path\to\video_reports" --video-method import `
   --audio-source "C:\path\to\audio_reports" --audio-method import `
   --speaker-groups-json '[{"id":"group-1","name":"Group 1","speaker_ids":["Speaker A","Speaker B"]}]'
 ```
@@ -532,6 +538,23 @@ Use `run` instead of `import` for a modality when its source contains raw
 iMotions exports, verified native `face_core.csv` runs, or processed
 `audio_analysis.csv` files that still need Analysis. The desktop application
 is easier for defining speaker groups.
+
+`--imotions-source` / `--imotions-method` and `--native_face-source` /
+`--native_face-method` remain deprecated one-release aliases. Each normalizes
+to the same Video request and emits a warning; canonical and alias flags, or
+both aliases, cannot be combined.
+
+All documented CLI layers provide `--help`:
+
+```powershell
+python -m processing.face_analysis --help
+python -m processing.text_analysis --help
+python processing/audio_analysis/run_audio_analysis.py --help
+python -m analysis.imotions --help
+python -m analysis.native_face --help
+python -m analysis.audio --help
+python -m analysis.workflow --help
+```
 
 ## Verification And Troubleshooting
 
@@ -910,19 +933,23 @@ The selected output directory contains:
 combined_analysis.xlsx
 combined_analysis_manifest.json
 analysis_profile.json
-video/                         # present when Video / iMotions ran fresh
+video/                         # present when Video ran fresh
 audio/                         # present when Audio ran fresh
+video_column_manifest.csv      # present when Video was selected
 ```
 
 `combined_analysis_manifest.json` records status, source methods and paths,
 the Analysis profile, software version, best-effort Git revision, accepted and
 rejected report decisions, modality output roots, resolved reference sources,
-workbook path, and warnings. A failed manifest also records the failed stage
+workbook path, and warnings. For requested modality `video`, it also records
+resolved provider/evidence/warnings, provider version/availability, original
+fields, channel availability, and the serialized column-manifest rows. A
+failed manifest also records the failed stage
 and a sanitized one-line error. Keep it with the workbook when archiving or
 sharing a run.
 
 Before a new run uses the same output directory, any previous fixed-name
-workbook, manifest, and Analysis profile are moved into a self-contained run
+workbook, manifest, Analysis profile, and Video column manifest are moved into a self-contained run
 directory below `combined_analysis_history/`. The archived manifest is rewritten
 to identify its matching archived workbook and records that workbook's SHA-256
 hash. This prevents a failed rerun from leaving an older
@@ -930,7 +957,8 @@ hash. This prevents a failed rerun from leaving an older
 the new failed manifest or a historical manifest pointing at a later run.
 Failed-run state is quarantined in the same contained history directory so the
 researcher can correct the input and retry without manual file cleanup.
-Imported source files are never moved or changed.
+Imported source trees, manifests, and sidecars are never moved or changed and
+remain byte-identical.
 
 #### Combined workbook measure contract
 
@@ -956,9 +984,10 @@ in its non-quantitative **Measure Guide** sheet:
   when the denominator is zero. Joy and Valence are never substituted for
   Positive or Negative Sentiment.
 - **Dimensions:** Audio Arousal and Dominance map source probabilities `0..1`
-  to `0..100`. Video Engagement and Adaptive Engagement are `0..100`. Text
-  Arousal / Activation, Dominance / Power, and Affiliation / Social
-  orientation are `-1..1`.
+  to `0..100`. iMotions Video Engagement and Adaptive Engagement are `0..100`.
+  Native Face Arousal maps source `-1..1` to `-100..100`, remains named
+  `Arousal`, and is never substituted as Engagement. Text Arousal / Activation,
+  Dominance / Power, and Affiliation / Social orientation are `-1..1`.
 
 These modality scales are not directly comparable without rescaling. The
 Measure Guide records Section, Modality, Display measure, Imported source

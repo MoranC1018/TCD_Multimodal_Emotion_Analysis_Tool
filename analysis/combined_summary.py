@@ -10,7 +10,7 @@ import re
 import statistics
 import unicodedata
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -26,7 +26,13 @@ from analysis.metadata import (
     resolve_analysis_profile,
 )
 from analysis.profile import AnalysisProfile
-from analysis.native_face import NATIVE_FACE_METRICS
+from analysis.video_contract import (
+    VIDEO_METRICS,
+    available_video_metrics,
+    conditionally_available_video_metrics,
+    video_measure_guide_rows,
+)
+from analysis.video import VideoOutputProvenance, canonical_report_source_id_maps
 from spreadsheet_safety import neutralize_spreadsheet_value
 
 
@@ -45,8 +51,7 @@ VIDEO_EMOTIONS = (
 )
 VIDEO_SENTIMENT = ("Sentimentality",)
 VIDEO_VALENCE = ("Valence", "Adaptive Valence")
-VIDEO_DIMENSIONS = ("Engagement", "Adaptive Engagement")
-VIDEO_METRICS = (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, *VIDEO_VALENCE, *VIDEO_DIMENSIONS)
+VIDEO_DIMENSIONS = ("Engagement", "Adaptive Engagement", "Arousal")
 VIDEO_DETAIL_METRICS = VIDEO_METRICS
 VIDEO_KURTOSIS_METRICS = VIDEO_METRICS
 TEXT_SENTIMENT = (
@@ -151,6 +156,7 @@ class CombinedSource:
     speaker_key: str
     display_name: str
     report_path: Path
+    video_provenance: VideoOutputProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +198,22 @@ class CombinedWorkbookResult:
     quantitative_sheets: tuple[str, ...]
     source_cells: dict[str, CombinedMetricCells]
     warnings: tuple[str, ...]
+    video_provenance: tuple[VideoOutputProvenance, ...] = ()
+
+    @property
+    def video_manifest_payload(self) -> dict[str, object]:
+        return {
+            "requested_modality": "video",
+            "sources": [item.to_manifest_payload() for item in self.video_provenance],
+        }
+
+    @property
+    def video_column_manifest_rows(self) -> tuple[dict[str, str], ...]:
+        return tuple(
+            row
+            for item in self.video_provenance
+            for row in item.to_column_manifest_rows()
+        )
 
 
 @dataclass(frozen=True)
@@ -473,28 +495,70 @@ def parse_sectioned_csv(path: Path) -> dict[str, MetricSeries]:
     return metrics
 
 
-def _validate_report(path: Path, modality: str) -> dict[str, MetricSeries]:
+def validate_report(
+    path: Path,
+    modality: str,
+    *,
+    video_provider: str | None = None,
+) -> dict[str, MetricSeries]:
     metrics = parse_sectioned_csv(path)
-    required = (
-        AUDIO_REQUIRED_METRICS
-        if modality == "audio"
-        else (NATIVE_FACE_METRICS if modality == "native_face" else VIDEO_METRICS)
-    )
+    if modality == "audio":
+        required = AUDIO_REQUIRED_METRICS
+    else:
+        provider = video_provider or _video_provider_for_legacy_modality(modality)
+        required = tuple(
+            metric
+            for metric in VIDEO_METRICS
+            if metric in available_video_metrics(provider)
+            and metric not in conditionally_available_video_metrics(provider)
+        )
     missing = [metric for metric in required if metric not in metrics]
     if missing:
         raise InputError(f"{path}: missing required {modality} metrics: {', '.join(missing)}")
     expected_sources = metrics[required[0]].sources
-    recognized = (
-        AUDIO_METRICS
-        if modality == "audio"
-        else (NATIVE_FACE_METRICS if modality == "native_face" else VIDEO_METRICS)
-    )
+    recognized = AUDIO_METRICS if modality == "audio" else VIDEO_METRICS
     for metric in recognized:
         if metric not in metrics:
             continue
         if metrics[metric].sources != expected_sources:
             raise InputError(f"{path}: recognized metric source order changes at {metric}")
     return metrics
+
+
+def _video_provider_for_legacy_modality(modality: str) -> str:
+    if modality == "video":
+        return "imotions_affdex"
+    if modality == "native_face":
+        return "pyfeat_native_face"
+    raise InputError(f"Unsupported Video report modality: {modality!r}")
+
+
+def _blank_metric_series(template: MetricSeries) -> MetricSeries:
+    source_count = len(template.sources)
+    return MetricSeries(
+        sources=template.sources,
+        available=(False,) * source_count,
+        counts=(0,) * source_count,
+        missing=(0,) * source_count,
+        means=(0.0,) * source_count,
+        stddevs=(0.0,) * source_count,
+        kurtoses=(None,) * source_count,
+    )
+
+
+def _canonical_video_report(
+    report: Mapping[str, MetricSeries], provider: str
+) -> dict[str, MetricSeries]:
+    template = next(iter(report.values()))
+    available = available_video_metrics(provider)
+    return {
+        metric: (
+            report[metric]
+            if metric in available and metric in report
+            else _blank_metric_series(template)
+        )
+        for metric in VIDEO_METRICS
+    }
 
 
 def discover_combined_sources_audited(root: str | Path, modality: str) -> CombinedDiscoveryResult:
@@ -559,7 +623,7 @@ def discover_combined_sources_audited(root: str | Path, modality: str) -> Combin
             continue
         try:
             speaker = resolve_speaker(supplied_speaker)
-            _validate_report(path, modality)
+            validate_report(path, modality)
         except InputError as exc:
             reason = f"invalid candidate: {exc}"
             rejected.append(
@@ -849,9 +913,21 @@ def _write_linked_headlines(
                 observation_labels.append(tuple(f"{index:03d}" for index in range(1, 6)))
                 continue
             series = report.get(metric)
-            if series is None:
+            if series is None or not any(series.available):
+                unavailable_count = (
+                    len(series.sources) if series is not None else LEGACY_MINIMUM_LAYOUT_SOURCE_COUNT
+                )
                 observations.append((None,) * LEGACY_MINIMUM_LAYOUT_SOURCE_COUNT)
-                observation_labels.append(tuple(f"{index:03d}" for index in range(1, 6)))
+                if series is not None:
+                    observations[-1] = (None,) * unavailable_count
+                    observation_labels.append(
+                        tuple(
+                            source or f"{index:03d}"
+                            for index, source in enumerate(series.sources, start=1)
+                        )
+                    )
+                else:
+                    observation_labels.append(tuple(f"{index:03d}" for index in range(1, 6)))
                 continue
             cell.value = _headline_mean(series, headline_policy)
             valid_cells.append(coordinate)
@@ -1036,91 +1112,18 @@ def _write_linked_video_sheet(
             report = reports.get(speaker.speaker_id)
             if report is not None:
                 series = report[metric]
-                sheet.cell(row, column, "/".join(
-                    _display_kurtosis(value) if available else ""
-                    for value, available in zip(series.kurtoses, series.available)
-                ))
+                if any(series.available):
+                    sheet.cell(row, column, "/".join(
+                        _display_kurtosis(value) if available else ""
+                        for value, available in zip(series.kurtoses, series.available)
+                    ))
     return source_cells
 
 
-def _write_linked_native_face_sheet(
-    sheet: object,
-    reports: Mapping[str, Mapping[str, MetricSeries]],
-    groups: Sequence[_ResolvedSpeakerGroup],
-    warnings: list[str],
-    headline_policy: str,
-) -> dict[str, CombinedMetricCells]:
-    """Write Py-Feat measures on their own provider sheet using actual source counts."""
-
-    positions = _linked_speaker_positions(groups)
-    linked_layout = _linked_layout(groups)
-    source_count = _report_source_count(reports)
-    layout = _measure_layout(
-        NATIVE_FACE_METRICS,
-        count_gap=1,
-        count_rows=4 + source_count,
-        count_starts_at_heading=True,
-        source_count=source_count,
-    )
-    _set_default_font(sheet, layout.max_row, linked_layout.overall_column, 9, min_column=2)
-    _set_linked_column_widths(sheet, linked_layout)
-    sheet.freeze_panes = "B2"
-    source_cells = _write_linked_headlines(
-        sheet, NATIVE_FACE_METRICS, reports, groups, warnings, headline_policy
-    )
-    sheet.cell(layout.count_heading, 2, "COUNT")
-    for row, label in enumerate(
-        (
-            "Total", "Average", "Std Dev", "Missing to Count",
-            *(_ordinal_label(index) for index in range(source_count)),
-        ),
-        start=layout.count_start,
-    ):
-        sheet[f"C{row}"] = label
-    for _, speaker, column in positions:
-        report = reports.get(speaker.speaker_id)
-        if report is None:
-            continue
-        series = report[NATIVE_FACE_METRICS[0]]
-        counts = _observed_counts(series)
-        sheet.cell(layout.count_start, column, sum(counts))
-        sheet.cell(layout.count_start + 1, column, sum(counts) / len(counts))
-        if len(counts) >= 2:
-            sheet.cell(layout.count_start + 2, column, statistics.stdev(counts)).number_format = "0.0"
-        sheet.cell(layout.count_start + 3, column, sum(series.missing))
-        for source_index, (count, available) in enumerate(
-            zip(series.counts, series.available), start=layout.count_start + 4
-        ):
-            if available:
-                sheet.cell(source_index, column, count)
-    sheet.cell(layout.detail_heading, 2, "Measures")
-    for metric_index, metric in enumerate(NATIVE_FACE_METRICS):
-        start_row = layout.detail_start + metric_index * source_count
-        sheet[f"B{start_row}"] = metric
-        for source_index in range(source_count):
-            row = start_row + source_index
-            sheet[f"C{row}"] = _ordinal_label(source_index)
-            for _, speaker, column in positions:
-                report = reports.get(speaker.speaker_id)
-                series = report.get(metric) if report is not None else None
-                if (
-                    series is not None
-                    and source_index < len(series.available)
-                    and series.available[source_index]
-                ):
-                    sheet.cell(
-                        row,
-                        column,
-                        _display_mean_sd(
-                            series.means[source_index],
-                            series.stddevs[source_index],
-                            metric in set(NATIVE_FACE_METRICS[:9]),
-                        ),
-                    )
-    return source_cells
-
-
-def _write_definition_sheets(book: Workbook) -> None:
+def _write_definition_sheets(
+    book: Workbook,
+    video_provenance: Sequence[VideoOutputProvenance] = (),
+) -> None:
     """Port the historical static definition sheets without analytical values."""
 
     compressed = base64.b64decode("".join(STATIC_DEFINITION_SHEETS.split()))
@@ -1153,10 +1156,13 @@ def _write_definition_sheets(book: Workbook) -> None:
         text_sheet.row_dimensions[row].height = height
     for row, height in {3: 59, 4: 44.25, 5: 29.5, 6: 73.75, 7: 29.5, 10: 44.25, 11: 103.25, 12: 59, 13: 73.75}.items():
         speech_sheet.row_dimensions[row].height = height
-    _write_measure_guide(book)
+    _write_measure_guide(book, video_provenance)
 
 
-def _write_measure_guide(book: Workbook) -> None:
+def _write_measure_guide(
+    book: Workbook,
+    video_provenance: Sequence[VideoOutputProvenance] = (),
+) -> None:
     """Document every displayed measure from the same ordered metric contracts."""
 
     sheet = book.create_sheet("Measure Guide")
@@ -1168,6 +1174,14 @@ def _write_measure_guide(book: Workbook) -> None:
         "Workbook sheet",
         "Output range",
         "Transformation/meaning",
+        "Requested modality",
+        "Resolved provider",
+        "Provider availability",
+        "Detection evidence",
+        "Detection warnings",
+        "Normalization contract",
+        "Original provider fields",
+        "Channel identifiers",
     )
     sheet.append(headers)
     cross_scale_note = "Cross-modality scales are not directly comparable without rescaling."
@@ -1196,6 +1210,14 @@ def _write_measure_guide(book: Workbook) -> None:
                     workbook_sheet,
                     output_range,
                     f"{meaning} {cross_scale_note}",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
                 )
             )
 
@@ -1221,32 +1243,100 @@ def _write_measure_guide(book: Workbook) -> None:
         "0..100",
         "Model probability transformed from source 0..1 to output 0..100.",
     )
-    add("Emotions", "Video", VIDEO_EMOTIONS, "0..100", "Imported iMotions score.")
-    add("Sentiment", "Video", VIDEO_SENTIMENT, "0..100", "Imported iMotions score.")
-    add("Valence", "Video", VIDEO_VALENCE, "-100..100", "Imported iMotions signed score.")
-    add("Dimensions", "Video", VIDEO_DIMENSIONS, "0..100", "Imported iMotions score.")
-    add(
-        "Emotions",
-        "Py-Feat / Native Face",
-        NATIVE_FACE_METRICS[:9],
-        "0..100",
-        "Primary-face Py-Feat probability transformed from source 0..1; Contempt and Confusion remain blank.",
-        {"Joy": "Happy", "Sadness": "Sad"},
-    )
-    add(
-        "Valence",
-        "Py-Feat / Native Face",
-        ("Valence",),
-        "-100..100",
-        "Primary-face Py-Feat valence transformed from source -1..1 to output -100..100.",
-    )
-    add(
-        "Dimensions",
-        "Py-Feat / Native Face",
-        ("Arousal",),
-        "-100..100",
-        "Primary-face Py-Feat arousal transformed from source -1..1 to output -100..100.",
-    )
+    provider_groups: list[tuple[str, tuple[VideoOutputProvenance, ...]]] = []
+    for item in video_provenance:
+        if any(provider == item.resolved_provider for provider, _ in provider_groups):
+            continue
+        provider_groups.append(
+            (
+                item.resolved_provider,
+                tuple(
+                    candidate
+                    for candidate in video_provenance
+                    if candidate.resolved_provider == item.resolved_provider
+                ),
+            )
+        )
+    if not provider_groups:
+        provider_groups.append(("", ()))
+    for provider, provenance_items in provider_groups:
+        availability_rows = (
+            video_measure_guide_rows(provider)
+            if provider
+            else tuple(
+                {
+                    "canonical_measure": metric,
+                    "provider": "",
+                    "provider_availability": "",
+                    "source_channel": metric,
+                    "output_scale": (
+                        "-100..100"
+                        if metric in {*VIDEO_VALENCE, "Arousal"}
+                        else "0..100"
+                    ),
+                    "unsupported_value_rule": "Unsupported values remain blank.",
+                }
+                for metric in VIDEO_METRICS
+            )
+        )
+        for availability in availability_rows:
+            metric = availability["canonical_measure"]
+            original = tuple(
+                column
+                for item in provenance_items
+                for column in item.original_columns
+                if column.canonical_measure == metric
+            )
+            fields = " | ".join(dict.fromkeys(column.original_field for column in original))
+            channels = " | ".join(
+                dict.fromkeys(column.channel_identifier for column in original)
+            )
+            evidence = " | ".join(
+                dict.fromkeys(
+                    value for item in provenance_items for value in item.detection_evidence
+                )
+            )
+            warnings = " | ".join(
+                dict.fromkeys(
+                    value for item in provenance_items for value in item.detection_warnings
+                )
+            )
+            normalization = " | ".join(
+                dict.fromkeys(
+                    item.normalization_contract_version for item in provenance_items
+                )
+            )
+            section = (
+                "Emotions"
+                if metric in VIDEO_EMOTIONS
+                else "Sentiment"
+                if metric in VIDEO_SENTIMENT
+                else "Valence"
+                if metric in VIDEO_VALENCE
+                else "Dimensions"
+            )
+            sheet.append(
+                (
+                    section,
+                    "Video",
+                    metric,
+                    fields or availability["source_channel"],
+                    "Video",
+                    availability["output_scale"],
+                    (
+                        "Provider-normalized canonical Video measure. "
+                        f"{availability['unsupported_value_rule']} {cross_scale_note}"
+                    ),
+                    "video" if provider else "",
+                    provider,
+                    availability["provider_availability"],
+                    evidence,
+                    warnings,
+                    normalization,
+                    fields,
+                    channels,
+                )
+            )
     add(
         "Sentiment",
         "Text",
@@ -1276,7 +1366,10 @@ def _write_measure_guide(book: Workbook) -> None:
     sheet.auto_filter.ref = sheet.dimensions
     for cell in sheet[1]:
         cell.font = Font(name="Aptos", size=10, bold=True)
-    for column, width in enumerate((14, 12, 30, 42, 20, 14, 78), start=1):
+    for column, width in enumerate(
+        (14, 12, 30, 42, 20, 14, 78, 18, 22, 22, 50, 50, 20, 34, 34),
+        start=1,
+    ):
         sheet.column_dimensions[get_column_letter(column)].width = width
     for row in sheet.iter_rows(min_row=2):
         for cell in row:
@@ -1299,7 +1392,76 @@ def _reports_for_sources(sources: Sequence[CombinedSource], modality: str) -> di
         speaker = _source_speaker(source)
         if speaker.speaker_id in reports:
             raise InputError(f"Duplicate {modality} report for {speaker.display_name}")
-        reports[speaker.speaker_id] = _validate_report(source.report_path, modality)
+        reports[speaker.speaker_id] = validate_report(source.report_path, modality)
+    return reports
+
+
+def _video_reports_for_sources(
+    imotions_sources: Sequence[CombinedSource],
+    native_face_sources: Sequence[CombinedSource],
+) -> dict[str, Mapping[str, MetricSeries]]:
+    validated: list[tuple[CombinedSource, str, str, dict[str, MetricSeries]]] = []
+    seen_speakers: set[str] = set()
+    for expected_modality, legacy_provider, sources in (
+        ("video", "imotions_affdex", imotions_sources),
+        ("native_face", "pyfeat_native_face", native_face_sources),
+    ):
+        for source in sources:
+            if source.modality != expected_modality:
+                raise InputError(
+                    f"Source {source.report_path} does not match {expected_modality} modality"
+                )
+            provider = (
+                source.video_provenance.resolved_provider
+                if source.video_provenance is not None
+                else legacy_provider
+            )
+            speaker = _source_speaker(source)
+            speaker_id = speaker.speaker_id
+            if speaker_id in seen_speakers:
+                raise InputError(
+                    f"Duplicate Video report across providers for {speaker_id!r}"
+                )
+            report = validate_report(
+                source.report_path,
+                source.modality,
+                video_provider=provider,
+            )
+            validated.append((source, provider, speaker_id, report))
+            seen_speakers.add(speaker_id)
+
+    pyfeat_reports: list[tuple[Path, str, tuple[str, ...]]] = []
+    for source, provider, _speaker_id, report in validated:
+        if provider != "pyfeat_native_face":
+            continue
+        template = report[VIDEO_METRICS[0]]
+        pyfeat_reports.append(
+            (
+                source.report_path,
+                source.display_name,
+                tuple(
+                    source_id
+                    for source_id, available in zip(template.sources, template.available)
+                    if available
+                ),
+            )
+        )
+    pyfeat_source_id_maps = canonical_report_source_id_maps(tuple(pyfeat_reports))
+    reports: dict[str, Mapping[str, MetricSeries]] = {}
+    for source, provider, speaker_id, report in validated:
+        if provider == "pyfeat_native_face":
+            source_id_map = pyfeat_source_id_maps[source.report_path]
+            report = {
+                metric: replace(
+                    series,
+                    sources=tuple(
+                        source_id_map.get(source_id, source_id)
+                        for source_id in series.sources
+                    ),
+                )
+                for metric, series in report.items()
+            }
+        reports[speaker_id] = _canonical_video_report(report, provider)
     return reports
 
 
@@ -1391,11 +1553,11 @@ def _single_source_series(
     source_id: str,
     source_index: int,
 ) -> MetricSeries:
-    if source_index >= len(series.available) or not series.available[source_index]:
+    if source_index >= len(series.available):
         raise InputError(f"Metric report is missing {source_id} at its established source position")
     return MetricSeries(
         sources=(source_id,),
-        available=(True,),
+        available=(series.available[source_index],),
         counts=(series.counts[source_index],),
         missing=(series.missing[source_index],),
         means=(series.means[source_index],),
@@ -1726,22 +1888,20 @@ def _write_text_construct_sheet(
 
 _COMPARISON_ROWS = (
     *(("Emotions", metric, metric if metric in VIDEO_EMOTIONS else None,
-       metric if metric in NATIVE_FACE_METRICS[:9] else None,
        metric if metric in AUDIO_EMOTIONS else None, None, "EAF4EC")
       for metric in (*AUDIO_EMOTIONS, "Confusion") if metric in set(AUDIO_EMOTIONS + VIDEO_EMOTIONS)),
-    ("Sentiment", "Sentimentality", "Sentimentality", None, None, None, "E8F0FA"),
-    ("Sentiment", "Positive Sentiment", None, None, None, "Positive Sentiment", "E8F0FA"),
-    ("Sentiment", "Negative Sentiment", None, None, None, "Negative Sentiment", "E8F0FA"),
-    ("Valence", "Valence", "Valence", "Valence", "Valence", "Text Valence", "F8ECEC"),
-    ("Valence", "Adaptive Valence", "Adaptive Valence", None, None, None, "F8ECEC"),
-    ("Dimensions", "Arousal", None, "Arousal", "Arousal", "Arousal / Activation", "FFF6E3"),
-    ("Dimensions", "Dominance", None, None, "Dominance", "Dominance / Power", "FFF6E3"),
-    ("Dimensions", "Engagement", "Engagement", None, None, None, "FFF6E3"),
-    ("Dimensions", "Adaptive Engagement", "Adaptive Engagement", None, None, None, "FFF6E3"),
+    ("Sentiment", "Sentimentality", "Sentimentality", None, None, "E8F0FA"),
+    ("Sentiment", "Positive Sentiment", None, None, "Positive Sentiment", "E8F0FA"),
+    ("Sentiment", "Negative Sentiment", None, None, "Negative Sentiment", "E8F0FA"),
+    ("Valence", "Valence", "Valence", "Valence", "Text Valence", "F8ECEC"),
+    ("Valence", "Adaptive Valence", "Adaptive Valence", None, None, "F8ECEC"),
+    ("Dimensions", "Arousal", "Arousal", "Arousal", "Arousal / Activation", "FFF6E3"),
+    ("Dimensions", "Dominance", None, "Dominance", "Dominance / Power", "FFF6E3"),
+    ("Dimensions", "Engagement", "Engagement", None, None, "FFF6E3"),
+    ("Dimensions", "Adaptive Engagement", "Adaptive Engagement", None, None, "FFF6E3"),
     (
         "Dimensions",
         "Affiliation / Social orientation",
-        None,
         None,
         None,
         "Affiliation / Social orientation",
@@ -1780,6 +1940,14 @@ def _comparison_metric_formula(
     references = _speaker_metric_references(source_cells, modality, metric, speaker)
     if not references:
         return None
+    cells = source_cells.get(f"{modality}|{metric}")
+    candidate_ids = tuple(dict.fromkeys((speaker.speaker_id, *speaker.aliases)))
+    if cells is not None and cells.speaker_observations and not any(
+        any(value is not None for value in cells.speaker_observations[index])
+        for index, speaker_id in enumerate(cells.speaker_ids)
+        if speaker_id in candidate_ids
+    ):
+        return None
     if len(references) == 1:
         reference = references[0]
         return f'=IF(ISNUMBER({reference}),{reference},"Unavailable")'
@@ -1795,12 +1963,7 @@ def _write_construct_comparison_sheet(
     """Create the at-a-glance construct tables using formula-linked source means."""
 
     sheet = book.create_sheet("Construct Comparison")
-    include_native_face = any(key.startswith("Native Face|") for key in source_cells)
-    modality_headers = (
-        ("Video / iMotions", "Native Face", "Audio", "Text")
-        if include_native_face
-        else ("Video", "Audio", "Text")
-    )
+    modality_headers = ("Video", "Audio", "Text")
     largest_group = max((len(group.speakers) for group in groups), default=0)
     table_count = max(3, largest_group)
     table_width = 1 + len(modality_headers)
@@ -1879,7 +2042,6 @@ def _write_construct_comparison_sheet(
                 section,
                 label,
                 video_metric,
-                native_face_metric,
                 audio_metric,
                 text_metric,
                 fill_color,
@@ -1890,11 +2052,6 @@ def _write_construct_comparison_sheet(
                     source_cells, "Video", video_metric, speaker
                 )
                 next_column = table_start + 2
-                if include_native_face:
-                    sheet.cell(row, next_column).value = _comparison_metric_formula(
-                        source_cells, "Native Face", native_face_metric, speaker
-                    )
-                    next_column += 1
                 sheet.cell(row, next_column).value = _comparison_metric_formula(
                     source_cells, "Audio", audio_metric, speaker
                 )
@@ -1950,11 +2107,22 @@ def build_combined_workbook(
     if any(destination == summary.source_path for summary in text_reports.values()):
         raise InputError(f"Output destination is a source report: {destination}")
     audio_reports = _reports_for_sources(sources_by_modality.get("audio", ()), "audio")
-    video_reports = _reports_for_sources(sources_by_modality.get("video", ()), "video")
-    native_face_reports = _reports_for_sources(
-        sources_by_modality.get("native_face", ()), "native_face"
+    video_sources = tuple(
+        (*sources_by_modality.get("video", ()), *sources_by_modality.get("native_face", ()))
     )
-    if not audio_reports and not video_reports and not native_face_reports and not text_reports:
+    unique_video_provenance: list[VideoOutputProvenance] = []
+    for source in video_sources:
+        provenance = source.video_provenance
+        if provenance is not None and all(
+            existing is not provenance for existing in unique_video_provenance
+        ):
+            unique_video_provenance.append(provenance)
+    video_provenance = tuple(unique_video_provenance)
+    video_reports = _video_reports_for_sources(
+        sources_by_modality.get("video", ()),
+        sources_by_modality.get("native_face", ()),
+    )
+    if not audio_reports and not video_reports and not text_reports:
         raise InputError("At least one Audio, Video, or Text source is required")
     if analysis_profile is not None:
         profile_metadata = load_source_metadata(
@@ -1968,9 +2136,6 @@ def build_combined_workbook(
         )
         video_reports = _profile_reports(
             video_reports, profile_metadata, required_source_ids, "Video"
-        )
-        native_face_reports = _profile_reports(
-            native_face_reports, profile_metadata, required_source_ids, "Py-Feat / Native Face"
         )
         text_reports = _profile_text_reports(
             text_reports, profile_metadata, required_source_ids
@@ -2029,7 +2194,7 @@ def build_combined_workbook(
             }
         )
         quantitative_sheets.append("Audio")
-    _write_definition_sheets(book)
+    _write_definition_sheets(book, video_provenance)
     if video_reports:
         video = book.create_sheet("Video", book.index(book["Domain Def Text"]) + 1)
         source_cells.update(
@@ -2041,23 +2206,6 @@ def build_combined_workbook(
             }
         )
         quantitative_sheets.append("Video")
-    if native_face_reports:
-        native_face = book.create_sheet(
-            "Py-Feat - Native Face", book.index(book["Domain Def Text"]) + 1
-        )
-        source_cells.update(
-            {
-                f"Native Face|{metric}": cells
-                for metric, cells in _write_linked_native_face_sheet(
-                    native_face,
-                    native_face_reports,
-                    groups,
-                    warnings,
-                    headline_policy,
-                ).items()
-            }
-        )
-        quantitative_sheets.append("Py-Feat - Native Face")
     text_sheet = book.create_sheet("Text sentiment")
     text_cells = (
         _write_text_construct_sheet(text_sheet, text_reports, text_groups, warnings)
@@ -2076,4 +2224,10 @@ def build_combined_workbook(
     book.calculation.calcId = 191029
     destination.parent.mkdir(parents=True, exist_ok=True)
     book.save(destination)
-    return CombinedWorkbookResult(destination, tuple(quantitative_sheets), source_cells, tuple(warnings))
+    return CombinedWorkbookResult(
+        destination,
+        tuple(quantitative_sheets),
+        source_cells,
+        tuple(warnings),
+        video_provenance,
+    )

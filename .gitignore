@@ -2,7 +2,7 @@
 # Multimodal Emotion Analysis Tool - local and generated files
 # ============================================================
 
-# --- RockSteady (commercial confidential — NEVER commit) ---
+# --- RockSteady (commercial confidential - NEVER commit) ---
 external/
 
 # RockSteady adapter local runtime/configuration and generated artifacts

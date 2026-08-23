@@ -165,14 +165,19 @@ textarea {
 }
 
 .mode-home-head {
-  display: grid;
-  justify-items: start;
+  display: flex;
+  align-items: center;
   gap: 14px;
 }
 
-.trinity-main-logo {
+.mode-home-head > div {
+  min-width: 0;
+}
+
+.trinity-shield {
   display: block;
-  width: min(620px, 100%);
+  width: 72px;
+  flex: 0 0 auto;
   height: auto;
 }
 
@@ -220,6 +225,10 @@ textarea {
 .mode-tile small {
   color: var(--muted);
   font-size: 13px;
+}
+
+.stage-subtitle {
+  color: var(--muted);
 }
 
 .mode-tile.unavailable {
@@ -360,7 +369,12 @@ textarea {
   display: flex;
   align-items: center;
   gap: 11px;
+  min-width: 0;
   margin-bottom: 18px;
+}
+
+.brand > div {
+  min-width: 0;
 }
 
 .brand-mark {
@@ -409,7 +423,10 @@ textarea {
 }
 
 #statusLabel {
+  min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .step {
@@ -556,6 +573,7 @@ textarea {
 .analysis-workflow-layout {
   display: grid;
   gap: 18px;
+  min-width: 0;
   width: min(1420px, 100%);
 }
 
@@ -701,6 +719,7 @@ textarea {
 .analysis-speaker-panel {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .analysis-section-head {
@@ -729,8 +748,9 @@ textarea {
 
 .analysis-modality-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+  min-width: 0;
 }
 
 .analysis-modality-card {
@@ -752,6 +772,15 @@ textarea {
 
 .analysis-modality-card.unavailable {
   opacity: 0.72;
+}
+
+.analysis-provider-status {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--accent-dark);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .analysis-modality-head .check-option {
@@ -875,6 +904,7 @@ textarea {
   grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
   align-items: start;
   gap: 18px;
+  min-width: 0;
 }
 
 .analysis-options-panel {
@@ -900,11 +930,15 @@ textarea {
 .analysis-run-gate {
   display: grid;
   gap: 5px;
+  min-width: 0;
+  max-width: 100%;
   border-left: 3px solid #b36b00;
   background: var(--warning-bg);
   color: var(--warning);
   padding: 9px 11px;
   font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .analysis-run-gate p,
@@ -2158,7 +2192,11 @@ textarea {
   }
 
   .mode-home-head {
-    align-items: flex-start;
+    align-items: center;
+  }
+
+  .trinity-shield {
+    width: 56px;
   }
 
   .mode-home-head h1 {

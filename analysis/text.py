@@ -3,8 +3,8 @@
 
 Two sub-commands:
 
-  analyse  — run histogram/stats reports on a folder of per-speaker CSVs
-  split    — split a combined RockSteady export into one CSV per speaker
+analyse  - run histogram/stats reports on a folder of per-speaker CSVs
+split    - split a combined RockSteady export into one CSV per speaker
 
 Usage::
 

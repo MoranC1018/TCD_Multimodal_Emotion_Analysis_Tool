@@ -1,4 +1,4 @@
-# Contributing — Multimodal Emotion Analysis Tool
+# Contributing - Multimodal Emotion Analysis Tool
 
 Thank you for contributing to this public research-software project. It was
 developed by Conor Moran and Jiaming Liu, with academic direction from
@@ -12,7 +12,9 @@ the researcher's responsibility.
 ## Set Up A Development Checkout
 
 Clone the repository using its current public URL, enter the checkout, and
-create a repository-local Python environment:
+create a repository-local Python environment. The pinned stack requires Python
+3.11 or newer; Python 3.12 is tested and recommended, while other compatible
+versions are accepted:
 
 ```powershell
 git clone <repository-url>

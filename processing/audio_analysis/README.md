@@ -108,7 +108,9 @@ uses the explicit display label `Pooled (no speaker)`.
 
 ## Setup
 
-Install Python 3.12 or newer, then make sure these external tools are available:
+Install Python 3.11 or newer, then make sure these external tools are available.
+Python 3.12 is the tested and recommended version, while other versions
+compatible with the pinned stack are accepted:
 
 - `ffmpeg`
 - `ffprobe`
@@ -174,7 +176,7 @@ processing/audio_analysis/opensmile-3.0-win-x64/licenses/
 ```
 
 Research publications using OpenSMILE should cite Florian Eyben, Martin
-Wöllmer, and Björn Schuller, “openSMILE — The Munich Versatile and Fast
+Wöllmer, and Björn Schuller, “openSMILE - The Munich Versatile and Fast
 Open-Source Audio Feature Extractor,” ACM Multimedia, 2010,
 https://doi.org/10.1145/1873951.1874246. See the root
 `THIRD_PARTY_NOTICES.md` for the complete redistribution boundary.

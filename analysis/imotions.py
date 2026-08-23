@@ -20,6 +20,32 @@ from analysis.histograms import (
     resolve_output_folder,
     safe_filename,
 )
+from analysis.metadata import load_source_metadata
+from analysis.video_contract import VIDEO_METRICS
+
+
+IMOTIONS_VIDEO_PROVIDER = "iMotions AFFDEX"
+
+
+def read_imotions_video_folder(
+    input_folder: str | Path,
+    *,
+    allow_legacy_reports: bool = False,
+) -> tuple[ParsedExport, ...]:
+    """Read iMotions Video sources without writing Analysis output."""
+
+    root = Path(input_folder).expanduser().resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(f"iMotions input folder does not exist: {root}")
+    selected_csvs, _discovery_log = discover_csv_inputs(root)
+    if selected_csvs:
+        return tuple(
+            _canonicalize_video_export(read_imotions_csv(path, input_root=root))
+            for path in selected_csvs
+        )
+    if not allow_legacy_reports:
+        raise ValueError(f"No accepted iMotions CSV exports found under {root}")
+    return _read_legacy_video_reports(root)
 
 
 def analyse_imotions_folder(
@@ -181,6 +207,247 @@ def read_imotions_csv(path: Path, encoding: str = "utf-8-sig", input_root: Path 
         speaker=imotions_speaker_name(path, input_root),
         video=source_name(path),
     )
+
+
+def _canonicalize_video_export(export: ParsedExport) -> ParsedExport:
+    fields: dict[str, str] = {}
+    canonical_info: dict[str, ColumnInfo] = {}
+    for unique_name in export.header:
+        info = export.info.get(unique_name)
+        if info is None:
+            continue
+        canonical = _canonical_video_metric(info)
+        if canonical is None or canonical in fields:
+            continue
+        fields[canonical] = unique_name
+        canonical_info[canonical] = info
+    rows = [
+        {canonical: row.get(source_field, "") for canonical, source_field in fields.items()}
+        for row in export.rows
+    ]
+    return ParsedExport(
+        source=export.source,
+        path=export.path,
+        header=list(fields),
+        info=canonical_info,
+        rows=rows,
+        speaker=export.speaker,
+        video=export.video,
+    )
+
+
+def _canonical_video_metric(info: ColumnInfo) -> str | None:
+    aliases = {"happy": "Joy", "sad": "Sadness"}
+    candidates = (info.display_name, info.original_name, info.unique_name)
+    canonical = next(
+        (
+            aliases.get(candidate.strip().casefold(), candidate.strip())
+            for candidate in candidates
+            if candidate.strip()
+            and aliases.get(candidate.strip().casefold(), candidate.strip()) in VIDEO_METRICS
+        ),
+        None,
+    )
+    if canonical == "Arousal" and not info.category.strip().casefold().startswith("fea("):
+        return None
+    return canonical
+
+
+def _read_legacy_video_reports(root: Path) -> tuple[ParsedExport, ...]:
+    reports = sorted(
+        root.rglob("descriptive_statistics.csv"),
+        key=lambda path: str(path).casefold(),
+    )
+    if not reports:
+        raise ValueError(f"No accepted or legacy iMotions Video reports found under {root}")
+    report_sections = tuple(
+        (report, tuple(_legacy_report_means(report)))
+        for report in reports
+    )
+    source_report_paths: dict[str, set[Path]] = {}
+    for report, sections in report_sections:
+        for _metric, _category, _unit, sources, _means in sections:
+            for source in sources:
+                source_report_paths.setdefault(source, set()).add(report)
+    authoritative_source_ids = _legacy_authoritative_source_ids(root)
+    channel_info = _legacy_channel_info(root)
+    source_rows: OrderedDict[str, dict[str, str]] = OrderedDict()
+    source_paths: dict[str, Path] = {}
+    metric_info: dict[str, ColumnInfo] = {}
+    for report, sections in report_sections:
+        for metric, category, unit, sources, means in sections:
+            canonical = _legacy_metric_name(metric, category)
+            if canonical is None:
+                continue
+            original_field, channel_identifier = channel_info.get(
+                canonical,
+                (metric, metric),
+            )
+            metric_info[canonical] = ColumnInfo(
+                unique_name=canonical,
+                original_name=original_field,
+                display_name=canonical,
+                category=category,
+                group="Emotion",
+                unit=unit,
+                provided_by=IMOTIONS_VIDEO_PROVIDER,
+                channel_identifier=channel_identifier,
+                scale_hint=(
+                    "minus100_to_100"
+                    if canonical in {"Valence", "Adaptive Valence", "Arousal"}
+                    else "0_to_100"
+                ),
+            )
+            for source, mean in zip(sources, means):
+                source_key = _legacy_source_key(
+                    root,
+                    report,
+                    source,
+                    source_report_paths,
+                    authoritative_source_ids,
+                )
+                row = source_rows.setdefault(source_key, {})
+                previous = row.get(canonical, "")
+                if previous and mean and previous != mean:
+                    raise ValueError(
+                        f"Contradictory legacy iMotions values for {source_key} {canonical}"
+                    )
+                if mean:
+                    row[canonical] = mean
+                source_paths.setdefault(source_key, report)
+    if not source_rows:
+        raise ValueError(f"No canonical iMotions Video measures found under {root}")
+    return tuple(
+        ParsedExport(
+            source=source,
+            path=source_paths[source],
+            header=list(metric_info),
+            info=dict(metric_info),
+            rows=[row],
+            speaker="",
+            video=source,
+        )
+        for source, row in source_rows.items()
+    )
+
+
+def _legacy_source_key(
+    root: Path,
+    report: Path,
+    source: str,
+    source_report_paths: dict[str, set[Path]],
+    authoritative_source_ids: set[str],
+) -> str:
+    if source in authoritative_source_ids or len(source_report_paths.get(source, ())) <= 1:
+        return source
+    speaker_root = report.parent.parent.parent
+    try:
+        prefix = speaker_root.relative_to(root).as_posix()
+    except ValueError:
+        prefix = speaker_root.name
+    return f"{prefix}::{source}"
+
+
+def _legacy_authoritative_source_ids(root: Path) -> set[str]:
+    source_ids: set[str] = set()
+    for path in sorted(root.rglob("source_manifest.json"), key=lambda item: str(item).casefold()):
+        try:
+            metadata = load_source_metadata(path)
+        except (OSError, ValueError):
+            continue
+        source_ids.update(source.source_id for source in metadata.sources)
+    for path in sorted(root.rglob("column_manifest.csv"), key=lambda item: str(item).casefold()):
+        try:
+            with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames:
+                    continue
+                source_id_field = next(
+                    (
+                        name
+                        for name in reader.fieldnames
+                        if re.sub(r"[^a-z0-9]", "", name.casefold()) == "sourceid"
+                    ),
+                    None,
+                )
+                if source_id_field is None:
+                    continue
+                for index, row in enumerate(reader):
+                    if index >= 100_000:
+                        raise ValueError(f"Imported column manifest has too many rows: {path}")
+                    source_id = str(row.get(source_id_field, "")).strip()
+                    if source_id:
+                        source_ids.add(source_id)
+        except (OSError, csv.Error):
+            continue
+    return source_ids
+
+
+def _legacy_report_means(
+    path: Path,
+) -> Iterator[tuple[str, str, str, list[str], list[str]]]:
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+        rows = list(csv.reader(handle))
+    index = 0
+    while index < len(rows):
+        if len(rows[index]) != 1 or not rows[index][0].strip():
+            index += 1
+            continue
+        metric = rows[index][0].strip()
+        index += 1
+        section: list[list[str]] = []
+        while index < len(rows) and rows[index]:
+            section.append(rows[index])
+            index += 1
+        metadata = section[0] if section else []
+        category = _section_value(metadata, "category")
+        unit = _section_value(metadata, "unit")
+        source_row = next((row for row in section if row and row[0] == "metric"), [])
+        mean_row = next((row for row in section if row and row[0] == "mean"), [])
+        if len(source_row) > 1 and len(mean_row) > 1:
+            yield metric, category, unit, source_row[1:], mean_row[1:]
+
+
+def _section_value(row: Sequence[str], key: str) -> str:
+    try:
+        return row[row.index(key) + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def _legacy_metric_name(metric: str, category: str) -> str | None:
+    info = ColumnInfo(
+        unique_name=metric,
+        original_name=metric,
+        display_name=metric,
+        category=category,
+        group="",
+        unit="",
+    )
+    return _canonical_video_metric(info)
+
+
+def _legacy_channel_info(root: Path) -> dict[str, tuple[str, str]]:
+    channels: dict[str, tuple[str, str]] = {}
+    for path in sorted(root.rglob("column_manifest.csv"), key=lambda item: str(item).casefold()):
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames:
+                continue
+            normalized = {re.sub(r"[^a-z0-9]", "", name.casefold()): name for name in reader.fieldnames}
+            statistic_field = normalized.get("statistic") or normalized.get("canonicalmeasure")
+            source_field = normalized.get("sourcecolumn") or normalized.get("originalfield")
+            channel_field = normalized.get("channelidentifier")
+            if statistic_field is None or source_field is None:
+                continue
+            for row in reader:
+                metric = str(row.get(statistic_field, "")).strip()
+                if metric not in VIDEO_METRICS:
+                    continue
+                original = str(row.get(source_field, "")).strip() or metric
+                channel = str(row.get(channel_field, "")).strip() if channel_field else original
+                channels.setdefault(metric, (original, channel or original))
+    return channels
 
 
 class ImotionsRowSequence(Sequence[dict[str, str]]):

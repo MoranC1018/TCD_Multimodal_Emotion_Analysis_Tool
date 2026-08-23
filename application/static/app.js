@@ -247,14 +247,11 @@ const textClearVisibleSourcesButton = document.querySelector("#textClearVisibleS
 const textCatalogSourceList = document.querySelector("#textCatalogSourceList");
 const analysisOutputRootInput = document.querySelector("#analysisOutputRootInput");
 const browseAnalysisOutputButton = document.querySelector("#browseAnalysisOutputButton");
-const analysisNativeFaceEnabled = document.querySelector("#analysisNativeFaceEnabled");
-const analysisNativeFaceSourcePath = document.querySelector("#analysisNativeFaceSourcePath");
-const analysisNativeFaceMethodInputs = Array.from(document.querySelectorAll("input[name='analysisNativeFaceSourceMethod']"));
-const browseAnalysisNativeFaceSource = document.querySelector("#browseAnalysisNativeFaceSource");
-const analysisImotionsEnabled = document.querySelector("#analysisImotionsEnabled");
-const analysisImotionsSourcePath = document.querySelector("#analysisImotionsSourcePath");
-const analysisImotionsMethodInputs = Array.from(document.querySelectorAll("input[name='analysisImotionsSourceMethod']"));
-const browseAnalysisImotionsSource = document.querySelector("#browseAnalysisImotionsSource");
+const analysisVideoEnabled = document.querySelector("#analysisVideoEnabled");
+const analysisVideoSourcePath = document.querySelector("#analysisVideoSourcePath");
+const analysisVideoMethodInputs = Array.from(document.querySelectorAll("input[name='analysisVideoSourceMethod']"));
+const browseAnalysisVideoSource = document.querySelector("#browseAnalysisVideoSource");
+const analysisVideoProviderStatus = document.querySelector("#analysisVideoProviderStatus");
 const analysisAudioEnabled = document.querySelector("#analysisAudioEnabled");
 const analysisAudioSourcePath = document.querySelector("#analysisAudioSourcePath");
 const analysisAudioMethodInputs = Array.from(document.querySelectorAll("input[name='analysisAudioSourceMethod']"));
@@ -328,21 +325,13 @@ const launcherToken = document.querySelector("meta[name='launcher-token']")?.con
 let progressPollTimer = null;
 let analysisWarningAnnouncementTimer = null;
 
-const analysisImotionsControls = {
-  name: "imotions",
-  label: "Video / iMotions",
-  enabled: analysisImotionsEnabled,
-  source: analysisImotionsSourcePath,
-  methodInputs: analysisImotionsMethodInputs,
-  browse: browseAnalysisImotionsSource,
-};
-const analysisNativeFaceControls = {
-  name: "native_face",
-  label: "Py-Feat / Native Face",
-  enabled: analysisNativeFaceEnabled,
-  source: analysisNativeFaceSourcePath,
-  methodInputs: analysisNativeFaceMethodInputs,
-  browse: browseAnalysisNativeFaceSource,
+const analysisVideoControls = {
+  name: "video",
+  label: "Video",
+  enabled: analysisVideoEnabled,
+  source: analysisVideoSourcePath,
+  methodInputs: analysisVideoMethodInputs,
+  browse: browseAnalysisVideoSource,
 };
 const analysisAudioControls = {
   name: "audio",
@@ -361,8 +350,7 @@ const analysisTextControls = {
   browse: browseAnalysisTextSource,
 };
 const analysisImplementedControls = [
-  analysisNativeFaceControls,
-  analysisImotionsControls,
+  analysisVideoControls,
   analysisAudioControls,
   analysisTextControls,
 ];
@@ -370,6 +358,58 @@ const analysisImplementedControls = [
 // ANALYSIS_UI_LOGIC_START
 // This block is intentionally DOM-free so the release tests can execute the
 // same validation and request rules used by the browser UI.
+function createCanonicalAnalysisState() {
+  return {
+    video: { enabled: false, method: "import", source: "", provider: null },
+    audio: { enabled: false, method: "run", source: "" },
+    text: { enabled: false, method: "import", source: "" },
+  };
+}
+
+function buildCanonicalAnalysisModalities(analysisState) {
+  return ["video", "audio", "text"].flatMap((name) => {
+    const modality = analysisState?.[name];
+    if (!modality?.enabled) {
+      return [];
+    }
+    return [{
+      name,
+      sourceMethod: modality.method,
+      sourcePath: String(modality.source || "").trim(),
+    }];
+  });
+}
+
+function applyValidatedVideoStatus(videoState, videoStatus) {
+  return {
+    ...videoState,
+    provider: typeof videoStatus?.provider === "string" && videoStatus.provider
+      ? videoStatus.provider
+      : null,
+  };
+}
+
+function videoProviderStatusMessage(videoStatus) {
+  const providerLabels = {
+    imotions_affdex: "iMotions AFFDEX",
+    pyfeat_native_face: "Py-Feat",
+  };
+  const provider = providerLabels[videoStatus?.provider] || String(videoStatus?.provider || "").trim();
+  if (!provider) {
+    return "";
+  }
+  const parts = [`Detected provider: ${provider}.`];
+  const evidence = Array.isArray(videoStatus.evidence) ? videoStatus.evidence.filter(Boolean) : [];
+  const warnings = Array.isArray(videoStatus.warnings) ? videoStatus.warnings.filter(Boolean) : [];
+  if (evidence.length) {
+    parts.push(`Evidence: ${evidence.join(" ")}`);
+  }
+  if (warnings.length) {
+    parts.push(`Warnings: ${warnings.join(" ")}`);
+  }
+  return parts.join(" ");
+}
+
 function parseFiniteReferenceOverridesText(text) {
   const cleanText = String(text || "").trim();
   if (!cleanText) {
@@ -658,11 +698,11 @@ function analysisRunGateReasons({
 }) {
   const reasons = [];
   if (!modalities.length) {
-    reasons.push("Enable Video / iMotions, Audio, or Text.");
+    reasons.push("Enable Video, Audio, or Text.");
   } else {
     modalities.forEach((modality) => {
       if (!String(modality.sourcePath || "").trim()) {
-        const labels = { imotions: "Video / iMotions", audio: "Audio", text: "Text" };
+        const labels = { video: "Video", audio: "Audio", text: "Text" };
         const label = labels[modality.name] || modality.name;
         reasons.push(`Choose a source folder for ${label}.`);
       }
@@ -922,6 +962,7 @@ const state = {
   textCatalogLoadToken: 0,
   mode: "",
   audioMode: "batch",
+  analysis: createCanonicalAnalysisState(),
   analysisSpeakers: [],
   analysisSpeakerGroups: [],
   analysisProfileContext: null,
@@ -1485,8 +1526,11 @@ function hydrateAnalysisModalitiesFromImports() {
       ? workflowTextImportPath.value.trim()
       : "";
   const replaceExisting = Boolean(state.workflow.active && state.workflow.plan?.analysis);
-  hydrateAnalysisModality(analysisImotionsControls, facePath, replaceExisting);
-  hydrateAnalysisModality(analysisNativeFaceControls, state.pendingFaceOutput, replaceExisting);
+  hydrateAnalysisModality(
+    analysisVideoControls,
+    state.pendingFaceOutput || facePath,
+    replaceExisting,
+  );
   hydrateAnalysisModality(analysisAudioControls, audioPath, replaceExisting);
   hydrateAnalysisModality(analysisTextControls, state.pendingTextOutput || textPath, replaceExisting, "import");
 }
@@ -1507,10 +1551,12 @@ function hydrateAnalysisModality(controls, sourcePath, replaceExisting, sourceMe
 }
 
 function resetAnalysisForNewWorkflow() {
+  state.analysis = createCanonicalAnalysisState();
   analysisImplementedControls.forEach((controls) => {
-    controls.enabled.checked = false;
-    controls.source.value = "";
-    setAnalysisSourceMethod(controls, controls.name === "text" ? "import" : "run");
+    const modality = state.analysis[controls.name];
+    controls.enabled.checked = modality.enabled;
+    controls.source.value = modality.source;
+    setAnalysisSourceMethod(controls, modality.method);
   });
   state.analysisSpeakers = [];
   state.analysisSpeakerGroups = [];
@@ -2496,7 +2542,7 @@ function renderAudioCatalogSelection() {
     });
     const description = document.createElement("span");
     const title = document.createElement("strong");
-    title.textContent = `${sourceId} — ${source.title || source.link || "Untitled source"}`;
+    title.textContent = `${sourceId} - ${source.title || source.link || "Untitled source"}`;
     const details = document.createElement("small");
     const metadata = Object.entries(source.metadata || {})
       .filter(([_field, value]) => String(value || "").trim())
@@ -2544,23 +2590,41 @@ function setAnalysisSourceMethod(controls, method) {
   });
 }
 
-function analysisModalityPayload(name, controls) {
-  if (!controls.enabled.checked) {
-    return null;
-  }
-  return {
-    name,
-    sourceMethod: getAnalysisSourceMethod(controls),
-    sourcePath: controls.source.value.trim(),
+function clearAnalysisVideoProviderValidation() {
+  state.analysis.video = {
+    ...state.analysis.video,
+    provider: null,
   };
+  analysisVideoProviderStatus.textContent = "";
+  analysisVideoProviderStatus.classList.add("hidden");
+  analysisFaceAdvanced.classList.add("hidden");
+  analysisLandmarksToggle.disabled = true;
+  analysisTimingToggle.disabled = true;
+  analysisExcludeGeometryToggle.disabled = true;
+}
+
+function syncAnalysisStateFromControls() {
+  analysisImplementedControls.forEach((controls) => {
+    const previous = state.analysis[controls.name];
+    const nextSource = controls.source.value.trim();
+    const nextMethod = getAnalysisSourceMethod(controls);
+    const sourceChanged = previous.source !== nextSource || previous.method !== nextMethod;
+    state.analysis[controls.name] = {
+      ...previous,
+      enabled: controls.enabled.checked,
+      method: nextMethod,
+      source: nextSource,
+      ...(controls.name === "video" && sourceChanged ? { provider: null } : {}),
+    };
+    if (controls.name === "video" && sourceChanged) {
+      clearAnalysisVideoProviderValidation();
+    }
+  });
 }
 
 function buildAnalysisModalities() {
-  return [
-    analysisModalityPayload("imotions", analysisImotionsControls),
-    analysisModalityPayload("audio", analysisAudioControls),
-    analysisModalityPayload("text", analysisTextControls),
-  ].filter(Boolean);
+  syncAnalysisStateFromControls();
+  return buildCanonicalAnalysisModalities(state.analysis);
 }
 
 function buildAnalysisSpeakerGroups() {
@@ -2655,7 +2719,9 @@ function renderAnalysisRunGateMessages(reasons) {
 }
 
 function shouldShowAnalysisFaceOptions() {
-  return analysisImotionsEnabled.checked && getAnalysisSourceMethod(analysisImotionsControls) === "run";
+  return state.analysis.video.enabled
+    && state.analysis.video.method === "run"
+    && state.analysis.video.provider === "imotions_affdex";
 }
 
 function updateAnalysisCard(controls) {
@@ -2675,14 +2741,13 @@ function updateAnalysisCard(controls) {
     ? controls.name === "text"
       ? "Choose completed native SourceID-grain Text results or a legacy speaker-level summary."
       : "Choose an existing Analysis report folder. Source files will not be re-analysed."
-    : controls.name === "imotions"
-      ? "Choose the folder containing iMotions CSV exports."
-      : controls.name === "native_face"
-        ? "Choose completed Py-Feat / Native Face processing outputs."
-        : "Choose the folder containing processed audio_analysis.csv files.";
+    : controls.name === "video"
+      ? "Choose one iMotions AFFDEX or completed Py-Feat / Native Face source."
+      : "Choose the folder containing processed audio_analysis.csv files.";
 }
 
 function updateAnalysisForm() {
+  syncAnalysisStateFromControls();
   analysisImplementedControls.forEach(updateAnalysisCard);
 
   const modalities = buildAnalysisModalities();
@@ -2712,7 +2777,12 @@ function updateAnalysisForm() {
     invalidateAnalysisAsyncOperation(state.analysisDiscoveryOperation);
   }
   const importOnly = modalities.length > 0 && !hasAnalysisRunModality(modalities);
-  analysisFaceAdvanced.classList.toggle("hidden", !shouldShowAnalysisFaceOptions());
+  const showFaceOptions = shouldShowAnalysisFaceOptions();
+  analysisFaceAdvanced.classList.toggle("hidden", !showFaceOptions);
+  analysisVideoProviderStatus.classList.toggle(
+    "hidden",
+    !state.analysis.video.enabled || !state.analysis.video.provider,
+  );
   analysisGraphsOption.classList.toggle("hidden", importOnly);
   analysisLogscaleOption.classList.toggle("hidden", importOnly);
   analysisGraphsToggle.disabled = importOnly || analysisLocked;
@@ -2729,9 +2799,9 @@ function updateAnalysisForm() {
   browseAnalysisOutputButton.disabled = analysisLocked;
   analysisSourceManifestInput.disabled = !combinedEnabled || analysisLocked;
   browseAnalysisSourceManifestButton.disabled = !combinedEnabled || analysisLocked;
-  analysisLandmarksToggle.disabled = analysisLocked;
-  analysisTimingToggle.disabled = analysisLocked;
-  analysisExcludeGeometryToggle.disabled = analysisLocked;
+  analysisLandmarksToggle.disabled = !showFaceOptions || analysisLocked;
+  analysisTimingToggle.disabled = !showFaceOptions || analysisLocked;
+  analysisExcludeGeometryToggle.disabled = !showFaceOptions || analysisLocked;
   discoverAnalysisSpeakersButton.disabled = !combinedEnabled
     || !completeSources
     || state.analysisDiscoveryOperation.pending
@@ -2994,7 +3064,7 @@ function renderAnalysisSpeakerGroups(preferredFocusKey = "") {
       checkbox.dataset.analysisMemberId = source.id;
       checkbox.addEventListener("change", () => assignAnalysisProfileMember(group.id, "source", source.id, checkbox.checked));
       const name = document.createElement("span");
-      name.textContent = `${source.title} — ${source.speaker} (${source.id})`;
+      name.textContent = `${source.title} - ${source.speaker} (${source.id})`;
       label.append(checkbox, name);
       choices.appendChild(label);
     });
@@ -3367,7 +3437,7 @@ function renderNativeCatalogSelection(kind) {
     const copy = document.createElement("span");
     const title = String(source.title || source.metadata?.Title || sourceId);
     const speaker = String(source.speaker || source.metadata?.Speaker || "Pooled");
-    copy.textContent = `${sourceId} — ${speaker} — ${title}`;
+    copy.textContent = `${sourceId} - ${speaker} - ${title}`;
     label.append(checkbox, copy);
     controls.list.appendChild(label);
   });
@@ -3531,9 +3601,10 @@ async function openProcessingOutput(path) {
 }
 
 async function importNativeFaceIntoAnalysis() {
-  analysisNativeFaceEnabled.checked = true;
-  analysisNativeFaceSourcePath.value = state.pendingFaceOutput || faceOutputRootInput.value.trim();
-  setAnalysisSourceMethod(analysisNativeFaceControls, "run");
+  analysisVideoEnabled.checked = true;
+  analysisVideoSourcePath.value = state.pendingFaceOutput || faceOutputRootInput.value.trim();
+  setAnalysisSourceMethod(analysisVideoControls, "run");
+  clearAnalysisVideoProviderValidation();
   await showAnalysis();
 }
 
@@ -3709,6 +3780,11 @@ async function runAnalysis() {
     const runId = Number(response.runId || 0) || null;
     if (!runId) {
       throw new Error("The Analysis launcher did not return a run identifier.");
+    }
+    if (response.videoStatus) {
+      state.analysis.video = applyValidatedVideoStatus(state.analysis.video, response.videoStatus);
+      analysisVideoProviderStatus.textContent = videoProviderStatusMessage(response.videoStatus);
+      analysisVideoProviderStatus.classList.remove("hidden");
     }
     state.activeRunIds.analysis = runId;
     runAccepted = true;

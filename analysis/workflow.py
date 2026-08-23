@@ -12,7 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Literal, Mapping, Sequence
@@ -41,12 +41,21 @@ from analysis.profile import (
     write_analysis_profile,
 )
 from analysis.text_results import TextResultsError, discover_text_results
+from analysis.video import (
+    DetectedVideoSource,
+    VideoOutputProvenance,
+    detect_video_source,
+    load_canonical_video,
+    validate_video_reference_override_keys,
+)
+from analysis.video_contract import validate_video_provider_options
 from analysis import __version__
 from procurement.input_limits import (
     MAX_WORKFLOW_MANIFEST_JSON_BYTES,
     MAX_WORKFLOW_MANIFEST_JSON_ITEMS,
     read_control_json,
 )
+from processing.io_utils import atomic_write_csv
 
 
 ProgressCallback = Callable[[str], None]
@@ -62,7 +71,7 @@ class WorkflowError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModalityRequest:
-    name: Literal["imotions", "native_face", "audio", "text"]
+    name: Literal["video", "audio", "text"]
     source_method: Literal["run", "import"]
     source_path: Path
     write_graphs: bool = True
@@ -85,6 +94,7 @@ class WorkflowRequest:
     default_reference: float = 0.0
     reference_overrides: Mapping[str, float] = field(default_factory=dict)
     analysis_profile: AnalysisProfile | None = None
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,8 +114,7 @@ class _ModalityExecution:
 
 
 _MODALITIES: tuple[tuple[str, str, str], ...] = (
-    ("imotions", "video", "Video / iMotions"),
-    ("native_face", "native_face", "Py-Feat / Native Face"),
+    ("video", "video", "Video"),
     ("audio", "audio", "Audio"),
     ("text", "text", "Text"),
 )
@@ -115,6 +124,25 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
     """Run requested modalities in a fixed order, then build one combined workbook."""
 
     requested = _validate_request(request)
+    detected_video: DetectedVideoSource | None = None
+    video_provenance: VideoOutputProvenance | None = None
+    video_request = requested.get("video")
+    if video_request is not None:
+        try:
+            detected_video = detect_video_source(
+                video_request.source_path,
+                video_request.source_method,
+            )
+            validate_video_provider_options(
+                detected_video.provider,
+                include_landmarks=video_request.include_landmarks,
+                include_timing=video_request.include_timing,
+                exclude_geometry=video_request.exclude_geometry,
+            )
+            canonical_video = load_canonical_video(detected_video)
+            video_provenance = canonical_video.output_provenance(detected_video)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkflowError(f"Video source detection failed: {exc}") from exc
     output_root = Path(os.path.abspath(Path(request.output_root).expanduser()))
     _require_path_components_no_reparse(output_root, "Analysis output root")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -123,7 +151,9 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
     manifest_path = output_root / "combined_analysis_manifest.json"
     started_at = _timestamp()
     modality_roots: dict[str, Path] = {}
-    warnings: list[str] = []
+    warnings: list[str] = list(request.warnings)
+    if detected_video is not None:
+        warnings.extend(detected_video.warnings)
     accepted_reports: list[DiscoveryEntry] = []
     rejected_reports: list[DiscoveryEntry] = []
     sources_by_modality = {}
@@ -131,6 +161,8 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
     workbook_path: Path | None = None
     analysis_profile_path: Path | None = None
     reference_resolutions: tuple[ReferenceResolution, ...] = ()
+    video_manifest_payload: Mapping[str, object] | None = None
+    video_column_manifest_rows: tuple[dict[str, str], ...] = ()
     current_stage = "initialization"
     stale_artifact_policy: dict[str, object] = {
         "policy": "archive_fixed_outputs_before_run",
@@ -154,7 +186,12 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
             stage_label = "Text import" if name == "text" else f"{label} analysis"
             current_stage = stage_label
             _emit(progress, f"Starting {stage_label}")
-            execution = _run_modality(modality, output_root, combined_name)
+            execution = _run_modality(
+                modality,
+                output_root,
+                combined_name,
+                detected_video=detected_video if name == "video" else None,
+            )
             modality_roots[combined_name] = execution.stage_root
             if name == "text":
                 try:
@@ -183,7 +220,29 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
                 )
                 _emit(progress, f"Completed {stage_label}: {execution.stage_root}")
                 continue
-            discovery = _discover_stage_sources(execution.discovery_root, combined_name, label)
+            discovery_modality = (
+                "native_face"
+                if name == "video"
+                and detected_video is not None
+                and detected_video.provider == "pyfeat_native_face"
+                else combined_name
+            )
+            discovery = _discover_stage_sources(execution.discovery_root, discovery_modality, label)
+            if name == "video" and video_provenance is not None:
+                normalized_sources = tuple(
+                    replace(
+                        source,
+                        modality="video",
+                        video_provenance=video_provenance,
+                    )
+                    for source in discovery.sources
+                )
+                discovery = replace(
+                    discovery,
+                    sources=normalized_sources,
+                    accepted=tuple(replace(entry, modality="video") for entry in discovery.accepted),
+                    rejected=tuple(replace(entry, modality="video") for entry in discovery.rejected),
+                )
             sources_by_modality[combined_name] = discovery.sources
             accepted_reports.extend(discovery.accepted)
             rejected_reports.extend(discovery.rejected)
@@ -209,6 +268,9 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
                 )
                 warnings.extend(workbook_result.warnings)
                 workbook_path = workbook_result.workbook_path
+                if video_provenance is not None:
+                    video_manifest_payload = workbook_result.video_manifest_payload
+                    video_column_manifest_rows = workbook_result.video_column_manifest_rows
                 if request.include_probability_sheets and workbook_result.source_cells:
                     inference_result = add_probability_mirrors(
                         workbook_path,
@@ -226,7 +288,20 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
             except Exception as exc:
                 raise WorkflowError(f"Combined workbook failed: {exc}") from exc
             _emit(progress, "Completed combined workbook")
+        elif video_provenance is not None:
+            video_manifest_payload = {
+                "requested_modality": "video",
+                "sources": [video_provenance.to_manifest_payload()],
+            }
+            video_column_manifest_rows = video_provenance.to_column_manifest_rows()
         current_stage = "complete"
+
+        if video_column_manifest_rows:
+            atomic_write_csv(
+                output_root / "video_column_manifest.csv",
+                video_column_manifest_rows,
+                tuple(video_column_manifest_rows[0]),
+            )
 
         result = WorkflowResult(
             output_root,
@@ -248,6 +323,8 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
             warnings=warnings,
             reference_resolutions=reference_resolutions,
             stale_artifact_policy=stale_artifact_policy,
+            video_manifest_payload=video_manifest_payload,
+            video_column_manifest_rows=video_column_manifest_rows,
         )
         return result
     except Exception as exc:
@@ -273,6 +350,8 @@ def run_workflow(request: WorkflowRequest, *, progress: ProgressCallback | None 
             warnings=warnings,
             reference_resolutions=reference_resolutions,
             stale_artifact_policy=stale_artifact_policy,
+            video_manifest_payload=video_manifest_payload,
+            video_column_manifest_rows=video_column_manifest_rows,
             failed_stage=current_stage,
             error=error,
         )
@@ -286,7 +365,7 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
     profile_metadata = None
     resolved_profile = None
     if not modalities:
-        raise WorkflowError("At least one Video / iMotions, Audio, or Text modality is required")
+        raise WorkflowError("At least one Video, Audio, or Text modality is required")
     if request.write_combined_workbook and not request.speaker_groups and request.analysis_profile is None:
         raise WorkflowError("A profile or at least one speaker group is required for a combined workbook")
     if request.analysis_profile is not None:
@@ -329,7 +408,7 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
 
     requested: dict[str, ModalityRequest] = {}
     for modality in modalities:
-        if modality.name not in {"imotions", "native_face", "audio", "text"}:
+        if modality.name not in {"video", "audio", "text"}:
             raise WorkflowError(f"Unsupported modality: {modality.name!r}")
         if modality.name in requested:
             raise WorkflowError(f"Duplicate modality: {modality.name}")
@@ -345,9 +424,14 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
     output_root = Path(os.path.abspath(Path(request.output_root).expanduser()))
     for modality in requested.values():
         source = Path(modality.source_path).expanduser().resolve()
-        if modality.source_method == "import":
-            if _is_within(output_root, source):
-                raise WorkflowError("Output root must not be inside an imported report folder")
+        if modality.source_method == "run" and (
+            _is_within(output_root, source) or _is_within(source, output_root)
+        ):
+            raise WorkflowError(
+                f"Output root and {modality.name} run source must not overlap"
+            )
+        if modality.source_method == "import" and _is_within(output_root, source):
+            raise WorkflowError("Output root must not be inside an imported report folder")
     if request.analysis_profile is not None:
         try:
             validate_source_manifest_associations(
@@ -368,33 +452,46 @@ def _validate_request(request: WorkflowRequest) -> dict[str, ModalityRequest]:
                 validate_text_profile_grouping(profile_metadata, resolved_profile)
             except ValueError as exc:
                 raise WorkflowError(str(exc)) from exc
+    try:
+        validate_video_reference_override_keys(tuple(request.reference_overrides))
+    except ValueError as exc:
+        raise WorkflowError(str(exc)) from exc
     return requested
 
 
-def _run_modality(modality: ModalityRequest, output_root: Path, combined_name: str) -> _ModalityExecution:
+def _run_modality(
+    modality: ModalityRequest,
+    output_root: Path,
+    combined_name: str,
+    *,
+    detected_video: DetectedVideoSource | None = None,
+) -> _ModalityExecution:
     if modality.source_method == "import":
         source = Path(modality.source_path).expanduser().resolve()
         return _ModalityExecution(source, source)
 
     stage_root = output_root / combined_name
     try:
-        if modality.name == "imotions":
-            analysis_result = analyse_imotions_folder(
-                modality.source_path,
-                output_root=stage_root,
-                write_graphs=modality.write_graphs,
-                include_logscale=modality.include_logscale,
-                include_landmarks=modality.include_landmarks,
-                include_timing=modality.include_timing,
-                exclude_geometry=modality.exclude_geometry,
-            )
-        elif modality.name == "native_face":
-            analysis_result = analyse_native_face_folder(
-                modality.source_path,
-                output_root=stage_root,
-                write_graphs=modality.write_graphs,
-                include_logscale=modality.include_logscale,
-            )
+        if modality.name == "video":
+            if detected_video is None:
+                raise WorkflowError("Canonical Video provider was not resolved")
+            if detected_video.provider == "imotions_affdex":
+                analysis_result = analyse_imotions_folder(
+                    modality.source_path,
+                    output_root=stage_root,
+                    write_graphs=modality.write_graphs,
+                    include_logscale=modality.include_logscale,
+                    include_landmarks=modality.include_landmarks,
+                    include_timing=modality.include_timing,
+                    exclude_geometry=modality.exclude_geometry,
+                )
+            else:
+                analysis_result = analyse_native_face_folder(
+                    modality.source_path,
+                    output_root=stage_root,
+                    write_graphs=modality.write_graphs,
+                    include_logscale=modality.include_logscale,
+                )
         else:
             analysis_result = analyse_audio_folder(
                 modality.source_path,
@@ -403,11 +500,7 @@ def _run_modality(modality: ModalityRequest, output_root: Path, combined_name: s
                 include_logscale=modality.include_logscale,
             )
     except Exception as exc:
-        label = (
-            "Video / iMotions"
-            if modality.name == "imotions"
-            else ("Py-Feat / Native Face" if modality.name == "native_face" else "Audio")
-        )
+        label = "Video" if modality.name == "video" else "Audio"
         raise WorkflowError(f"{label} analysis failed: {exc}") from exc
     stage_root = stage_root.resolve()
     discovery_root = analysis_result.domain_output_dirs.get("emotion", analysis_result.output_dir).resolve()
@@ -434,6 +527,8 @@ def _write_manifest(
     warnings: list[str],
     reference_resolutions: tuple[ReferenceResolution, ...],
     stale_artifact_policy: Mapping[str, object],
+    video_manifest_payload: Mapping[str, object] | None = None,
+    video_column_manifest_rows: Sequence[Mapping[str, str]] = (),
     failed_stage: str | None = None,
     error: str | None = None,
 ) -> None:
@@ -499,6 +594,13 @@ def _write_manifest(
             for item in reference_resolutions
         ],
         "stale_artifact_policy": dict(stale_artifact_policy),
+        "video": dict(video_manifest_payload) if video_manifest_payload is not None else None,
+        "video_column_manifest_path": (
+            str((path.parent / "video_column_manifest.csv").resolve())
+            if video_column_manifest_rows
+            else None
+        ),
+        "video_column_manifest_rows": [dict(row) for row in video_column_manifest_rows],
         "failed_stage": failed_stage,
         "error": error,
     }
@@ -519,6 +621,7 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     workbook = output_root / "combined_analysis.xlsx"
     manifest = output_root / "combined_analysis_manifest.json"
     profile = output_root / "analysis_profile.json"
+    video_column_manifest = output_root / "video_column_manifest.csv"
     result: dict[str, object] = {
         "policy": "archive_fixed_outputs_before_run",
         "archive_directory": None,
@@ -526,16 +629,20 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
         "archived_previous_manifest": None,
         "archived_previous_workbook_sha256": None,
         "archived_previous_profile": None,
+        "archived_previous_video_column_manifest": None,
         "quarantined_failed_directory": None,
         "quarantined_failed_workbook": None,
         "quarantined_failed_manifest": None,
         "quarantined_failed_profile": None,
+        "quarantined_failed_video_column_manifest": None,
     }
-    if not workbook.exists() and not manifest.exists() and not profile.exists():
+    if not any(
+        path.exists() for path in (workbook, manifest, profile, video_column_manifest)
+    ):
         return result
     history = _validated_history_directory(output_root, history, create=True)
 
-    for path in (workbook, manifest, profile):
+    for path in (workbook, manifest, profile, video_column_manifest):
         if path.exists():
             _require_regular_archive_file(path)
     if not manifest.exists():
@@ -560,6 +667,7 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
             workbook=workbook,
             manifest=manifest,
             profile=profile,
+            video_column_manifest=video_column_manifest,
             result=result,
             previous_manifest=loaded,
         )
@@ -581,6 +689,18 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
         != profile.resolve()
     ):
         raise WorkflowError("The prior Analysis manifest does not identify the fixed profile.")
+    video_column_manifest_expected = bool(
+        previous_manifest.get("video_column_manifest_path")
+    )
+    if video_column_manifest_expected != video_column_manifest.exists():
+        raise WorkflowError("The prior Video column manifest and workflow manifest are incomplete.")
+    if video_column_manifest_expected and (
+        Path(str(previous_manifest["video_column_manifest_path"])).expanduser().resolve()
+        != video_column_manifest.resolve()
+    ):
+        raise WorkflowError(
+            "The prior workflow manifest does not identify the fixed Video column manifest."
+        )
 
     previous_started_at = (
         str(previous_manifest.get("started_at"))
@@ -599,15 +719,23 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     archived_workbook = archive_directory / workbook.name
     archived_profile = archive_directory / profile.name
     archived_manifest = archive_directory / manifest.name
+    archived_video_column_manifest = archive_directory / video_column_manifest.name
     staged_workbook = staging / workbook.name
     staged_profile = staging / profile.name
     staged_manifest = staging / manifest.name
+    staged_video_column_manifest = staging / video_column_manifest.name
     workbook_hash: str | None = None
     profile_hash: str | None = None
+    video_column_manifest_hash: str | None = None
     committed = False
     try:
         workbook_hash = _file_sha256(workbook)
         profile_hash = _file_sha256(profile) if profile_expected else None
+        video_column_manifest_hash = (
+            _file_sha256(video_column_manifest)
+            if video_column_manifest_expected
+            else None
+        )
         _copy_archive_file(workbook, staged_workbook)
         if _file_sha256(staged_workbook) != workbook_hash:
             raise WorkflowError("Staged Analysis workbook verification failed.")
@@ -615,10 +743,18 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
             _copy_archive_file(profile, staged_profile)
             if _file_sha256(staged_profile) != profile_hash:
                 raise WorkflowError("Staged Analysis profile verification failed.")
+        if video_column_manifest_expected:
+            _copy_archive_file(video_column_manifest, staged_video_column_manifest)
+            if _file_sha256(staged_video_column_manifest) != video_column_manifest_hash:
+                raise WorkflowError("Staged Video column manifest verification failed.")
 
         previous_manifest["workbook_path"] = str(archived_workbook.resolve())
         if profile_expected:
             previous_manifest["analysis_profile_path"] = str(archived_profile.resolve())
+        if video_column_manifest_expected:
+            previous_manifest["video_column_manifest_path"] = str(
+                archived_video_column_manifest.resolve()
+            )
         archive_metadata: dict[str, object] = {
             "archived_at": started_at,
             "archive_directory": str(archive_directory.resolve()),
@@ -630,6 +766,15 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
                 {
                     "original_analysis_profile_path": str(profile.resolve()),
                     "analysis_profile_sha256": profile_hash,
+                }
+            )
+        if video_column_manifest_hash is not None:
+            archive_metadata.update(
+                {
+                    "original_video_column_manifest_path": str(
+                        video_column_manifest.resolve()
+                    ),
+                    "video_column_manifest_sha256": video_column_manifest_hash,
                 }
             )
         previous_manifest["archive"] = archive_metadata
@@ -670,6 +815,10 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     fixed_moves = [(workbook, retirement / workbook.name)]
     if profile_expected:
         fixed_moves.append((profile, retirement / profile.name))
+    if video_column_manifest_expected:
+        fixed_moves.append(
+            (video_column_manifest, retirement / video_column_manifest.name)
+        )
     fixed_moves.append((manifest, retirement / manifest.name))
     try:
         _move_files_with_rollback(fixed_moves)
@@ -690,6 +839,10 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     result["archived_previous_manifest"] = str(archived_manifest.resolve())
     if profile_expected:
         result["archived_previous_profile"] = str(archived_profile.resolve())
+    if video_column_manifest_expected:
+        result["archived_previous_video_column_manifest"] = str(
+            archived_video_column_manifest.resolve()
+        )
     return result
 
 
@@ -700,6 +853,7 @@ def _quarantine_failed_fixed_outputs(
     workbook: Path,
     manifest: Path,
     profile: Path,
+    video_column_manifest: Path,
     result: dict[str, object],
     previous_manifest: Mapping[str, object],
 ) -> dict[str, object]:
@@ -710,7 +864,11 @@ def _quarantine_failed_fixed_outputs(
     quarantine = _unused_history_path(history, f"failed_run_{run_stamp}")
     quarantine.mkdir()
     _require_no_reparse(quarantine, "Failed Analysis quarantine directory")
-    existing = tuple(path for path in (workbook, profile, manifest) if path.exists())
+    existing = tuple(
+        path
+        for path in (workbook, profile, video_column_manifest, manifest)
+        if path.exists()
+    )
     moves = tuple((path, quarantine / path.name) for path in existing)
     try:
         _move_files_with_rollback(moves)
@@ -725,6 +883,10 @@ def _quarantine_failed_fixed_outputs(
         result["quarantined_failed_manifest"] = str(quarantine / manifest.name)
     if profile in existing:
         result["quarantined_failed_profile"] = str(quarantine / profile.name)
+    if video_column_manifest in existing:
+        result["quarantined_failed_video_column_manifest"] = str(
+            quarantine / video_column_manifest.name
+        )
     return result
 
 
@@ -973,7 +1135,7 @@ class _WorkflowArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = _WorkflowArgumentParser(description=__doc__)
     parser.add_argument("--output-root", required=True, type=Path)
-    for name in ("imotions", "native_face", "audio", "text"):
+    for name in ("video", "imotions", "native_face", "audio", "text"):
         parser.add_argument(f"--{name}-source", type=Path)
         parser.add_argument(f"--{name}-method", choices=("run", "import"))
     parser.add_argument("--no-combined-workbook", action="store_true")
@@ -993,47 +1155,95 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def request_from_cli(argv: list[str] | None = None) -> WorkflowRequest:
+    """Parse canonical and one-release compatibility flags into one request."""
+
+    args = build_parser().parse_args(argv)
+    modalities: list[ModalityRequest] = []
+    request_warnings: list[str] = []
+
+    alias_components = {
+        name: (getattr(args, f"{name}_source"), getattr(args, f"{name}_method"))
+        for name in ("imotions", "native_face")
+    }
+    if all(any(values) for values in alias_components.values()):
+        raise WorkflowError("Video provider aliases cannot be combined; supply one Video source")
+
+    video_candidates: list[tuple[str, Path, str]] = []
+    for name in ("video", "imotions", "native_face"):
+        source = getattr(args, f"{name}_source")
+        method = getattr(args, f"{name}_method")
+        if bool(source) != bool(method):
+            raise WorkflowError(f"--{name}-source and --{name}-method must be supplied together")
+        if source:
+            video_candidates.append((name, source, method))
+    if len(video_candidates) > 1:
+        raise WorkflowError("Supply exactly one Video source; canonical and provider aliases cannot be combined")
+    if video_candidates:
+        name, source, method = video_candidates[0]
+        modalities.append(
+            ModalityRequest(
+                name="video",
+                source_method=method,
+                source_path=source,
+                write_graphs=not args.no_graphs,
+                include_logscale=args.logscale,
+                include_landmarks=args.include_landmarks,
+                include_timing=args.include_timing,
+                exclude_geometry=args.exclude_geometry,
+            )
+        )
+        if name != "video":
+            request_warnings.append(
+                f"--{name}-source and --{name}-method are deprecated compatibility aliases; "
+                "use --video-source and --video-method."
+            )
+
+    for name in ("audio", "text"):
+        source = getattr(args, f"{name}_source")
+        method = getattr(args, f"{name}_method")
+        if bool(source) != bool(method):
+            raise WorkflowError(f"--{name}-source and --{name}-method must be supplied together")
+        if source:
+            modalities.append(
+                ModalityRequest(
+                    name=name,
+                    source_method=method,
+                    source_path=source,
+                    write_graphs=not args.no_graphs,
+                    include_logscale=args.logscale,
+                    include_landmarks=args.include_landmarks,
+                    include_timing=args.include_timing,
+                    exclude_geometry=args.exclude_geometry,
+                )
+            )
+    return WorkflowRequest(
+        output_root=args.output_root,
+        modalities=tuple(modalities),
+        speaker_groups=_speaker_groups_from_json(args.speaker_groups_json),
+        write_combined_workbook=not args.no_combined_workbook,
+        include_construct_comparison=not args.no_construct_comparison,
+        include_probability_sheets=not args.no_probability_sheets,
+        confidence_level=_finite_cli_number(args.confidence_level, "--confidence-level"),
+        headline_policy=args.headline_policy,
+        default_reference=_finite_cli_number(args.default_reference, "--default-reference"),
+        reference_overrides=_mapping_from_json(args.reference_overrides_json),
+        analysis_profile=(
+            profile_from_payload(
+                _parse_json(args.analysis_profile_json, "--analysis-profile-json")
+            )
+            if args.analysis_profile_json
+            else None
+        ),
+        warnings=tuple(request_warnings),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
-        args = build_parser().parse_args(argv)
-        modalities: list[ModalityRequest] = []
-        for name in ("imotions", "native_face", "audio", "text"):
-            source = getattr(args, f"{name}_source")
-            method = getattr(args, f"{name}_method")
-            if bool(source) != bool(method):
-                raise WorkflowError(f"--{name}-source and --{name}-method must be supplied together")
-            if source:
-                modalities.append(
-                    ModalityRequest(
-                        name=name,
-                        source_method=method,
-                        source_path=source,
-                        write_graphs=not args.no_graphs,
-                        include_logscale=args.logscale,
-                        include_landmarks=args.include_landmarks,
-                        include_timing=args.include_timing,
-                        exclude_geometry=args.exclude_geometry,
-                    )
-                )
-        request = WorkflowRequest(
-            output_root=args.output_root,
-            modalities=tuple(modalities),
-            speaker_groups=_speaker_groups_from_json(args.speaker_groups_json),
-            write_combined_workbook=not args.no_combined_workbook,
-            include_construct_comparison=not args.no_construct_comparison,
-            include_probability_sheets=not args.no_probability_sheets,
-            confidence_level=_finite_cli_number(args.confidence_level, "--confidence-level"),
-            headline_policy=args.headline_policy,
-            default_reference=_finite_cli_number(args.default_reference, "--default-reference"),
-            reference_overrides=_mapping_from_json(args.reference_overrides_json),
-            analysis_profile=(
-                profile_from_payload(
-                    _parse_json(args.analysis_profile_json, "--analysis-profile-json")
-                )
-                if args.analysis_profile_json
-                else None
-            ),
-        )
+        request = request_from_cli(argv)
+        for warning in request.warnings:
+            print(f"DeprecationWarning: {warning}", file=sys.stderr, flush=True)
         run_workflow(request)
     except Exception as exc:
         if not isinstance(exc, WorkflowError):

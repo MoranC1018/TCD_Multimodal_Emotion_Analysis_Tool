@@ -8,15 +8,16 @@ bilingual (original + English) output. Results are JSON files with segment-level
 transcripts and timestamps, designed to feed into RockSteady or any downstream
 sentiment-analysis tool.
 
-**Batch mode** mirrors the input directory structure in the output — so if your
+**Batch mode** mirrors the input directory structure in the output - so if your
 videos live in nested folders, the JSON files come out in the same layout.
 
 ---
 
 ## Requirements
 
-- **Python 3.12**
-- **NVIDIA GPU with CUDA** (optional but strongly recommended — ~20x faster than CPU)
+- **Python 3.11 or newer** (Python 3.12 is tested and recommended; other
+  versions compatible with the pinned stack are accepted)
+- **NVIDIA GPU with CUDA** (optional but strongly recommended - ~20x faster than CPU)
 - **ffmpeg** (used by Whisper to read video/audio)
 - **PyTorch** (with CUDA if using GPU)
 - **openai-whisper**
@@ -47,7 +48,7 @@ more slowly.
 
 ## Usage
 
-### Basic — single file
+### Basic - single file
 
 ```bash
 python -m processing.text_analysis.transcribe.transcribe path/to/video.mp4
@@ -60,7 +61,7 @@ the output to `output/<filename>.json`.
 
 Point at a procurement run folder and the script automatically finds the
 right video per speech (stitched iMotions sample or full CC download) and
-names each output JSON after the video title — not the filename:
+names each output JSON after the video title - not the filename:
 
 ```bash
 python -m processing.text_analysis.transcribe.transcribe \
@@ -75,7 +76,7 @@ suffix is removed from the Text video identity. No country or comparison group
 is inferred from the folder name. Output uses
 `original|eng|bilingual/<Speaker>/<Video>.json`.
 
-### Batch — whole folder
+### Batch - whole folder
 
 ```bash
 python -m processing.text_analysis.transcribe.transcribe Videos/ --output-dir output
@@ -209,7 +210,7 @@ comparison and alignment auditing, not as a third RockSteady input.
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `input` | (required unless `--from-procurement`) | Path to a video/audio file **or a folder** |
-| `--from-procurement` | — | Procurement run or `downloads` folder; auto-finds stitched/full videos and preserves the existing `Speaker/Video` identity |
+| `--from-procurement` | - | Procurement run or `downloads` folder; auto-finds stitched/full videos and preserves the existing `Speaker/Video` identity |
 | `--model` | `small` | `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3` |
 | `--language` | auto-detect | ISO code: `en`, `fr`, `pl`, `de`, `es`, ... |
 | `--task` | `transcribe` | `transcribe`, `translate` (→ English), or `bilingual` (original + en) |
@@ -239,7 +240,7 @@ comparison and alignment auditing, not as a third RockSteady input.
 - **French or Polish** → use `medium` minimum, `large-v3` if VRAM allows
 - **Noisy audio, strong accents, low-volume speech** → `large-v3`
 
-On a laptop RTX 4070 (8 GB VRAM), `large-v3` with `fp16` fits — just close
+On a laptop RTX 4070 (8 GB VRAM), `large-v3` with `fp16` fits - just close
 other GPU programs first.
 
 ---
@@ -253,7 +254,7 @@ above:
 ```
 output/
 ├── speech.json          # single-file mode
-└── GroupA/              # folder mode — subfolder preserved
+└── GroupA/              # folder mode - subfolder preserved
     └── clip1.json
 ```
 
@@ -318,7 +319,7 @@ weights automatically. Sizes range from 75 MB (`tiny`) to 3 GB (`large-v3`).
 - **Windows:** `C:\Users\<you>\.cache\whisper\`
 - **macOS / Linux:** `~/.cache/whisper/`
 
-Subsequent runs use the cached file — no re-download.
+Subsequent runs use the cached file - no re-download.
 
 ---
 
@@ -354,7 +355,7 @@ name starts with `~` (e.g. `~ip`).
 
 **Transcription quality is poor**
 - Use a larger model (`medium` or `large-v3`)
-- Make sure `--language` is set correctly — auto-detect occasionally picks the
+- Make sure `--language` is set correctly - auto-detect occasionally picks the
   wrong language for very short or unclear audio
 - Check the audio is actually audible: `ffplay your_video.mp4`
 
@@ -391,7 +392,7 @@ Whisper supports 99 languages, but quality varies. As a rough guide:
 - **Tier 2** (very good): Polish, Dutch, Russian, Mandarin, Japanese, Korean
 - **Tier 3** (acceptable, use large-v3): most other European/Asian languages
 
-For French and Polish — both relevant to the *Multimodal Emotion Analysis Tool* project —
+For French and Polish - both relevant to the *Multimodal Emotion Analysis Tool* project -
 `medium` is usually fine, `large-v3` is best.
 
 **One caveat:** the downstream sentiment tool (RockSteady) may only support
