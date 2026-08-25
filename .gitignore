@@ -2,8 +2,10 @@
 # Multimodal Emotion Analysis Tool - local and generated files
 # ============================================================
 
-# --- RockSteady (commercial confidential - NEVER commit) ---
+# --- RockSteady (ownership/licensing unconfirmed - do not publish) ---
 external/
+**/external/RockSteady/
+**/rocksteady-desktop-application*.jar
 
 # RockSteady adapter local runtime/configuration and generated artifacts
 processing/text_analysis/rocksteady_adapter/config.local.json
