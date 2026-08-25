@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import openpyxl
@@ -15,6 +17,7 @@ from analysis.native_face import (
     NATIVE_FACE_METRICS,
     analyse_native_face_folder,
     read_native_face_export,
+    read_native_face_folder,
 )
 from analysis.profile import AnalysisProfile, ManualGroup, ProfileMember
 from analysis.text_results import TextResultsError, discover_text_results
@@ -206,6 +209,29 @@ def test_native_face_reader_filters_primary_rows_scales_values_and_names_provide
     assert row["Contempt"] == row["Confusion"] == ""
     assert tuple(metric for metric in NATIVE_FACE_METRICS if metric in export.info) == NATIVE_FACE_METRICS
     assert {export.info[name].provided_by for name in NATIVE_FACE_METRICS} == {"Py-Feat / Native Face"}
+
+
+def test_native_face_reader_rejects_a_linked_input_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-native-face"
+    real_root.mkdir()
+    _write_face_video(real_root)
+    linked_root = tmp_path / "linked-native-face"
+    try:
+        linked_root.symlink_to(real_root, target_is_directory=True)
+    except OSError as exc:
+        if sys.platform != "win32":
+            pytest.skip(f"directory links are unavailable: {exc}")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(linked_root), str(real_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            pytest.skip(f"directory links are unavailable: {completed.stderr.strip()}")
+
+    with pytest.raises(ValueError, match="symbolic link, junction, or reparse"):
+        read_native_face_folder(linked_root)
 
 
 def test_native_face_emotion_report_keeps_arousal_as_arousal(tmp_path: Path) -> None:

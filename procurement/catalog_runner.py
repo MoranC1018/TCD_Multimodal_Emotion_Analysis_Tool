@@ -37,6 +37,8 @@ WINDOWS_RESERVED_NAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
+MAX_LOCAL_SOURCE_BYTES = 20 * 1024 * 1024 * 1024
+MAX_LOCAL_CATALOG_BYTES = 100 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class CatalogRunOptions:
     ram_throttle_low_percent: float = 90.0
     catalog_path: str = ""
     focus_payload: Mapping[str, object] | None = field(default=None, repr=False, compare=False)
+    allow_external_local_paths: bool = False
 
     def manifest_dict(self) -> dict[str, object]:
         payload = asdict(self)
@@ -121,9 +124,13 @@ def run_catalog(
 ) -> CatalogRunResult:
     """Write immutable source sidecars, then process selected rows in catalog order."""
 
-    catalog = read_catalog(catalog_path, expected_sha256=expected_catalog_sha256)
-    selected = _validated_selection(catalog, selected_source_ids)
     options = options or CatalogRunOptions(mode=str(mode or "standard"))
+    catalog = read_catalog(
+        catalog_path,
+        expected_sha256=expected_catalog_sha256,
+        allow_external_local_paths=options.allow_external_local_paths,
+    )
+    selected = _validated_selection(catalog, selected_source_ids)
     if options.mode != str(mode or options.mode) and mode != "standard":
         raise ValueError("Catalog mode and run options disagree.")
     options = replace(options, catalog_path=str(catalog.path))
@@ -164,11 +171,23 @@ def _run_catalog_with_local_snapshots(
 ) -> CatalogRunResult:
     processing_sources: dict[str, CatalogSource] = {}
     selected_local_identities: dict[str, dict[str, object]] = {}
+    snapshot_bytes = 0
     for source in catalog.sources:
         if source.source_id not in selected or source.source_kind != "local":
             continue
         snapshot_path = snapshot_directory / f"{source.source_id}{Path(source.resolved_link).suffix}"
-        selected_local_identities[source.source_id] = _snapshot_local_source(source, snapshot_path)
+        remaining = MAX_LOCAL_CATALOG_BYTES - snapshot_bytes
+        if remaining <= 0:
+            raise ValueError(
+                f"Catalog local snapshots exceed the {MAX_LOCAL_CATALOG_BYTES} byte limit"
+            )
+        identity = _snapshot_local_source(
+            source,
+            snapshot_path,
+            max_bytes=min(MAX_LOCAL_SOURCE_BYTES, remaining),
+        )
+        selected_local_identities[source.source_id] = identity
+        snapshot_bytes += int(identity["size_bytes"])
         processing_sources[source.source_id] = replace(source, resolved_link=str(snapshot_path))
 
     youtube_ids = list(dict.fromkeys(source.youtube_id for source in catalog.sources if source.youtube_id))
@@ -529,11 +548,21 @@ def _local_identity(path: Path) -> dict[str, object]:
     }
 
 
-def _snapshot_local_source(source: CatalogSource, snapshot_path: Path) -> dict[str, object]:
+def _snapshot_local_source(
+    source: CatalogSource,
+    snapshot_path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> dict[str, object]:
     original = Path(source.resolved_link).expanduser().resolve(strict=True)
     before = original.lstat()
     if not stat.S_ISREG(before.st_mode):
         raise ValueError(f"Catalog local source must be a regular file: {original}")
+    limit = MAX_LOCAL_SOURCE_BYTES if max_bytes is None else int(max_bytes)
+    if before.st_size > limit:
+        raise ValueError(
+            f"Catalog local source exceeds the {limit} byte limit: {original}"
+        )
     digest = hashlib.sha256()
     size = 0
     with original.open("rb") as source_handle, snapshot_path.open("xb") as snapshot_handle:
@@ -544,6 +573,10 @@ def _snapshot_local_source(source: CatalogSource, snapshot_path: Path) -> dict[s
             snapshot_handle.write(block)
             digest.update(block)
             size += len(block)
+            if size > limit:
+                raise ValueError(
+                    f"Catalog local source exceeds the {limit} byte limit: {original}"
+                )
         after = os.fstat(source_handle.fileno())
         if not _same_open_snapshot(opened, after):
             raise ValueError(f"Catalog local source changed while it was read: {original}")
@@ -1000,6 +1033,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["standard", "full", "manual", "clean-speaker-beta"], default="standard")
     parser.add_argument("--source-id", action="append", default=None, help="Selected source ID. Repeat for multiple rows.")
     parser.add_argument("--catalog-sha256", default="", help="SHA-256 recorded by the launcher scan.")
+    parser.add_argument(
+        "--allow-external-local-paths",
+        action="store_true",
+        help="Explicitly allow local catalog files outside the catalog directory; network and linked paths remain rejected.",
+    )
     parser.add_argument("--percentage", type=float, default=0.10)
     parser.add_argument("--max-segment-seconds", type=int, default=30)
     parser.add_argument("--segments-json", type=Path, default=None)
@@ -1076,6 +1114,7 @@ def _options_from_args(args: argparse.Namespace) -> CatalogRunOptions:
         cpu_throttle_low_percent=args.cpu_throttle_low_percent,
         ram_throttle_high_percent=args.ram_throttle_high_percent,
         ram_throttle_low_percent=args.ram_throttle_low_percent,
+        allow_external_local_paths=args.allow_external_local_paths,
     )
 
 

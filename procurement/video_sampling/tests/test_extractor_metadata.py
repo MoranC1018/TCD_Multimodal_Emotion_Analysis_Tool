@@ -31,6 +31,37 @@ class FakeVideoInfoLogger:
 
 
 class ExtractorMetadataTests(unittest.TestCase):
+    def test_network_boundaries_reject_non_youtube_url_before_runner(self):
+        invalid = "https://youtube.com.attacker.example/watch?v=abcdefghijk"
+        logger = FakeVideoInfoLogger([])
+        with self.assertRaisesRegex(ValueError, "YouTube"):
+            extractor.get_video_info(invalid, logger, info_timeout_seconds=30)
+        self.assertEqual(logger.commands, [])
+
+        with self.assertRaisesRegex(ValueError, "YouTube"):
+            extractor.build_yt_dlp_segment_command(
+                invalid,
+                "00:00:00",
+                "00:00:30",
+                Path("clip.%(ext)s"),
+                "best",
+                720,
+            )
+
+    def test_segment_download_has_a_hard_file_size_ceiling(self):
+        command = extractor.build_yt_dlp_segment_command(
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            "00:00:00",
+            "00:00:30",
+            Path("clip.%(ext)s"),
+            "best",
+            720,
+        )
+        self.assertIn("--max-filesize", command)
+        self.assertEqual(
+            command[command.index("--max-filesize") + 1],
+            str(extractor.DEFAULT_MAX_DOWNLOAD_BYTES),
+        )
     def test_resolve_seed_records_cli_or_generated_source_and_seeds_random(self):
         with patch.object(extractor.random, "seed") as seed_mock:
             seed, seed_source = extractor.resolve_seed(2468)
@@ -120,7 +151,7 @@ class ExtractorMetadataTests(unittest.TestCase):
 
         with patch.object(extractor.time, "sleep") as sleep_mock:
             video_info = extractor.get_video_info(
-                "https://www.youtube.com/watch?v=abc123",
+                "https://www.youtube.com/watch?v=abcdefghijk",
                 logger,
                 info_timeout_seconds=30,
             )
@@ -141,7 +172,7 @@ class ExtractorMetadataTests(unittest.TestCase):
 
         with patch.dict(extractor.os.environ, {extractor.YT_DLP_COOKIES_BROWSER_ENV: "edge"}, clear=False):
             extractor.get_video_info(
-                "https://www.youtube.com/watch?v=abc123",
+                "https://www.youtube.com/watch?v=abcdefghijk",
                 logger,
                 info_timeout_seconds=30,
             )

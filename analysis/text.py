@@ -28,6 +28,11 @@ from analysis.histograms import (
     analysis_root,
     resolve_output_folder,
 )
+from processing.io_utils import (
+    assert_no_output_path_aliases,
+    assert_safe_output_path,
+    atomic_write_csv,
+)
 
 
 CORE_EMOTION_COLUMNS = {"Anger", "Disgust", "Fear", "Joy", "Sadness", "Surprise"}
@@ -226,11 +231,10 @@ def match_title(title: str, mapping: dict[str, str]) -> str | None:
 
 
 def write_speaker_csv(path: Path, header: list[str], rows: list[dict[str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=header, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    parent = assert_no_output_path_aliases(path.parent, description="Text split output")
+    parent.mkdir(parents=True, exist_ok=True)
+    assert_no_output_path_aliases(path, description="Text split output")
+    atomic_write_csv(path, rows, header)
 
 
 def split(input_path: Path, reference_dir: Path, output_dir: Path) -> None:
@@ -239,6 +243,11 @@ def split(input_path: Path, reference_dir: Path, output_dir: Path) -> None:
     if not reference_dir.exists() or not reference_dir.is_dir():
         sys.exit(f"Reference folder not found: {reference_dir}")
 
+    output_dir = assert_safe_output_path(
+        output_dir,
+        protected_sources=(input_path, reference_dir),
+        description="Text split output",
+    )
     mapping = build_title_to_speaker(reference_dir)
     if not mapping:
         sys.exit(f"No speech files found under {reference_dir}")
@@ -267,6 +276,7 @@ def split(input_path: Path, reference_dir: Path, output_dir: Path) -> None:
             print(f"  [unmatched] {title[:80]}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    assert_no_output_path_aliases(output_dir, description="Text split output")
     for speaker, speaker_rows in sorted(by_speaker.items()):
         safe_speaker = re.sub(r'[<>:"/\\|?*\s]+', "_", speaker).strip("_")
         speaker_dir = output_dir / safe_speaker

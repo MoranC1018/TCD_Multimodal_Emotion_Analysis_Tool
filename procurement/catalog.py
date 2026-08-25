@@ -13,6 +13,7 @@ from typing import Iterable, Sequence
 
 from procurement.video_sampling import run_docx_extractions
 from procurement.input_limits import DocxPackageError, read_docx_snapshot
+from processing.io_utils import assert_confined_input_file, assert_local_filesystem_path_syntax
 
 
 POOLED_SPEAKER_LABEL = "Pooled (no speaker)"
@@ -67,10 +68,15 @@ def display_header(value: object) -> str:
     return str(value or "").strip()
 
 
-def read_catalog(path: Path | str, *, expected_sha256: str = "") -> SourceCatalog:
+def read_catalog(
+    path: Path | str,
+    *,
+    expected_sha256: str = "",
+    allow_external_local_paths: bool = False,
+) -> SourceCatalog:
     """Parse one bounded CSV or DOCX catalog into the shared row model."""
 
-    catalog_path = Path(path).expanduser().resolve()
+    catalog_path = assert_local_filesystem_path_syntax(path, description="source catalog").resolve()
     suffix = catalog_path.suffix.casefold()
     if suffix not in {".csv", ".docx"}:
         raise ValueError("Source catalogs must be CSV or DOCX files.")
@@ -124,7 +130,11 @@ def read_catalog(path: Path | str, *, expected_sha256: str = "") -> SourceCatalo
                 for label, index in table_metadata_columns
                 if (value := _cell(values, index))
             }
-            source_kind, resolved_link, youtube_id = _resolve_link(link, catalog_path.parent)
+            source_kind, resolved_link, youtube_id = _resolve_link(
+                link,
+                catalog_path.parent,
+                allow_external_local_paths=allow_external_local_paths,
+            )
             sources.append(
                 CatalogSource(
                     source_id=f"source-{len(sources) + 1:04d}",
@@ -228,7 +238,12 @@ def _header_map(headers: Sequence[str]) -> dict[str, int]:
     return result
 
 
-def _resolve_link(link: str, catalog_directory: Path) -> tuple[str, str, str]:
+def _resolve_link(
+    link: str,
+    catalog_directory: Path,
+    *,
+    allow_external_local_paths: bool = False,
+) -> tuple[str, str, str]:
     youtube_url = run_docx_extractions.normalise_youtube_url(link)
     if youtube_url:
         video_id = run_docx_extractions.get_youtube_video_id(youtube_url) or ""
@@ -237,12 +252,27 @@ def _resolve_link(link: str, catalog_directory: Path) -> tuple[str, str, str]:
     clean_link = link.strip()
     if len(clean_link) >= 2 and clean_link[0] == clean_link[-1] and clean_link[0] in {'"', "'"}:
         clean_link = clean_link[1:-1].strip()
-    local_path = Path(clean_link).expanduser()
+    local_path = assert_local_filesystem_path_syntax(
+        clean_link, description="catalog local source"
+    )
     if not local_path.is_absolute():
         local_path = catalog_directory / local_path
-    resolved = local_path.resolve()
-    if not resolved.exists() or not resolved.is_file():
-        raise FileNotFoundError(f"Catalog local source does not exist or is not a file: {resolved}")
+    if allow_external_local_paths:
+        resolved = assert_confined_input_file(
+            local_path, local_path.parent, description="catalog local source"
+        )
+    else:
+        try:
+            resolved = assert_confined_input_file(
+                local_path, catalog_directory, description="catalog local source"
+            )
+        except ValueError as exc:
+            if "outside the selected root" in str(exc):
+                raise ValueError(
+                    "Catalog local source is outside the catalog directory; "
+                    "use explicit external-local-path authority to allow it."
+                ) from exc
+            raise
     return "local", str(resolved), ""
 
 

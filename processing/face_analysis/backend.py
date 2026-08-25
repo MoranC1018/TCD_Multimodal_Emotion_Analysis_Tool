@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from importlib.util import find_spec
 from importlib.metadata import PackageNotFoundError, version
@@ -128,9 +129,21 @@ class PyFeatBackend:
         if self._detector_factory is not None:
             detector = self._detector_factory(device)
         else:
+            approved_weights = resolve_detector_v2_weights(
+                _pyfeat_resource_cache_dir()
+            )
+            if not model_weights_ready(approved_weights):
+                unavailable = ", ".join(
+                    unavailable_model_components(approved_weights)
+                )
+                raise RuntimeError(
+                    "Approved Detectorv2 checkpoints are not ready; run the explicit "
+                    f"Face model preparation first. Unavailable: {unavailable}"
+                )
             try:
                 import feat
                 from feat import Detectorv2
+                from feat import utils as feat_utils
             except ImportError as exc:
                 raise RuntimeError(
                     "Py-Feat is not installed. Run `scripts/setup.ps1` from the "
@@ -147,7 +160,32 @@ class PyFeatBackend:
                     "Py-Feat package metadata and imported module versions disagree: "
                     f"{self.version!r} != {module_version!r}"
                 )
-            detector = Detectorv2(device=device)
+            components = approved_weights["components"]
+            retina_path = str(components["retinaface_r34"]["local_path"])
+            arcface_path = str(components["arcface_r50"]["local_path"])
+            multitask_path = str(components["face_multitask_v2"]["local_path"])
+            original_fallback = feat_utils.hf_hub_download_with_fallback
+            previous_arcface = os.environ.get("FEAT_ARCFACE_R50_PATH")
+
+            def approved_fallback(repo_id, filename, fallback_filename, cache_dir):
+                if repo_id == "py-feat/retinaface_r34" and filename == "model.safetensors":
+                    return retina_path
+                return original_fallback(repo_id, filename, fallback_filename, cache_dir)
+
+            feat_utils.hf_hub_download_with_fallback = approved_fallback
+            os.environ["FEAT_ARCFACE_R50_PATH"] = arcface_path
+            try:
+                detector = Detectorv2(
+                    device=device,
+                    multitask_weights=multitask_path,
+                )
+            finally:
+                feat_utils.hf_hub_download_with_fallback = original_fallback
+                if previous_arcface is None:
+                    os.environ.pop("FEAT_ARCFACE_R50_PATH", None)
+                else:
+                    os.environ["FEAT_ARCFACE_R50_PATH"] = previous_arcface
+            self._weight_provenance = approved_weights
         self._validate_detector_info(detector)
         # Detectorv2 may have downloaded the default weights while it was being
         # constructed. Re-inspect the local cache so the completed video
@@ -219,3 +257,9 @@ def _pyfeat_resource_cache_dir() -> Path | None:
     if not locations:
         return None
     return Path(next(iter(locations))) / "resources"
+
+
+def pyfeat_resource_cache_dir() -> Path | None:
+    """Public internal hook used by explicit approved-weight preparation."""
+
+    return _pyfeat_resource_cache_dir()

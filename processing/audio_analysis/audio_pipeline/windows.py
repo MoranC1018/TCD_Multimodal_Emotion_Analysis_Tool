@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -20,9 +21,25 @@ class AudioWindow:
         return int(round(self.start * 1000))
 
 
-def make_windows(duration_seconds: float, window_seconds: float, stride_seconds: float) -> list[AudioWindow]:
+DEFAULT_MAX_WINDOWS = 10_000
+
+
+def make_windows(
+    duration_seconds: float,
+    window_seconds: float,
+    stride_seconds: float,
+    *,
+    max_windows: int = DEFAULT_MAX_WINDOWS,
+) -> list[AudioWindow]:
     """Create overlapping windows without overweighting a tiny final remainder."""
 
+    if not all(
+        math.isfinite(value)
+        for value in (duration_seconds, window_seconds, stride_seconds)
+    ):
+        raise ValueError("Audio duration, window, and stride must be finite numbers")
+    if max_windows <= 0:
+        raise ValueError("max_windows must be positive")
     if duration_seconds <= 0:
         raise ValueError("duration_seconds must be positive")
     if window_seconds <= 0:
@@ -37,6 +54,11 @@ def make_windows(duration_seconds: float, window_seconds: float, stride_seconds:
     start = 0.0
     epsilon = 1e-9
     while start + window_seconds <= duration_seconds + epsilon:
+        if len(starts) >= max_windows:
+            raise ValueError(
+                f"Audio workload exceeds the {max_windows} window limit; "
+                "increase the stride or analyse a shorter source."
+            )
         starts.append(round(start, 6))
         start += stride_seconds
 
@@ -47,6 +69,11 @@ def make_windows(duration_seconds: float, window_seconds: float, stride_seconds:
     # 0.01-12.01 rows, effectively counting the same audio twice.
     minimum_tail_shift = min(window_seconds, stride_seconds) / 2.0
     if not starts or tail_start - starts[-1] >= minimum_tail_shift - epsilon:
+        if len(starts) >= max_windows:
+            raise ValueError(
+                f"Audio workload exceeds the {max_windows} window limit; "
+                "increase the stride or analyse a shorter source."
+            )
         starts.append(tail_start)
 
     windows: list[AudioWindow] = []

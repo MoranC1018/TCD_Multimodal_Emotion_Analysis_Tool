@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 import zipfile
 from dataclasses import asdict, dataclass
@@ -22,6 +23,8 @@ from typing import Iterable, Mapping, Sequence
 from procurement.external_tools import credential_free_media_environment
 
 from processing.io_utils import (
+    assert_confined_input_file,
+    assert_no_output_path_aliases,
     atomic_write_json,
     exclusive_process_lock,
     lexical_absolute_path,
@@ -473,7 +476,18 @@ def validate_runtime_configuration(
 
 
 def segment_files(input_dir: Path) -> list[Path]:
-    files = sorted(input_dir.glob("*.txt"), key=lambda item: item.name.casefold())
+    input_dir = assert_no_output_path_aliases(
+        input_dir, description="RockSteady input"
+    ).resolve(strict=True)
+    files = sorted(
+        (
+            assert_confined_input_file(
+                candidate, input_dir, description="RockSteady segment"
+            )
+            for candidate in input_dir.glob("*.txt")
+        ),
+        key=lambda item: item.name.casefold(),
+    )
     if not files:
         raise ValueError(f"No segment .txt files found in {input_dir}")
     invalid = [file.name for file in files if SEGMENT_PATTERN.fullmatch(file.name) is None]
@@ -658,6 +672,54 @@ def job_context_fingerprint(
         "adapter_source_sha256": adapter_source_hash,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def snapshot_job_segments(
+    job: VideoJob,
+    files: Sequence[Path],
+    *,
+    expected_fingerprint: str,
+    settings: Settings,
+    jar_hash: str,
+    dictionaries: Sequence[dict[str, str]],
+    adapter_source_hash: str,
+) -> tuple[tempfile.TemporaryDirectory[str], VideoJob, list[Path]]:
+    """Copy the exact fingerprinted segments into an owned immutable input."""
+
+    owner = tempfile.TemporaryDirectory(prefix="mea-rocksteady-input-")
+    try:
+        snapshot_dir = Path(owner.name) / job.input_dir.name
+        snapshot_dir.mkdir()
+        for source in files:
+            destination = snapshot_dir / source.name
+            with source.open("rb") as source_handle, destination.open("xb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+        snapshot_files = segment_files(snapshot_dir)
+        snapshot_job = VideoJob(
+            snapshot_dir,
+            job.output_csv,
+            job.identity,
+            job.manifest_root,
+            job.source_id,
+        )
+        actual_fingerprint = job_fingerprint(
+            snapshot_job,
+            snapshot_files,
+            settings,
+            jar_hash,
+            dictionaries,
+            adapter_source_hash,
+        )
+        if actual_fingerprint != expected_fingerprint:
+            raise ValueError(
+                "RockSteady segment input changed while its immutable snapshot was created."
+            )
+        return owner, snapshot_job, snapshot_files
+    except BaseException:
+        owner.cleanup()
+        raise
 
 
 def input_metadata_snapshot(files: Sequence[Path]) -> str:
@@ -880,7 +942,9 @@ def discover_jobs(
     identities: set[str] | None = None,
     source_ids: Mapping[str, str] | None = None,
 ) -> tuple[list[VideoJob], bool]:
-    input_path = input_path.resolve()
+    input_path = assert_no_output_path_aliases(
+        input_path, description="RockSteady input"
+    ).resolve(strict=True)
     output_path = assert_safe_output_target(
         lexical_absolute_path(output_path), input_path
     )
@@ -922,7 +986,10 @@ def discover_jobs(
     if identities is not None:
         for identity in sorted(identities, key=str.casefold):
             relative = validate_text_identity(Path(identity))
-            video = (input_path / relative).resolve()
+            requested_video = input_path / relative
+            video = assert_no_output_path_aliases(
+                requested_video, description="RockSteady input"
+            ).resolve(strict=True)
             if not video.is_relative_to(input_path) or not video.is_dir():
                 raise ValueError(f"Prepared input is missing inventory identity: {identity}")
             segment_files(video)
@@ -962,7 +1029,14 @@ def discover_jobs(
 def _visible_directories(parent: Path) -> list[Path]:
     """List data directories while excluding atomic-write staging folders."""
 
-    return [item for item in parent.iterdir() if item.is_dir() and not item.name.startswith(".")]
+    directories: list[Path] = []
+    for item in parent.iterdir():
+        if item.name.startswith("."):
+            continue
+        safe = assert_no_output_path_aliases(item, description="RockSteady input")
+        if safe.is_dir():
+            directories.append(safe)
+    return directories
 
 
 def check_runtime(
@@ -1258,6 +1332,7 @@ def process_jobs(
             "started_at": started_at,
         }
         partial: Path | None = None
+        input_snapshot_owner: tempfile.TemporaryDirectory[str] | None = None
         fatal_error: BaseException | None = None
         try:
             if (
@@ -1309,12 +1384,21 @@ def process_jobs(
                     )
                 else:
                     job.output_csv.parent.mkdir(parents=True, exist_ok=True)
+                    input_snapshot_owner, execution_job, _snapshot_files = snapshot_job_segments(
+                        job,
+                        files,
+                        expected_fingerprint=fingerprint,
+                        settings=settings,
+                        jar_hash=jar_hash,
+                        dictionaries=dictionary_hashes,
+                        adapter_source_hash=adapter_source_hash,
+                    )
                     partial = job.output_csv.with_name(job.output_csv.name + ".partial")
                     if partial.exists():
                         partial.unlink()
                     run_java(
                         java_command(
-                            job, partial, rocksteady_home, application_jar, classes, settings
+                            execution_job, partial, rocksteady_home, application_jar, classes, settings
                         ),
                         rocksteady_home,
                         settings.timeout_seconds,
@@ -1322,7 +1406,7 @@ def process_jobs(
                     neutralize_csv_file(partial)
                     validation = validate_csv(
                         partial,
-                        job.input_dir,
+                        execution_job.input_dir,
                         settings.value_type,
                         expected_categories=available_categories,
                     )
@@ -1360,6 +1444,8 @@ def process_jobs(
                     "error_summary": concise_error(error),
                 }
             )
+        if input_snapshot_owner is not None:
+            input_snapshot_owner.cleanup()
         records.append(record)
         write_json_atomic(per_video_manifest, record)
         print(f"[{index}/{len(jobs)}] {record['status']}: {job.identity}")

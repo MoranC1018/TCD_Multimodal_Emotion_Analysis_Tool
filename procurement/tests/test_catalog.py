@@ -230,6 +230,33 @@ def test_catalog_csv_reader_is_bounded_before_decoding(tmp_path: Path, monkeypat
         read_catalog(path)
 
 
+@pytest.mark.parametrize(
+    "link",
+    (r"\\attacker.example\share\clip.mp4", "//attacker.example/share/clip.mp4", r"\\?\UNC\host\share\clip.mp4"),
+)
+def test_catalog_rejects_unc_and_device_paths_before_filesystem_access(tmp_path: Path, link: str) -> None:
+    path = tmp_path / "sources.csv"
+    write_csv_catalog(path, ["Link"], [[link]])
+
+    with pytest.raises(ValueError, match="network|device|namespace"):
+        read_catalog(path)
+
+
+def test_catalog_external_local_file_requires_explicit_cli_authority(tmp_path: Path) -> None:
+    catalog_dir = tmp_path / "catalog"
+    catalog_dir.mkdir()
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"media")
+    path = catalog_dir / "sources.csv"
+    write_csv_catalog(path, ["Link"], [[str(outside)]])
+
+    with pytest.raises(ValueError, match="outside the catalog directory"):
+        read_catalog(path)
+
+    source = read_catalog(path, allow_external_local_paths=True).sources[0]
+    assert Path(source.resolved_link) == outside.resolve()
+
+
 def test_catalog_csv_reader_caps_rows_columns_and_cell_size(tmp_path: Path, monkeypatch) -> None:
     rows_path = tmp_path / "rows.csv"
     write_csv_catalog(rows_path, ["Link"], [["one.mp4"], ["two.mp4"]])
@@ -260,7 +287,7 @@ def test_catalog_docx_uses_the_existing_bounded_package_reader(tmp_path: Path) -
         read_catalog(path)
 
 
-def test_local_source_identity_resolves_file_symlinks_to_the_canonical_target(tmp_path: Path) -> None:
+def test_local_source_identity_rejects_file_symlinks(tmp_path: Path) -> None:
     target = tmp_path / "target.mp4"
     target.write_bytes(b"synthetic video")
     alias = tmp_path / "alias.mp4"
@@ -271,9 +298,8 @@ def test_local_source_identity_resolves_file_symlinks_to_the_canonical_target(tm
     path = tmp_path / "sources.csv"
     write_csv_catalog(path, ["Link"], [["alias.mp4"]])
 
-    source = read_catalog(path).sources[0]
-
-    assert Path(source.resolved_link) == target.resolve()
+    with pytest.raises(ValueError, match="symbolic link|reparse"):
+        read_catalog(path)
 
 
 def test_catalog_normalizes_headers_but_not_arbitrary_metadata_values(tmp_path: Path) -> None:

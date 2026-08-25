@@ -29,6 +29,10 @@ def test_prepare_models_constructs_with_network_enabled_and_validates_weights(
         health, "configure_ffmpeg_shared_libraries", lambda: Path("ffmpeg")
     )
     monkeypatch.setattr(health, "PyFeatBackend", FakeEngine)
+    monkeypatch.setattr(health, "pyfeat_resource_cache_dir", lambda: Path("cache"))
+    monkeypatch.setattr(
+        health, "prepare_approved_detector_v2_weights", lambda _cache: weights
+    )
     monkeypatch.setattr(
         health,
         "model_weights_ready",
@@ -58,6 +62,10 @@ def test_prepare_models_rejects_incomplete_final_provenance(monkeypatch) -> None
         health, "configure_ffmpeg_shared_libraries", lambda: Path("ffmpeg")
     )
     monkeypatch.setattr(health, "PyFeatBackend", FakeEngine)
+    monkeypatch.setattr(health, "pyfeat_resource_cache_dir", lambda: Path("cache"))
+    monkeypatch.setattr(
+        health, "prepare_approved_detector_v2_weights", lambda _cache: incomplete
+    )
     monkeypatch.setattr(health, "model_weights_ready", lambda _value: False)
     monkeypatch.setattr(
         health,

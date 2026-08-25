@@ -105,6 +105,7 @@ def test_clean_speaker_local_catalog_publishes_audio_input_from_sealed_snapshot(
         return subprocess.CompletedProcess(command, returncode)
 
     monkeypatch.setattr(beta_cli, "apply_runtime_limits", lambda _args: None)
+    monkeypatch.setattr(beta_cli, "wait_for_busy_thresholds", lambda **_kwargs: None)
     monkeypatch.setattr(beta_cli, "run_child_process", fake_child)
     monkeypatch.setattr(beta_cli, "video_file_is_usable", lambda _path: True)
     monkeypatch.setattr(runner_module.subprocess, "run", fake_nested_process)
@@ -616,6 +617,26 @@ def test_runner_records_canonical_local_file_identity(tmp_path: Path) -> None:
         "sha256": hashlib.sha256(b"version one").hexdigest(),
         "size_bytes": len(b"version one"),
     }
+
+
+def test_runner_rejects_local_snapshot_over_byte_budget_before_processing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local_video = tmp_path / "local.mp4"
+    local_video.write_bytes(b"12345")
+    catalog_path = tmp_path / "sources.csv"
+    write_catalog(catalog_path, [["local.mp4", "", "Ireland", ""]])
+    called = False
+
+    def processor(*_args):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(runner_module, "MAX_LOCAL_SOURCE_BYTES", 4)
+    with pytest.raises(ValueError, match="byte limit"):
+        run_catalog(catalog_path, tmp_path / "run", processor=processor)
+    assert not called
 
 
 def test_runner_rejects_preexisting_output_symlink_that_escapes_run_root(tmp_path: Path) -> None:

@@ -42,6 +42,7 @@ Author: Jiaming Liu
 import argparse
 import hashlib
 import json
+import os
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -50,6 +51,8 @@ from pathlib import Path
 
 from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from processing.io_utils import (
+    assert_confined_input_file,
+    assert_no_output_path_aliases,
     atomic_write_json,
     exclusive_process_lock,
     lexical_absolute_path,
@@ -278,6 +281,57 @@ def _source_content_sha256(video_path: Path) -> str:
     """Hash media content without trusting mutable size/mtime cache keys."""
 
     return file_sha256(Path(video_path).resolve())
+
+
+def _snapshot_transcription_source(
+    source: Path, expected_sha256: str
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Copy one already-hashed source into an owned immutable Whisper input."""
+
+    source = assert_confined_input_file(
+        source, source.parent, description="Whisper input media"
+    )
+    before = source.stat()
+    owner = tempfile.TemporaryDirectory(prefix="mea-whisper-input-")
+    snapshot = Path(owner.name) / source.name
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as source_handle, snapshot.open("xb") as target_handle:
+            for block in iter(lambda: source_handle.read(1024 * 1024), b""):
+                target_handle.write(block)
+                digest.update(block)
+            target_handle.flush()
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError(
+                "Whisper input changed while its immutable snapshot was created."
+            )
+        after = source.stat()
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise ValueError(
+                "Whisper input changed while its immutable snapshot was created."
+            )
+        os.utime(snapshot, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return owner, snapshot
+    except BaseException:
+        owner.cleanup()
+        raise
+
+
+def _restore_transcript_source_identity(
+    outputs: dict[str, dict[str, object]],
+    *,
+    source: Path,
+    source_sha256_value: str,
+    source_fingerprint_value: dict[str, int],
+) -> None:
+    for output in outputs.values():
+        output["source"] = str(source.resolve())
+        output["source_sha256"] = source_sha256_value
+        output["source_fingerprint"] = dict(source_fingerprint_value)
 
 
 def _apply_whisper_provenance(output, *, model_name, provenance):
@@ -806,10 +860,19 @@ def _procurement_identity(speaker_dir: Path, video_dir: Path) -> Path:
 
 def collect_videos(root: Path):
     """Return all video/audio files under root, sorted."""
-    return sorted(
-        p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
-    )
+    selected_root = assert_no_output_path_aliases(
+        root, description="Whisper input"
+    ).resolve(strict=True)
+    videos: list[Path] = []
+    for candidate in selected_root.rglob("*"):
+        if candidate.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        videos.append(
+            assert_confined_input_file(
+                candidate, selected_root, description="Whisper input media"
+            )
+        )
+    return sorted(videos)
 
 
 def collect_from_procurement(downloads_root: Path) -> list[tuple[Path, Path]]:
@@ -1171,6 +1234,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     )
     started_at = datetime.now(timezone.utc).isoformat()
     path_sets = [_output_paths(output_root, job.relative_json, args.task) for job in jobs]
+    source_fingerprints = [source_fingerprint(job.source) for job in jobs]
     source_hashes = [_source_content_sha256(job.source) for job in jobs]
     provenance_sets = [
         build_output_provenance(
@@ -1295,10 +1359,14 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
             )
             print(f"  SKIP (verified complete set): {', '.join(str(path) for path in paths.values())}")
         else:
+            snapshot_owner: tempfile.TemporaryDirectory[str] | None = None
             try:
+                snapshot_owner, execution_source = _snapshot_transcription_source(
+                    job.source, source_hash
+                )
                 if args.task == "bilingual":
                     outputs = transcribe_bilingual_to_paths(
-                        job.source,
+                        execution_source,
                         model,
                         device,
                         paths,
@@ -1316,7 +1384,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                     if model is None:
                         raise RuntimeError("Whisper model is required for this transcription pass")
                     result = transcribe_file(
-                        job.source,
+                        execution_source,
                         model,
                         device,
                         language=job.requested_language or args.language,
@@ -1329,8 +1397,14 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                     )
                     result["model"] = args.model
                     outputs = {args.task: result}
-                    _write_json_set(outputs, paths)
                     segment_count = len(result["segments"])
+                _restore_transcript_source_identity(
+                    outputs,
+                    source=job.source,
+                    source_sha256_value=source_hash,
+                    source_fingerprint_value=source_fingerprints[record_index],
+                )
+                _write_json_set(outputs, paths)
                 records[record_index] = _transcription_record(
                     job, paths, output_root, status="completed", segment_count=segment_count,
                     source_sha256_value=source_hash,
@@ -1349,6 +1423,9 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                     provenance_by_kind=job_provenance,
                 )
                 print(f"  ERROR: {exc}", file=sys.stderr)
+            finally:
+                if snapshot_owner is not None:
+                    snapshot_owner.cleanup()
         _write_transcription_manifest(
             manifest_path, status="running", started_at=started_at,
             invocation_input=invocation_input, source_root=source_root,

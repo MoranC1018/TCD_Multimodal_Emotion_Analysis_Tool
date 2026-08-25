@@ -492,6 +492,11 @@ python -m procurement.catalog_runner "C:\path\to\sources.csv" `
   --source-id source-0001 --source-id source-0003
 ```
 
+Relative local media paths are allowed from the catalog folder. An absolute
+local file outside that folder requires the explicit CLI option
+`--allow-external-local-paths`; UNC shares, device paths, and linked paths are
+always rejected before access.
+
 Useful Procurement options:
 
 ```powershell

@@ -286,21 +286,30 @@ def get_youtube_video_id(url: str) -> str | None:
     except Exception:
         return None
 
-    host = parsed.netloc.lower()
+    if parsed.scheme.casefold() not in {"http", "https"}:
+        return None
+    try:
+        if parsed.username or parsed.password or parsed.port is not None:
+            return None
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
     host = host.removeprefix("www.").removeprefix("m.").removeprefix("music.")
 
     # Short links: https://youtu.be/videoID
     if host == "youtu.be":
-        video_id = parsed.path.strip("/").split("/")[0]
-        return video_id or None
+        parts = [part for part in parsed.path.split("/") if part]
+        video_id = parts[0] if len(parts) == 1 else ""
+        return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else None
 
     # Normal YouTube domains.
     if host in {"youtube.com", "youtube-nocookie.com"}:
         query_values = parse_qs(parsed.query)
 
         # Standard watch links: youtube.com/watch?v=videoID
-        if "v" in query_values and query_values["v"]:
-            return query_values["v"][0]
+        if "v" in query_values and len(query_values["v"]) == 1:
+            video_id = query_values["v"][0]
+            return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else None
 
         # Other common formats: /shorts/videoID, /embed/videoID, /live/videoID
         path_parts = [part for part in parsed.path.split("/") if part]
@@ -309,7 +318,8 @@ def get_youtube_video_id(url: str) -> str | None:
             if marker in path_parts:
                 marker_index = path_parts.index(marker)
                 if marker_index + 1 < len(path_parts):
-                    return path_parts[marker_index + 1]
+                    video_id = path_parts[marker_index + 1]
+                    return video_id if re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) else None
 
     return None
 

@@ -63,6 +63,7 @@ from procurement.input_limits import (
 
 DOWNLOAD_CACHE_LOCK = threading.Lock()
 YOUTUBE_DOWNLOAD_TIMEOUT_SECONDS = 3600
+DEFAULT_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024 * 1024
 ISOLATED_CHILD_TIMEOUT_SECONDS = 12 * 60 * 60
 MAX_CATALOG_CONTEXT_BYTES = 256 * 1024 * 1024
 MAX_CATALOG_CONTEXT_ITEMS = 50_000
@@ -1218,6 +1219,10 @@ def download_youtube_video(video: backend.VideoItem, temp_root: Path, *, max_hei
     target = temp_root / f"{video.video_id or 'youtube_video'}_{quality_suffix}.mp4"
     with DOWNLOAD_CACHE_LOCK:
         if target.exists() and target.stat().st_size > 0:
+            if target.stat().st_size > DEFAULT_MAX_DOWNLOAD_BYTES:
+                raise ValueError(
+                    f"Cached YouTube video exceeds the {DEFAULT_MAX_DOWNLOAD_BYTES} byte limit."
+                )
             print(f"Download cache hit: {target}", flush=True)
             return target
 
@@ -1233,6 +1238,10 @@ def download_youtube_video(video: backend.VideoItem, temp_root: Path, *, max_hei
                     env=credential_free_media_environment(),
                 )
                 if target.exists() and target.stat().st_size > 0:
+                    if target.stat().st_size > DEFAULT_MAX_DOWNLOAD_BYTES:
+                        raise ValueError(
+                            f"Downloaded YouTube video exceeds the {DEFAULT_MAX_DOWNLOAD_BYTES} byte limit."
+                        )
                     return target
             except subprocess.CalledProcessError as exc:
                 last_error = exc
@@ -1248,15 +1257,21 @@ def download_youtube_video(video: backend.VideoItem, temp_root: Path, *, max_hei
 def youtube_download_command(youtube_url: str, target: Path, format_selector: str) -> list[str]:
     """Build one yt-dlp command for the requested fallback format."""
 
+    canonical_url = run_docx_extractions.normalise_youtube_url(youtube_url)
+    if canonical_url is None:
+        raise ValueError("A valid YouTube URL with an exact 11-character video ID is required.")
+
     command = build_yt_dlp_command(
         [
+        "--max-filesize",
+        str(DEFAULT_MAX_DOWNLOAD_BYTES),
         "-f",
         format_selector,
         "--merge-output-format",
         "mp4",
         "-o",
         str(target),
-        youtube_url,
+        canonical_url,
         ],
         ffmpeg_binary=resolve_media_binary("ffmpeg", excluded_roots=(target.parent,)),
     )

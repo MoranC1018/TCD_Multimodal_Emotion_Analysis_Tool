@@ -9,11 +9,43 @@ import pytest
 from processing import io_utils
 from processing.io_utils import (
     atomic_write_csv,
+    assert_confined_input_file,
+    assert_local_filesystem_path_syntax,
     assert_safe_output_path,
     exclusive_process_lock,
     make_staging_directory,
     publish_directory,
 )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        r"\\server\share\clip.mp4",
+        "//server/share/clip.mp4",
+        r"\\?\UNC\server\share\clip.mp4",
+        r"\\.\PhysicalDrive0",
+        r"\\?\C:\research\clip.mp4",
+    ),
+)
+def test_local_path_syntax_rejects_network_and_device_namespaces_before_io(value) -> None:
+    with pytest.raises(ValueError, match="network|device|namespace"):
+        assert_local_filesystem_path_syntax(value, description="test input")
+
+
+def test_confined_input_rejects_file_symlink_that_escapes_selected_root(tmp_path) -> None:
+    root = tmp_path / "selected"
+    root.mkdir()
+    outside = tmp_path / "private.mp4"
+    outside.write_bytes(b"private")
+    alias = root / "clip.mp4"
+    try:
+        alias.symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse|outside"):
+        assert_confined_input_file(alias, root, description="test input")
 
 
 def test_atomic_csv_neutralizes_dynamic_headers_and_values(tmp_path) -> None:

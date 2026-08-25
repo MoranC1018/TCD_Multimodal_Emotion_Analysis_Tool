@@ -591,7 +591,7 @@ def _readme_text() -> str:
 - `construct_mapping.csv`：指标来源、范围、公式和阅读方法。
 - `alignment_contract.json`：供程序使用的对齐键和契约。
 
-Positive/Negative Sentiment 的范围是 0–1，其余三个方向分数是 -1–1。空白表示
+Positive/Negative Sentiment 的范围是 0-1，其余三个方向分数是 -1-1。空白表示
 所需词典类别不存在，或者没有相关词语证据。这些值描述语言使用，不是已经与
 Facial 或 Audio 校准过的情绪强度。
 

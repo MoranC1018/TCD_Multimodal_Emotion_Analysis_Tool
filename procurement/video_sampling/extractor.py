@@ -74,6 +74,7 @@ if __package__ in {None, ""}:  # pragma: no cover - supports direct script execu
 
 from procurement.console import configure_utf8_stdio
 from procurement.external_tools import build_yt_dlp_command, credential_free_media_environment, resolve_media_binary
+from procurement.video_sampling.run_docx_extractions import normalise_youtube_url
 
 try:
     from procurement.video_sampling.naming import make_video_output_folder_name
@@ -88,6 +89,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
 DEFAULT_SEGMENT_LENGTH_SECONDS = 30
 DEFAULT_DOWNLOAD_PERCENTAGE = 0.10
 DEFAULT_MAX_HEIGHT = 720
+DEFAULT_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024 * 1024
 DEFAULT_IMOTIONS_FPS = 30
 DEFAULT_IMOTIONS_CRF = 18
 DEFAULT_IMOTIONS_AUDIO_BITRATE = "192k"
@@ -636,6 +638,9 @@ class RunLogger:
 
 def get_video_info(url: str, logger: RunLogger, info_timeout_seconds: int) -> dict[str, int | str]:
     """Uses yt-dlp to read title and duration without downloading the video."""
+    canonical_url = normalise_youtube_url(url)
+    if canonical_url is None:
+        raise ValueError("A valid YouTube URL with an exact 11-character video ID is required.")
     logger.log("Reading YouTube video information...")
 
     command = build_yt_dlp_command(
@@ -648,7 +653,7 @@ def get_video_info(url: str, logger: RunLogger, info_timeout_seconds: int) -> di
         ffmpeg_binary=resolve_media_binary("ffmpeg"),
     )
     command.extend(yt_dlp_auth_args())
-    command.append(url)
+    command.append(canonical_url)
 
     last_error: subprocess.CalledProcessError | subprocess.TimeoutExpired | None = None
 
@@ -798,10 +803,15 @@ def build_yt_dlp_segment_command(
     max_height: int,
 ) -> list[str]:
     """Builds the yt-dlp command for one segment."""
+    canonical_url = normalise_youtube_url(url)
+    if canonical_url is None:
+        raise ValueError("A valid YouTube URL with an exact 11-character video ID is required.")
     command = build_yt_dlp_command(
         [
         "--no-playlist",
         "--newline",
+        "--max-filesize",
+        str(DEFAULT_MAX_DOWNLOAD_BYTES),
         "--socket-timeout",
         "30",
         "--retries",
@@ -829,7 +839,7 @@ def build_yt_dlp_segment_command(
         ),
     )
     command.extend(yt_dlp_auth_args())
-    command.append(url)
+    command.append(canonical_url)
     return command
 
 

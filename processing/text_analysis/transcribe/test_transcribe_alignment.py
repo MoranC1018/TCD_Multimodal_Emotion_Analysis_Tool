@@ -19,6 +19,7 @@ from processing.text_analysis.transcribe.transcribe import (
     _output_paths,
     _saved_pass_is_reusable,
     _write_json_set,
+    collect_videos,
     collect_from_procurement,
     transcribe_bilingual_to_paths,
     transcription_artifact_set_is_reusable,
@@ -28,6 +29,24 @@ from processing.text_analysis.transcribe.transcribe import (
 
 def segment(start: float, end: float, text: str) -> dict[str, object]:
     return {"start": start, "end": end, "text": text}
+
+
+class TranscriptionInputBoundaryTests(unittest.TestCase):
+    def test_recursive_discovery_rejects_media_symlink_outside_selected_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            root = parent / "selected"
+            root.mkdir()
+            outside = parent / "private.mp4"
+            outside.write_bytes(b"private")
+            alias = root / "linked.mp4"
+            try:
+                os.symlink(outside, alias)
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "symbolic link|reparse|outside"):
+                collect_videos(root)
 
 
 def fake_provenance(task: str) -> dict[str, dict[str, object]]:

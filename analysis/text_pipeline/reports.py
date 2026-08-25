@@ -199,8 +199,8 @@ def _render_chinese_report(model: TextReportModel) -> str:
             "",
             "## 解释建议",
             "",
-            "跨视频或 speaker 比较优先使用 `*_proportion`；它是 count / Terms 的 0–1 小数。",
-            "`*_segment_percent` 是至少命中一次的 valid segment 百分比，范围 0–100，受 Whisper 切分方式影响。",
+            "跨视频或 speaker 比较优先使用 `*_proportion`；它是 count / Terms 的 0-1 小数。",
+            "`*_segment_percent` 是至少命中一次的 valid segment 百分比，范围 0-100，受 Whisper 切分方式影响。",
             "Positive Sentiment + Negative Sentiment 为 0 时 Text Valence 留空，不能把缺少正负词证据解释成中性 0。",
             "`../multimodal/` 中的构念分数是 lexical proxy；不能当作与 Facial/Audio 已校准的同一量表。",
         ]
@@ -261,8 +261,8 @@ def _render_english_report(model: TextReportModel) -> str:
             "",
             "## Recommended interpretation",
             "",
-            "Prefer `*_proportion` for video or speaker comparisons; it is the 0–1 decimal count / Terms.",
-            "`*_segment_percent` is the 0–100 percentage of valid segments with at "
+            "Prefer `*_proportion` for video or speaker comparisons; it is the 0-1 decimal count / Terms.",
+            "`*_segment_percent` is the 0-100 percentage of valid segments with at "
             "least one hit and depends on Whisper segmentation.",
             "Text Valence remains blank when Positive Sentiment + Negative Sentiment is zero; absence of "
             "positive/negative-word evidence is not neutral zero.",

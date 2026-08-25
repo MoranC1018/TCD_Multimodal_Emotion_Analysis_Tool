@@ -8,6 +8,11 @@ import csv
 import re
 from collections import OrderedDict
 from pathlib import Path
+from processing.io_utils import (
+    assert_confined_input_file,
+    assert_input_file_budget,
+    assert_no_output_path_aliases,
+)
 from typing import Iterable, Iterator, Sequence
 
 from analysis.histograms import (
@@ -118,11 +123,16 @@ def discover_csv_inputs(input_folder: Path) -> tuple[list[Path], list[str]]:
     behavior when direct CSVs exist; otherwise we recurse into subfolders.
     """
 
-    candidates = sorted(
-        path
-        for path in input_folder.rglob("*.csv")
-        if path.is_file() and looks_like_imotions_csv(path)
-    )
+    input_folder = assert_no_output_path_aliases(
+        input_folder, description="iMotions input"
+    ).resolve(strict=True)
+    candidates = []
+    for path in input_folder.rglob("*.csv"):
+        safe = assert_confined_input_file(path, input_folder, description="iMotions input")
+        if looks_like_imotions_csv(safe):
+            candidates.append(safe)
+    candidates.sort(key=lambda path: str(path).casefold())
+    assert_input_file_budget(candidates, description="iMotions input")
     recursive_mode = True
 
     selected: OrderedDict[str, Path] = OrderedDict()

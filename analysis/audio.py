@@ -5,6 +5,11 @@ import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from processing.io_utils import (
+    assert_confined_input_file,
+    assert_input_file_budget,
+    assert_no_output_path_aliases,
+)
 from typing import Iterator, Sequence
 
 from analysis.histograms import (
@@ -99,8 +104,26 @@ def resolve_audio_input_folder(input_folder: str | Path) -> Path:
 
 
 def discover_audio_analysis_inputs(input_dir: Path) -> tuple[list[Path], list[Path], list[str]]:
-    analysis_paths = sorted(input_dir.rglob(AUDIO_ANALYSIS_FILENAME), key=lambda item: str(item).casefold())
-    opensmile_paths = sorted(input_dir.rglob(OPENSMILE_FEATURES_FILENAME), key=lambda item: str(item).casefold())
+    input_dir = assert_no_output_path_aliases(
+        input_dir, description="Audio analysis input"
+    ).resolve(strict=True)
+    analysis_paths = sorted(
+        (
+            assert_confined_input_file(path, input_dir, description="Audio analysis input")
+            for path in input_dir.rglob(AUDIO_ANALYSIS_FILENAME)
+        ),
+        key=lambda item: str(item).casefold(),
+    )
+    opensmile_paths = sorted(
+        (
+            assert_confined_input_file(path, input_dir, description="Audio analysis input")
+            for path in input_dir.rglob(OPENSMILE_FEATURES_FILENAME)
+        ),
+        key=lambda item: str(item).casefold(),
+    )
+    assert_input_file_budget(
+        [*analysis_paths, *opensmile_paths], description="Audio analysis input"
+    )
     log_lines = [f"Selected {path.relative_to(input_dir)}." for path in analysis_paths]
     log_lines.extend(f"Selected {path.relative_to(input_dir)}." for path in opensmile_paths)
     return analysis_paths, opensmile_paths, log_lines

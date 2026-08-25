@@ -10,6 +10,18 @@ from analysis.text_pipeline.ownership import (
     validate_output_boundaries,
 )
 from analysis.text_pipeline.constructs import write_construct_alignment
+from analysis.text import write_speaker_csv
+
+
+def test_text_split_csv_neutralizes_dynamic_headers_and_values(tmp_path: Path) -> None:
+    output = tmp_path / "speaker.csv"
+
+    write_speaker_csv(output, ["=Header", "Value"], [{"=Header": "@cmd", "Value": "-42"}])
+
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "'=Header,Value",
+        "'@cmd,-42",
+    ]
 
 
 def test_postprocessing_output_rejects_repository_git_descendant(tmp_path: Path) -> None:

@@ -20,6 +20,13 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from spreadsheet_safety import SpreadsheetSafeWriter
 
 
+_WINDOWS_RESERVED_COMPONENTS = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
 @dataclass(frozen=True)
 class _LockHandle:
     descriptor: int
@@ -36,6 +43,95 @@ def lexical_absolute_path(path: Path | str) -> Path:
 
     candidate = Path(path).expanduser()
     return Path(os.path.abspath(os.fspath(candidate)))
+
+
+def assert_local_filesystem_path_syntax(
+    path: Path | str, *, description: str = "input"
+) -> Path:
+    """Reject remote, device, ADS, and drive-relative syntax before any I/O."""
+
+    raw = os.fspath(path).strip()
+    if not raw:
+        raise ValueError(f"{description.capitalize()} path is blank")
+    windows = raw.replace("/", "\\")
+    if windows.startswith("\\\\"):
+        raise ValueError(
+            f"Refusing network, device, or namespace path for {description}: {raw}"
+        )
+    if re.match(r"^[A-Za-z]:[^\\/]", raw):
+        raise ValueError(f"Refusing drive-relative path for {description}: {raw}")
+    colon_tail = raw[2:] if re.match(r"^[A-Za-z]:", raw) else raw
+    if ":" in colon_tail:
+        raise ValueError(f"Refusing alternate-data-stream path for {description}: {raw}")
+    for component in re.split(r"[\\/]", windows):
+        normalized = component.rstrip(" .").split(".", 1)[0].casefold()
+        if normalized in _WINDOWS_RESERVED_COMPONENTS:
+            raise ValueError(f"Refusing Windows device name for {description}: {raw}")
+    return Path(raw).expanduser()
+
+
+def assert_confined_input_file(
+    path: Path | str,
+    root: Path | str,
+    *,
+    description: str = "input",
+    max_bytes: int | None = None,
+) -> Path:
+    """Return a regular local file proven to remain under a selected root."""
+
+    requested = assert_local_filesystem_path_syntax(path, description=description)
+    selected_root = assert_local_filesystem_path_syntax(root, description=f"{description} root")
+    lexical_root = assert_no_output_path_aliases(
+        selected_root, description=f"{description} root"
+    )
+    lexical_file = assert_no_output_path_aliases(requested, description=description)
+    try:
+        resolved_root = lexical_root.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise FileNotFoundError(
+            f"{description.capitalize()} root does not exist: {lexical_root}"
+        ) from exc
+    try:
+        resolved_file = lexical_file.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise FileNotFoundError(
+            f"{description.capitalize()} does not exist: {lexical_file}"
+        ) from exc
+    try:
+        resolved_file.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Refusing {description} outside the selected root: {resolved_file}"
+        ) from exc
+    if not resolved_file.is_file():
+        raise FileNotFoundError(f"{description.capitalize()} is not a regular file: {resolved_file}")
+    if max_bytes is not None and resolved_file.stat().st_size > max_bytes:
+        raise ValueError(
+            f"{description.capitalize()} exceeds the {max_bytes} byte limit: {resolved_file}"
+        )
+    assert_no_output_path_aliases(requested, description=description)
+    return resolved_file
+
+
+def assert_input_file_budget(
+    paths: Sequence[Path],
+    *,
+    max_files: int = 10_000,
+    max_total_bytes: int = 1024 * 1024 * 1024,
+    description: str = "input",
+) -> tuple[Path, ...]:
+    """Reject an excessive discovered file set before parsers allocate it."""
+
+    if len(paths) > max_files:
+        raise ValueError(f"{description.capitalize()} exceeds the {max_files} file limit")
+    total = 0
+    for path in paths:
+        total += path.stat().st_size
+        if total > max_total_bytes:
+            raise ValueError(
+                f"{description.capitalize()} exceeds the {max_total_bytes} cumulative byte limit"
+            )
+    return tuple(paths)
 
 
 def assert_no_output_path_aliases(

@@ -212,7 +212,7 @@ def _write_category_guide(path: Path, category_keys: Sequence[str]) -> None:
         {
             "Category": _display(key),
             "Readable column": f"{_display(key)} (% of terms)",
-            "Meaning": "RockSteady category matches divided by RockSteady Terms, shown as 0–100%.",
+            "Meaning": "RockSteady category matches divided by RockSteady Terms, shown as 0-100%.",
             "Original technical prefix": key,
         }
         for key in category_keys

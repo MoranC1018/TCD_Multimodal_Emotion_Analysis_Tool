@@ -30,8 +30,19 @@ def test_all_detector_v2_weights_include_commit_size_and_content_hash(
     tmp_path: Path,
 ) -> None:
     cached: dict[tuple[str, str], Path] = {}
+    specs = []
     for index, spec in enumerate(model_provenance.DETECTOR_V2_WEIGHT_SPECS, 1):
         content = f"checkpoint-{spec.component}".encode()
+        spec = model_provenance.ModelWeightSpec(
+            component=spec.component,
+            repo_id=spec.repo_id,
+            filenames=(spec.filenames[0],),
+            environment_override=spec.environment_override,
+            approved_revision=str(index) * 40,
+            approved_sha256=hashlib.sha256(content).hexdigest(),
+            approved_size_bytes=len(content),
+        )
+        specs.append(spec)
         cached[(spec.repo_id, spec.filenames[0])] = _cached_file(
             tmp_path,
             spec.repo_id,
@@ -39,6 +50,7 @@ def test_all_detector_v2_weights_include_commit_size_and_content_hash(
             spec.filenames[0],
             content,
         )
+    monkeypatch.setattr(model_provenance, "DETECTOR_V2_WEIGHT_SPECS", tuple(specs))
     monkeypatch.delenv("FEAT_ARCFACE_R50_PATH", raising=False)
     monkeypatch.delenv("FEAT_MULTITASK_WEIGHTS", raising=False)
     monkeypatch.setattr(
@@ -52,7 +64,7 @@ def test_all_detector_v2_weights_include_commit_size_and_content_hash(
     assert payload["status"] == "ready"
     assert model_provenance.model_weights_ready(payload)
     assert len(payload["fingerprint"]) == 64
-    for index, spec in enumerate(model_provenance.DETECTOR_V2_WEIGHT_SPECS, 1):
+    for index, spec in enumerate(specs, 1):
         record = payload["components"][spec.component]
         content = f"checkpoint-{spec.component}".encode()
         assert record["repo_id"] == spec.repo_id
@@ -63,34 +75,107 @@ def test_all_detector_v2_weights_include_commit_size_and_content_hash(
         assert Path(record["local_path"]).is_file()
 
 
-def test_retinaface_legacy_filename_is_recorded_when_primary_is_absent(
+def test_cache_lookup_uses_approved_revision_and_rejects_unapproved_bytes(monkeypatch, tmp_path: Path) -> None:
+    content = b"approved"
+    spec = model_provenance.ModelWeightSpec(
+        component="component",
+        repo_id="owner/model",
+        filenames=("model.safetensors",),
+        approved_revision="a" * 40,
+        approved_sha256=hashlib.sha256(content).hexdigest(),
+        approved_size_bytes=len(content),
+    )
+    cached = _cached_file(tmp_path, spec.repo_id, spec.approved_revision, spec.filenames[0], b"tampered")
+    seen = {}
+
+    def lookup(**kwargs):
+        seen.update(kwargs)
+        return str(cached)
+
+    monkeypatch.setattr(model_provenance, "try_to_load_from_cache", lookup)
+    record = model_provenance._resolve_component(spec, tmp_path)
+
+    assert seen["revision"] == spec.approved_revision
+    assert record["status"] == "unapproved"
+
+
+def test_model_preparation_downloads_only_approved_revisions(monkeypatch, tmp_path: Path) -> None:
+    specs = []
+    downloads = []
+    for index, original in enumerate(model_provenance.DETECTOR_V2_WEIGHT_SPECS, start=1):
+        content = f"approved-{index}".encode()
+        spec = model_provenance.ModelWeightSpec(
+            component=original.component,
+            repo_id=original.repo_id,
+            filenames=(original.filenames[0],),
+            environment_override=original.environment_override,
+            approved_revision=str(index) * 40,
+            approved_sha256=hashlib.sha256(content).hexdigest(),
+            approved_size_bytes=len(content),
+        )
+        specs.append(spec)
+
+    def download(**kwargs):
+        downloads.append(kwargs)
+        spec = next(item for item in specs if item.repo_id == kwargs["repo_id"])
+        return str(
+            _cached_file(
+                tmp_path,
+                spec.repo_id,
+                spec.approved_revision,
+                spec.filenames[0],
+                f"approved-{specs.index(spec) + 1}".encode(),
+            )
+        )
+
+    monkeypatch.setattr(model_provenance, "DETECTOR_V2_WEIGHT_SPECS", tuple(specs))
+    monkeypatch.setattr(model_provenance, "hf_hub_download", download)
+    monkeypatch.setattr(
+        model_provenance,
+        "try_to_load_from_cache",
+        lambda **kwargs: str(
+            tmp_path
+            / f"models--{kwargs['repo_id'].replace('/', '--')}"
+            / "snapshots"
+            / kwargs["revision"]
+            / kwargs["filename"]
+        ),
+    )
+
+    payload = model_provenance.prepare_approved_detector_v2_weights(tmp_path)
+
+    assert model_provenance.model_weights_ready(payload)
+    assert [item["revision"] for item in downloads] == [spec.approved_revision for spec in specs]
+
+
+def test_retinaface_unpinned_legacy_filename_is_not_considered(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     retina = model_provenance.DETECTOR_V2_WEIGHT_SPECS[0]
-    fallback = _cached_file(
+    _cached_file(
         tmp_path,
         retina.repo_id,
         "a" * 40,
-        retina.filenames[1],
+        "retinaface_r34.safetensors",
         b"legacy retinaface",
     )
 
     def lookup(**kwargs):
         if kwargs["repo_id"] == retina.repo_id:
-            return None if kwargs["filename"] == retina.filenames[0] else str(fallback)
+            return None
         return None
 
     monkeypatch.setattr(model_provenance, "try_to_load_from_cache", lookup)
     payload = model_provenance.resolve_detector_v2_weights(tmp_path)
 
     record = payload["components"]["retinaface_r34"]
-    assert record["status"] == "cached"
-    assert record["filename"] == "retinaface_r34.safetensors"
+    assert record["status"] == "not-cached"
+    assert record["candidate_filenames"] == ["model.safetensors"]
     assert payload["status"] == "incomplete"
 
 
-def test_arcface_and_multitask_environment_overrides_are_fingerprinted(
+def test_unapproved_arcface_and_multitask_environment_overrides_are_rejected(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -120,14 +205,14 @@ def test_arcface_and_multitask_environment_overrides_are_fingerprinted(
 
     arcface_record = payload["components"]["arcface_r50"]
     multitask_record = payload["components"]["face_multitask_v2"]
-    assert arcface_record["status"] == "local-override"
+    assert arcface_record["status"] == "unapproved"
     assert arcface_record["environment_variable"] == "FEAT_ARCFACE_R50_PATH"
     assert arcface_record["sha256"] == hashlib.sha256(b"arcface").hexdigest()
-    assert multitask_record["status"] == "local-override"
+    assert multitask_record["status"] == "unapproved"
     assert multitask_record["environment_variable"] == "FEAT_MULTITASK_WEIGHTS"
     assert multitask_record["sha256"] == hashlib.sha256(b"multitask").hexdigest()
-    assert payload["status"] == "ready"
-    assert model_provenance.model_weights_ready(payload)
+    assert payload["status"] == "incomplete"
+    assert not model_provenance.model_weights_ready(payload)
     for record in (arcface_record, multitask_record):
         assert record["size_bytes"] > 0
 

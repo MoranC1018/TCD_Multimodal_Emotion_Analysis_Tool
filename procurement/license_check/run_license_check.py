@@ -91,6 +91,30 @@ def credential_free_environment() -> dict[str, str]:
     return env
 
 
+def build_verifier_invocation(
+    *,
+    base: Path,
+    audited_docx: Path,
+    verifier_csv: Path,
+    verifier_summary: Path,
+    api_key: str,
+) -> tuple[list[str], dict[str, str]]:
+    """Build the verifier child without exposing its credential in argv."""
+
+    command = [
+        sys.executable,
+        str(base / "verify_audit.py"),
+        str(audited_docx),
+        "--out-csv",
+        str(verifier_csv),
+        "--summary",
+        str(verifier_summary),
+    ]
+    environment = credential_free_environment()
+    environment["YOUTUBE_API_KEY"] = api_key
+    return command, environment
+
+
 def create_missing_folders(base: Path, input_dir: Path, output_dir: Path, log_dir: Path, archive_dir: Path) -> None:
     for folder in [input_dir, output_dir, log_dir, archive_dir]:
         folder.mkdir(parents=True, exist_ok=True)
@@ -222,18 +246,19 @@ def main() -> int:
             verifier_csv = log_dir / f"{safe_stem}_blind_verification_{timestamp}.csv"
             verifier_summary = output_dir / f"{docx.stem}_blind_verification_summary_{timestamp}.txt"
             verifier_log = log_dir / f"{safe_stem}_blind_verification_console_{timestamp}.log"
-            verifier_cmd = [
-                sys.executable,
-                str(base / "verify_audit.py"),
-                str(out_docx),
-                "--api-key",
-                api_key,
-                "--out-csv",
-                str(verifier_csv),
-                "--summary",
-                str(verifier_summary),
-            ]
-            vcode = run_command(verifier_cmd, verifier_log, allow_exit_codes={0, 1})
+            verifier_cmd, verifier_env = build_verifier_invocation(
+                base=base,
+                audited_docx=out_docx,
+                verifier_csv=verifier_csv,
+                verifier_summary=verifier_summary,
+                api_key=api_key,
+            )
+            vcode = run_command(
+                verifier_cmd,
+                verifier_log,
+                allow_exit_codes={0, 1},
+                env=verifier_env,
+            )
             if vcode not in {0, 1}:
                 all_success = False
                 finished_lines.append(f"FAILED verifier: {docx.name} -> see {verifier_log}")

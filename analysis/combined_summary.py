@@ -34,6 +34,7 @@ from analysis.video_contract import (
 )
 from analysis.video import VideoOutputProvenance, canonical_report_source_id_maps
 from spreadsheet_safety import neutralize_spreadsheet_value
+from processing.io_utils import assert_confined_input_file, assert_no_output_path_aliases
 
 
 LEGACY_MINIMUM_LAYOUT_SOURCE_COUNT = 5
@@ -407,11 +408,45 @@ def _slot_values(
     return tuple(padded)
 
 
+MAX_IMPORTED_REPORT_BYTES = 64 * 1024 * 1024
+MAX_IMPORTED_REPORT_ROWS = 2_000_000
+MAX_IMPORTED_REPORT_COLUMNS = 16_384
+MAX_IMPORTED_REPORT_CELL_CHARS = 1_048_576
+MAX_COMBINED_REPORT_CANDIDATES = 10_000
+MAX_COMBINED_REPORT_CANDIDATE_BYTES = 1024 * 1024 * 1024
+
+
 def parse_sectioned_csv(path: Path) -> dict[str, MetricSeries]:
     """Read the sectioned CSV emitted by ``write_descriptive_statistics_csv``."""
 
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.reader(handle))
+    path = assert_confined_input_file(
+        path, path.parent, description="Analysis report input"
+    )
+    size = path.stat().st_size
+    if size > MAX_IMPORTED_REPORT_BYTES:
+        raise InputError(
+            f"{path}: imported report exceeds the {MAX_IMPORTED_REPORT_BYTES} byte limit"
+        )
+    rows: list[list[str]] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row_index, row in enumerate(csv.reader(handle), start=1):
+                if row_index > MAX_IMPORTED_REPORT_ROWS:
+                    raise InputError(
+                        f"{path}: imported report exceeds the {MAX_IMPORTED_REPORT_ROWS} row limit"
+                    )
+                if len(row) > MAX_IMPORTED_REPORT_COLUMNS:
+                    raise InputError(
+                        f"{path}: imported report row {row_index} exceeds the "
+                        f"{MAX_IMPORTED_REPORT_COLUMNS} column limit"
+                    )
+                if any(len(cell) > MAX_IMPORTED_REPORT_CELL_CHARS for cell in row):
+                    raise InputError(
+                        f"{path}: imported report row {row_index} contains an oversized cell"
+                    )
+                rows.append(row)
+    except csv.Error as exc:
+        raise InputError(f"{path}: could not parse imported CSV: {exc}") from exc
     metrics: dict[str, MetricSeries] = {}
     row_index = 0
     while row_index < len(rows):
@@ -566,13 +601,33 @@ def discover_combined_sources_audited(root: str | Path, modality: str) -> Combin
 
     if modality not in {"audio", "video", "native_face"}:
         raise InputError(f"Unsupported modality: {modality!r}")
-    root_path = Path(root).expanduser().resolve()
+    root_path = assert_no_output_path_aliases(
+        root, description="Analysis report root"
+    ).resolve(strict=True)
     if not root_path.exists():
         raise InputError(f"Analysis root does not exist: {root_path}")
     grouped: dict[str, list[tuple[Speaker, Path, str]]] = {}
     rejected: list[DiscoveryEntry] = []
     errors: list[str] = []
-    for path in sorted(root_path.rglob("descriptive_statistics.csv"), key=lambda item: str(item).casefold()):
+    candidates: list[Path] = []
+    candidate_bytes = 0
+    for discovered in root_path.rglob("descriptive_statistics.csv"):
+        if len(candidates) >= MAX_COMBINED_REPORT_CANDIDATES:
+            raise InputError(
+                "Analysis report candidate count exceeds the "
+                f"{MAX_COMBINED_REPORT_CANDIDATES} file limit"
+            )
+        candidate = assert_confined_input_file(
+            discovered, root_path, description="Analysis report input"
+        )
+        candidate_bytes += candidate.stat().st_size
+        if candidate_bytes > MAX_COMBINED_REPORT_CANDIDATE_BYTES:
+            raise InputError(
+                "Analysis report candidates exceed the cumulative byte limit of "
+                f"{MAX_COMBINED_REPORT_CANDIDATE_BYTES}"
+            )
+        candidates.append(candidate)
+    for path in sorted(candidates, key=lambda item: str(item).casefold()):
         relative = path.relative_to(root_path)
         if len(relative.parts) == 5:
             domain, supplied_speaker, combined, findings, filename = relative.parts
@@ -1315,8 +1370,7 @@ def _write_measure_guide(
                 if metric in VIDEO_VALENCE
                 else "Dimensions"
             )
-            sheet.append(
-                (
+            provider_row = [
                     section,
                     "Video",
                     metric,
@@ -1335,8 +1389,10 @@ def _write_measure_guide(
                     normalization,
                     fields,
                     channels,
-                )
-            )
+                ]
+            for index in (3, 8, 10, 11, 12, 13, 14):
+                provider_row[index] = neutralize_spreadsheet_value(provider_row[index])
+            sheet.append(provider_row)
     add(
         "Sentiment",
         "Text",

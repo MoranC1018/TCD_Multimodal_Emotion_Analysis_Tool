@@ -9,6 +9,11 @@ import json
 import math
 import os
 from pathlib import Path
+from processing.io_utils import (
+    assert_confined_input_file,
+    assert_input_file_budget,
+    assert_no_output_path_aliases,
+)
 from typing import Sequence
 
 from analysis.histograms import (
@@ -49,7 +54,9 @@ def analyse_native_face_folder(
 ) -> AnalysisResult:
     """Build Analysis reports from verified native Face video outputs."""
 
-    root = Path(input_folder).expanduser().resolve()
+    root = assert_no_output_path_aliases(
+        input_folder, description="Native Face input"
+    ).resolve(strict=True)
     exports = read_native_face_folder(root)
     manifests = [export.path.with_name("video_manifest.json") for export in exports]
     destination = (
@@ -73,12 +80,21 @@ def analyse_native_face_folder(
 def read_native_face_folder(input_folder: str | Path) -> tuple[ParsedExport, ...]:
     """Read and bind one native Face run without writing Analysis output."""
 
-    root = Path(input_folder).expanduser().resolve()
+    root = assert_no_output_path_aliases(
+        input_folder, description="Native Face input"
+    ).resolve(strict=True)
     if not root.is_dir():
         raise NotADirectoryError(f"Native Face input folder does not exist: {root}")
-    manifests = sorted(root.rglob("video_manifest.json"), key=lambda path: str(path).casefold())
+    manifests = sorted(
+        (
+            assert_confined_input_file(path, root, description="Native Face manifest")
+            for path in root.rglob("video_manifest.json")
+        ),
+        key=lambda path: str(path).casefold(),
+    )
     if not manifests:
         raise ValueError(f"No completed native Face video manifests found under {root}")
+    assert_input_file_budget(manifests, description="Native Face manifests")
     exports = tuple(read_native_face_export(path.with_name("face_core.csv")) for path in manifests)
     _validate_run_binding(root, manifests)
     return exports
@@ -87,7 +103,13 @@ def read_native_face_folder(input_folder: str | Path) -> tuple[ParsedExport, ...
 def read_native_face_export(path: Path) -> ParsedExport:
     """Read one verified face_core.csv without importing PyArrow or Py-Feat."""
 
-    core = Path(path).expanduser().resolve()
+    requested_core = Path(path).expanduser()
+    core = assert_confined_input_file(
+        requested_core,
+        requested_core.parent,
+        description="Native Face core input",
+        max_bytes=1024 * 1024 * 1024,
+    )
     manifest_path = core.with_name("video_manifest.json")
     manifest = _read_manifest(manifest_path)
     if manifest.get("status") != "completed" or manifest.get("output_contract_version") != "1.0":

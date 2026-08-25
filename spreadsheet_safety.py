@@ -7,7 +7,7 @@ import re
 from typing import Any, Iterable
 
 
-_FORMULA_PREFIXES = frozenset(("=", "+", "-", "@", "\t", "\r"))
+_FORMULA_PREFIXES = frozenset(("=", "+", "-", "@", "\t", "\r", "\n", "\v", "\f"))
 _STRICT_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 
 

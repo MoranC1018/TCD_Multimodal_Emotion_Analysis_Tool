@@ -47,10 +47,11 @@ explicitly prepares these weights; a manual installation should do the same:
 .venv\Scripts\python -m processing.face_analysis --prepare-models
 ```
 
-`--prepare-models` is intentionally network-enabled. It constructs Detectorv2
-once, downloads any missing checkpoints into Py-Feat's normal cache, and exits
-successfully only after the content, size, repository, filename, and cache
-revision of all three weights have been recorded and validated.
+`--prepare-models` is intentionally network-enabled. It downloads each
+checkpoint from the immutable revision approved by this release, validates the
+exact filename, size, and SHA-256 before model construction, and then constructs
+Detectorv2 only from those validated local paths. Mutable `main` revisions and
+arbitrary local override bytes are not accepted as ready.
 
 ## Run
 

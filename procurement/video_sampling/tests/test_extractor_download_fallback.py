@@ -70,7 +70,7 @@ class ExtractorDownloadFallbackTests(unittest.TestCase):
 
             with patch.dict(extractor.os.environ, {extractor.YT_DLP_COOKIES_FILE_ENV: r"C:\cookies.txt"}, clear=False):
                 command = extractor.build_yt_dlp_segment_command(
-                    url="https://www.youtube.com/watch?v=abc123",
+                    url="https://www.youtube.com/watch?v=abc123DEF45",
                     start_timestamp="00:00:10",
                     end_timestamp="00:00:20",
                     output_path_template=output_template,

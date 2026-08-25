@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from spreadsheet_safety import SpreadsheetSafeWriter
+from processing.io_utils import assert_no_output_path_aliases, assert_safe_output_path
 
 from . import config
 from .emotion_models import EmotionModelBundle, EmotionModels, load_debug_fallback_emotion_models
@@ -18,6 +19,8 @@ from .source_context import copy_run_sidecars, load_source_context
 
 STITCHED_VIDEO_NAME = "stitched_imotions.mp4"
 CATALOG_INTERNAL_DIRECTORIES = frozenset({"_clean_speaker_beta_cache", "_downloads"})
+MAX_AUDIO_BATCH_FILES = 10_000
+MAX_AUDIO_BATCH_BYTES = 100 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -197,8 +200,14 @@ def run_batch(
 ) -> BatchResult:
     """Run OpenSMILE audio analysis over a procurement downloads folder."""
 
-    input_path = input_path.expanduser().resolve()
-    output_root = output_root.expanduser().resolve()
+    input_path = assert_no_output_path_aliases(
+        input_path, description="Audio input"
+    ).resolve(strict=True)
+    output_root = assert_safe_output_path(
+        output_root,
+        protected_sources=(input_path,),
+        description="Audio output",
+    )
     if input_path.is_dir() and (output_root == input_path or input_path in output_root.parents):
         raise ValueError("Choose an audio output directory outside the input folder.")
     emit_progress(progress, f"Input folder: {input_path}")
@@ -209,6 +218,15 @@ def run_batch(
     jobs = _filter_source_ids(all_jobs, selected_source_ids)
     if not jobs:
         raise ValueError(f"No analysis .mp4 files found under {input_path}")
+    if len(jobs) > MAX_AUDIO_BATCH_FILES:
+        raise ValueError(
+            f"Audio batch exceeds the {MAX_AUDIO_BATCH_FILES} file limit."
+        )
+    total_input_bytes = sum(job.input_video.stat().st_size for job in jobs)
+    if total_input_bytes > MAX_AUDIO_BATCH_BYTES:
+        raise ValueError(
+            f"Audio batch exceeds the {MAX_AUDIO_BATCH_BYTES} byte limit."
+        )
     emit_progress(progress, f"Found {len(jobs)} video(s) to analyse.")
     long_path_warnings = path_length_warnings(input_path, output_root, jobs)
     for warning in long_path_warnings:

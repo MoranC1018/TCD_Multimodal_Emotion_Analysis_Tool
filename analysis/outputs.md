@@ -101,7 +101,7 @@ Frequency distributions of every emotion and affect metric, with one column per
 video source and one row per bin. Bins are fixed-width (5 units) and cover the
 full scale of each metric type:
 
-- **Core emotions and other 0–100 metrics** - bins from 0 to 100 (20 bins)
+- **Core emotions and other 0-100 metrics** - bins from 0 to 100 (20 bins)
 - **Valence** - bins from −100 to 100 (40 bins)
 
 The CSV uses section headers to separate metrics. The Excel workbook splits the

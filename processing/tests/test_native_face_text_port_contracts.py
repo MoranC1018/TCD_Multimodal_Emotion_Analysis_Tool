@@ -341,3 +341,5 @@ def test_spreadsheet_value_keeps_strict_signed_numbers_and_neutralizes_attacks()
     assert neutralize_spreadsheet_value("+3.5e-2") == "+3.5e-2"
     assert neutralize_spreadsheet_value(" =SUM(A1:A2)") == "' =SUM(A1:A2)"
     assert neutralize_spreadsheet_value("@malicious") == "'@malicious"
+    assert neutralize_spreadsheet_value("\n=SUM(A1:A2)") == "'\n=SUM(A1:A2)"
+    assert neutralize_spreadsheet_value("\ufeff\t@malicious") == "'\ufeff\t@malicious"

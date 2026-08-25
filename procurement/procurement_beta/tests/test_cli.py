@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from application import backend
+from procurement.procurement_beta import cli as cli_module
 
 from procurement.procurement_beta.cli import (
     cache_root_from_output_root,
@@ -95,10 +96,27 @@ def test_cli_accepts_repeated_catalog_source_ids_and_context_path() -> None:
             "source-0004",
         ]
     )
-
     assert args.source_context == Path("source_context.json")
     assert args.source_id == ["source-0002", "source-0004"]
 
+
+def test_clean_speaker_download_command_rejects_host_confusion_and_caps_size(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="YouTube"):
+        cli_module.youtube_download_command(
+            "https://youtube.com.attacker.example/watch?v=abcdefghijk",
+            tmp_path / "video.mp4",
+            "best",
+        )
+
+    command = cli_module.youtube_download_command(
+        "https://www.youtube.com/watch?v=abcdefghijk",
+        tmp_path / "video.mp4",
+        "best",
+    )
+    assert "--max-filesize" in command
+    assert command[command.index("--max-filesize") + 1] == str(
+        cli_module.DEFAULT_MAX_DOWNLOAD_BYTES
+    )
 
 def test_catalog_context_preserves_source_id_metadata_and_pooled_blank_speaker(tmp_path: Path) -> None:
     original = tmp_path / "speech.mp4"

@@ -16,15 +16,15 @@ from pathlib import Path
 from typing import Mapping
 
 try:
-    from huggingface_hub import try_to_load_from_cache
+    from huggingface_hub import hf_hub_download, try_to_load_from_cache
 except ImportError:  # pragma: no cover - Py-Feat installs this dependency.
+    hf_hub_download = None
     try_to_load_from_cache = None
 
 from .media import file_sha256
 
 
-MODEL_WEIGHT_PROVENANCE_VERSION = "1.0"
-_DEFAULT_REVISION = "main"
+MODEL_WEIGHT_PROVENANCE_VERSION = "1.1"
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,9 @@ class ModelWeightSpec:
     repo_id: str
     filenames: tuple[str, ...]
     environment_override: str | None = None
+    approved_revision: str = ""
+    approved_sha256: str = ""
+    approved_size_bytes: int = 0
 
 
 DETECTOR_V2_WEIGHT_SPECS = (
@@ -42,19 +45,28 @@ DETECTOR_V2_WEIGHT_SPECS = (
         component="retinaface_r34",
         repo_id="py-feat/retinaface_r34",
         # Py-Feat 2.1.1 tries the v2 filename first, then this legacy fallback.
-        filenames=("model.safetensors", "retinaface_r34.safetensors"),
+        filenames=("model.safetensors",),
+        approved_revision="2e4495d934ed359ae8ddc0946d82f85e1e328e52",
+        approved_sha256="f339890a869284bb39dc16ed6f52acc21d74a73d6e419088697e46ee0b54eaf2",
+        approved_size_bytes=88_606_408,
     ),
     ModelWeightSpec(
         component="arcface_r50",
         repo_id="py-feat/arcface_r50",
         filenames=("arcface_r50.safetensors",),
         environment_override="FEAT_ARCFACE_R50_PATH",
+        approved_revision="1e2637bc33aef12c2eeec84f76080509f9d5ab0d",
+        approved_sha256="911ba0172feb170e53f2eb94fb2f29099bc722cb82a2c14147bbedd253056313",
+        approved_size_bytes=174_387_800,
     ),
     ModelWeightSpec(
         component="face_multitask_v2",
         repo_id="py-feat/face_multitask_v2",
         filenames=("face_multitask_v27.safetensors",),
         environment_override="FEAT_MULTITASK_WEIGHTS",
+        approved_revision="7c18f8da048b90f7bf135d6129bcf349960ec32f",
+        approved_sha256="e3c870e22ba041d2aeb11ae7eaaf832fbb869413bca21d7486a805b8a4ddc8bd",
+        approved_size_bytes=166_817_444,
     ),
 )
 
@@ -86,6 +98,33 @@ def resolve_detector_v2_weights(cache_dir: Path | None) -> dict[str, object]:
     return payload
 
 
+def prepare_approved_detector_v2_weights(cache_dir: Path) -> dict[str, object]:
+    """Download only release-approved immutable checkpoint revisions."""
+
+    if hf_hub_download is None:
+        raise RuntimeError("huggingface_hub is required to prepare Face model weights")
+    cache = Path(cache_dir).expanduser().resolve()
+    for spec in DETECTOR_V2_WEIGHT_SPECS:
+        path = Path(
+            hf_hub_download(
+                repo_id=spec.repo_id,
+                filename=spec.filenames[0],
+                revision=spec.approved_revision,
+                cache_dir=cache,
+            )
+        )
+        fingerprint = _file_fingerprint(path)
+        if (
+            fingerprint["sha256"] != spec.approved_sha256
+            or fingerprint["size_bytes"] != spec.approved_size_bytes
+        ):
+            raise RuntimeError(
+                f"Downloaded {spec.component} checkpoint does not match the approved release digest."
+            )
+    _cached_file_sha256.cache_clear()
+    return resolve_detector_v2_weights(cache)
+
+
 def model_weights_ready(payload: object) -> bool:
     """Return whether ``payload`` proves all three checkpoint contents."""
 
@@ -106,6 +145,10 @@ def model_weights_ready(payload: object) -> bool:
         if record.get("status") not in {"cached", "local-override"}:
             return False
         if record.get("repo_id") != spec.repo_id:
+            return False
+        if record.get("sha256") != spec.approved_sha256:
+            return False
+        if record.get("size_bytes") != spec.approved_size_bytes:
             return False
         if record.get("status") == "cached":
             if record.get("filename") not in spec.filenames:
@@ -129,7 +172,7 @@ def model_weights_ready(payload: object) -> bool:
             return False
         if record.get("status") == "cached":
             commit = record.get("snapshot_commit")
-            if not isinstance(commit, str) or not commit:
+            if commit != spec.approved_revision:
                 return False
     return payload.get("fingerprint") == model_weight_set_fingerprint(payload)
 
@@ -209,14 +252,21 @@ def _resolve_component(
         }
         if not path.is_file():
             return {**base, "status": "missing"}
-        return {**base, "status": "local-override", **_file_fingerprint(path)}
+        fingerprint = _file_fingerprint(path)
+        status = (
+            "local-override"
+            if fingerprint["sha256"] == spec.approved_sha256
+            and fingerprint["size_bytes"] == spec.approved_size_bytes
+            else "unapproved"
+        )
+        return {**base, "status": status, **fingerprint}
 
     base = {
         "component": spec.component,
         "source": "huggingface-cache",
         "repo_id": spec.repo_id,
         "candidate_filenames": list(spec.filenames),
-        "requested_revision": _DEFAULT_REVISION,
+        "requested_revision": spec.approved_revision,
     }
     if try_to_load_from_cache is None:
         return {**base, "status": "cache-inspection-unavailable"}
@@ -229,7 +279,7 @@ def _resolve_component(
             cached = try_to_load_from_cache(
                 repo_id=spec.repo_id,
                 filename=filename,
-                revision=_DEFAULT_REVISION,
+                revision=spec.approved_revision,
                 cache_dir=cache_dir,
             )
         except (OSError, ValueError):
@@ -240,13 +290,23 @@ def _resolve_component(
         path = Path(cached)
         if not path.is_file():
             continue
+        fingerprint = _file_fingerprint(path)
+        snapshot_commit = _snapshot_commit(path) or "unknown"
+        status = (
+            "cached"
+            if filename == spec.filenames[0]
+            and snapshot_commit == spec.approved_revision
+            and fingerprint["sha256"] == spec.approved_sha256
+            and fingerprint["size_bytes"] == spec.approved_size_bytes
+            else "unapproved"
+        )
         return {
             **base,
-            "status": "cached",
+            "status": status,
             "filename": filename,
-            "snapshot_commit": _snapshot_commit(path) or "unknown",
+            "snapshot_commit": snapshot_commit,
             "local_path": str(path.resolve()),
-            **_file_fingerprint(path),
+            **fingerprint,
         }
     return {
         **base,

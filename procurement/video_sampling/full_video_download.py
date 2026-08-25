@@ -24,6 +24,7 @@ if __package__ in {None, ""}:  # pragma: no cover - supports direct script execu
 
 from procurement.console import configure_utf8_stdio
 from procurement.external_tools import build_yt_dlp_command, credential_free_media_environment, resolve_media_binary
+from procurement.video_sampling.run_docx_extractions import normalise_youtube_url
 
 try:
     from procurement.video_sampling.naming import make_video_output_folder_name
@@ -32,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports direct script executi
 
 
 DEFAULT_MAX_HEIGHT = 720
+DEFAULT_MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024 * 1024
 DEFAULT_FORMAT_SELECTOR_TEMPLATE = (
     "b[height<={max_height}][ext=mp4]/"
     "bv*[height<={max_height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
@@ -76,6 +78,9 @@ def command_to_text(command: list[str]) -> str:
 
 def read_video_info(url: str, timeout_seconds: int) -> dict[str, object]:
     """Read YouTube metadata without downloading the video."""
+    canonical_url = normalise_youtube_url(url)
+    if canonical_url is None:
+        raise ValueError("A valid YouTube URL with an exact 11-character video ID is required.")
     command = build_yt_dlp_command(
         [
         "--dump-json",
@@ -86,7 +91,7 @@ def read_video_info(url: str, timeout_seconds: int) -> dict[str, object]:
         ffmpeg_binary=resolve_media_binary("ffmpeg"),
     )
     command.extend(yt_dlp_auth_args())
-    command.append(url)
+    command.append(canonical_url)
     result = subprocess.run(
         command,
         check=True,
@@ -113,11 +118,16 @@ def looks_like_creative_commons(license_text: object) -> bool:
 
 def build_download_command(url: str, output_folder: Path, format_selector: str) -> list[str]:
     """Build the full-video yt-dlp command."""
+    canonical_url = normalise_youtube_url(url)
+    if canonical_url is None:
+        raise ValueError("A valid YouTube URL with an exact 11-character video ID is required.")
     output_template = output_folder / "%(title).120s_[%(id)s].%(ext)s"
     command = build_yt_dlp_command(
         [
         "--no-playlist",
         "--newline",
+        "--max-filesize",
+        str(DEFAULT_MAX_DOWNLOAD_BYTES),
         "--format",
         format_selector,
         "--merge-output-format",
@@ -131,7 +141,7 @@ def build_download_command(url: str, output_folder: Path, format_selector: str) 
         ),
     )
     command.extend(yt_dlp_auth_args())
-    command.append(url)
+    command.append(canonical_url)
     return command
 
 
@@ -224,6 +234,13 @@ def main() -> None:
         timeout=args.command_timeout,
         env=credential_free_media_environment(),
     )
+    completed_files = [path for path in output_folder.iterdir() if path.is_file() and path != log_path]
+    if not completed_files:
+        raise FileNotFoundError("yt-dlp did not create a completed full-video file.")
+    if any(path.stat().st_size > DEFAULT_MAX_DOWNLOAD_BYTES for path in completed_files):
+        raise ValueError(
+            f"Downloaded video exceeds the {DEFAULT_MAX_DOWNLOAD_BYTES} byte limit."
+        )
     log_lines.append("Download complete.")
     write_log(log_path, log_lines)
     print(f"Full video downloaded to: {output_folder}")

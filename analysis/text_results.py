@@ -9,6 +9,11 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from processing.io_utils import (
+    assert_confined_input_file,
+    assert_input_file_budget,
+    assert_no_output_path_aliases,
+)
 from typing import Literal, Mapping
 
 from analysis.combined_summary import (
@@ -77,11 +82,13 @@ def _compatible_header(header: tuple[str, ...] | list[str]) -> bool:
 
 
 def _find_summary(root: Path) -> Path:
-    candidates = [
-        path.resolve()
-        for path in root.rglob("speaker_level_summary.csv")
-        if _compatible_header(_candidate_header(path))
-    ]
+    root = assert_no_output_path_aliases(root, description="Text results input").resolve(strict=True)
+    candidates = []
+    for path in root.rglob("speaker_level_summary.csv"):
+        safe = assert_confined_input_file(path, root, description="Text results input")
+        if _compatible_header(_candidate_header(safe)):
+            candidates.append(safe)
+    assert_input_file_budget(candidates, description="Text results input")
     if not candidates:
         raise TextResultsError(
             "No compatible multimodal/speaker_level_summary.csv was found in the text results folder"
@@ -185,14 +192,17 @@ def discover_text_results(root: str | Path) -> TextResultsDiscovery:
 
 
 def _find_native_summary(root: Path) -> Path | None:
+    root = assert_no_output_path_aliases(root, description="Text results input").resolve(strict=True)
     candidates = []
     for path in root.rglob("video_level_summary.csv"):
+        path = assert_confined_input_file(path, root, description="Text results input")
         header = set(_candidate_header(path))
         if set(_NATIVE_IDENTITY_COLUMNS).issubset(header) and all(
             any(alias in header for alias in aliases)
             for aliases in _SENTIMENT_ALIASES.values()
         ) and set(TEXT_CONSTRUCTS[3:]).issubset(header):
-            candidates.append(path.resolve())
+            candidates.append(path)
+    assert_input_file_budget(candidates, description="Text results input")
     if len(candidates) > 1:
         raise TextResultsError(
             "Multiple compatible native Text video summaries were found: "

@@ -186,6 +186,21 @@ def test_batch_discovery_ignores_interrupted_hidden_staging_directories(tmp_path
     assert [job.input_dir for job in jobs] == [video.resolve()]
 
 
+def test_legacy_batch_discovery_rejects_linked_video_directory_outside_root(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    speaker = input_root / "Country" / "Speaker"
+    speaker.mkdir(parents=True)
+    outside = make_video(tmp_path / "outside")
+    alias = speaker / outside.name
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symbolic link|reparse|outside"):
+        runner.discover_jobs(input_root, tmp_path / "output")
+
+
 def test_single_video_output_error_points_to_output_root(tmp_path: Path) -> None:
     video = make_video(tmp_path / "input")
     with pytest.raises(ValueError, match="use --output-root"):
@@ -374,6 +389,45 @@ def test_completed_job_is_safely_skipped_on_next_run(tmp_path: Path, monkeypatch
         / "example.csv.manifest.json"
     )
     assert str(tmp_path) not in manifest_text
+
+
+def test_java_processes_an_immutable_segment_snapshot(tmp_path: Path, monkeypatch) -> None:
+    rocksteady_home = tmp_path / "RockSteady"
+    rocksteady_home.mkdir()
+    application_jar = rocksteady_home / runner.APPLICATION_JAR_NAME
+    with zipfile.ZipFile(application_jar, "w") as archive:
+        archive.writestr(runner.DEFAULT_DICTIONARY, b"dictionary")
+    video = make_video(tmp_path / "input", count=1)
+    original_segment = next(video.glob("*.txt"))
+    job = runner.VideoJob(video, tmp_path / "output" / "result.csv", "Country/Speaker/Video")
+    observed_input = None
+
+    monkeypatch.setattr(runner, "build_adapter", lambda _jar: tmp_path / "classes")
+    monkeypatch.setattr(runner, "require_executable", lambda name: name)
+    monkeypatch.setattr(runner, "validate_runtime_configuration", lambda *_args: ["Positiv"])
+
+    def fake_run(command, _home, _timeout):
+        nonlocal observed_input
+        observed_input = Path(command[command.index("--input") + 1])
+        original_segment.write_text("mutated after snapshot", encoding="utf-8")
+        write_valid_csv(Path(command[command.index("--output") + 1]), observed_input)
+        return "ROCKSTEADY_ADAPTER_OK rows=1 columns=6"
+
+    monkeypatch.setattr(runner, "run_java", fake_run)
+    records, failures = runner.process_jobs(
+        [job],
+        rocksteady_home=rocksteady_home,
+        settings=runner.Settings(),
+        force=True,
+        dry_run=False,
+        batch_manifest_path=None,
+    )
+
+    assert failures == 0
+    assert records[0]["status"] == "completed"
+    assert observed_input is not None
+    assert observed_input != video
+    assert not observed_input.exists()
 
 
 def test_snapshot_removes_stale_csvs_and_cache_restores_later_full_run(

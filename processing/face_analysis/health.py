@@ -11,10 +11,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from .backend import PyFeatBackend
+from .backend import PyFeatBackend, pyfeat_resource_cache_dir
 from .config import FaceProcessingConfig
 from .model_provenance import (
     model_weights_ready,
+    prepare_approved_detector_v2_weights,
     unavailable_model_components,
 )
 from processing.ffmpeg_runtime import (
@@ -90,6 +91,16 @@ def prepare_detector_models(requested_device: str = "auto") -> ModelPreparation:
             raise RuntimeError(
                 "complete FFmpeg 8 full-shared DLLs were not found; run "
                 "scripts/setup.ps1 before preparing Face models"
+            )
+        cache_dir = pyfeat_resource_cache_dir()
+        if cache_dir is None:
+            raise RuntimeError("Py-Feat is not installed; run scripts/setup.ps1 first")
+        weights = prepare_approved_detector_v2_weights(cache_dir)
+        if not model_weights_ready(weights):
+            unavailable = ", ".join(unavailable_model_components(weights))
+            raise DetectorReadinessError(
+                f"Approved Detectorv2 checkpoints are incomplete: {unavailable}",
+                weights,
             )
         engine = PyFeatBackend()
         config = FaceProcessingConfig(device=requested_device)

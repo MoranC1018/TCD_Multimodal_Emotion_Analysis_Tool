@@ -254,7 +254,7 @@ input folder is treated as one source (one speaker).
 
 RockSteady must be run in **Percentage** output mode. Emotion columns (Anger,
 Disgust, Fear, Joy, Sadness, Surprise) are histogrammed as core emotions
-(0–100). Sentiment columns (Positive, Negative) appear under "Other 0-100
+(0-100). Sentiment columns (Positive, Negative) appear under "Other 0-100
 findings".
 
 Useful options:

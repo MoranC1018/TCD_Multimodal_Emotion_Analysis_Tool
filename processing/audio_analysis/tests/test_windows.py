@@ -1,9 +1,16 @@
+import math
 import unittest
 
 from audio_pipeline.windows import make_windows
 
 
 class WindowingTests(unittest.TestCase):
+    def test_window_generation_rejects_nonfinite_or_excessive_workloads(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            make_windows(math.inf, 10.0, 5.0)
+        with self.assertRaisesRegex(ValueError, "window limit"):
+            make_windows(10_001.0, 1.0, 1.0, max_windows=10_000)
+
     def test_overlapping_windows_cover_short_tail(self):
         windows = make_windows(duration_seconds=23.0, window_seconds=10.0, stride_seconds=5.0)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from procurement.external_tools import credential_free_media_environment
+from processing.io_utils import assert_confined_input_file, assert_safe_output_path
 
 from .audio_analysis_csv import (
     build_audio_analysis_metadata,
@@ -37,6 +39,8 @@ from .windows import make_windows
 
 
 ProgressCallback = Callable[[str], None]
+MAX_AUDIO_INPUT_BYTES = 20 * 1024 * 1024 * 1024
+MAX_AUDIO_DURATION_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -68,11 +72,25 @@ def run_single_video(
 ) -> SingleVideoResult:
     """Run reproducible per-window audio feature/model extraction for one MP4."""
 
-    input_video = input_video.expanduser().resolve()
-    if not input_video.exists():
-        raise FileNotFoundError(f"Input video does not exist: {input_video}")
-
-    output_dir = output_dir.expanduser().resolve()
+    input_video = assert_confined_input_file(
+        input_video, Path(input_video).expanduser().parent, description="Audio input"
+    )
+    input_size_bytes = input_video.stat().st_size
+    if input_size_bytes > MAX_AUDIO_INPUT_BYTES:
+        raise ValueError(
+            f"Audio input exceeds the {MAX_AUDIO_INPUT_BYTES} byte limit: {input_video}"
+        )
+    input_sha256 = _file_sha256(input_video)
+    source_duration_seconds = probe_duration_seconds(input_video)
+    if source_duration_seconds > MAX_AUDIO_DURATION_SECONDS:
+        raise ValueError(
+            f"Audio input exceeds the {MAX_AUDIO_DURATION_SECONDS} second duration limit."
+        )
+    output_dir = assert_safe_output_path(
+        output_dir,
+        protected_sources=(input_video,),
+        description="Audio output",
+    )
     emit_progress(progress, f"Input video: {input_video}")
     emit_progress(progress, f"Output folder: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -99,9 +117,18 @@ def run_single_video(
         for error in getattr(emotion_models, "errors", []):
             emit_progress(progress, f"Model warning: {error}")
 
-    with audio_workspace(output_dir, keep_temp_audio) as temp_path:
+    with audio_workspace(output_dir, keep_temp_audio) as temp_path, owned_audio_source_snapshot(
+        input_video,
+        expected_sha256=input_sha256,
+        expected_size_bytes=input_size_bytes,
+    ) as analysis_input:
+        snapshot_duration_seconds = probe_duration_seconds(analysis_input)
+        if snapshot_duration_seconds > MAX_AUDIO_DURATION_SECONDS:
+            raise ValueError(
+                f"Audio input exceeds the {MAX_AUDIO_DURATION_SECONDS} second duration limit."
+            )
         emit_progress(progress, "Extracting mono audio with ffmpeg.")
-        audio_wav = extract_mono_wav(input_video, temp_path / "audio_16khz_mono.wav")
+        audio_wav = extract_mono_wav(analysis_input, temp_path / "audio_16khz_mono.wav")
         emit_progress(progress, "Reading audio duration.")
         duration_seconds = probe_duration_seconds(audio_wav)
         windows = make_windows(duration_seconds, window_seconds, stride_seconds)
@@ -161,6 +188,16 @@ def run_single_video(
         stride_seconds=stride_seconds,
         source_context=provenance,
     )
+    metadata["InputSHA256"] = input_sha256
+    metadata["InputSizeBytes"] = str(input_size_bytes)
+    if (
+        input_video.stat().st_size != input_size_bytes
+        or _file_sha256(input_video) != input_sha256
+    ):
+        clean_single_video_outputs(output_dir)
+        raise ValueError(
+            "Input video changed during audio analysis; no result manifest was published."
+        )
     write_audio_analysis_csv(audio_analysis_csv, rows, metadata=metadata)
     emit_progress(progress, "Writing manifest.")
     write_single_manifest(
@@ -176,6 +213,8 @@ def run_single_video(
         opensmile_feature_set=opensmile_feature_set,
         keep_temp_audio=keep_temp_audio,
         source_context=provenance,
+        input_sha256=input_sha256,
+        input_size_bytes=input_size_bytes,
     )
     emit_progress(progress, "Finished video.")
 
@@ -307,6 +346,45 @@ def audio_workspace(output_dir: Path, keep_temp_audio: bool) -> Iterator[Path]:
             yield Path(temp_dir)
 
 
+@contextmanager
+def owned_audio_source_snapshot(
+    source: Path,
+    *,
+    expected_sha256: str,
+    expected_size_bytes: int,
+) -> Iterator[Path]:
+    """Yield an owned copy that exactly matches the already-approved source bytes."""
+
+    with tempfile.TemporaryDirectory(prefix="tcd-audio-source-") as temp_dir:
+        snapshot = Path(temp_dir) / source.name
+        before = source.stat()
+        with source.open("rb") as source_handle, snapshot.open("xb") as snapshot_handle:
+            shutil.copyfileobj(source_handle, snapshot_handle, length=1024 * 1024)
+        after = source.stat()
+        stable_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) == (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        )
+        if (
+            not stable_identity
+            or snapshot.stat().st_size != expected_size_bytes
+            or _file_sha256(snapshot) != expected_sha256
+            or source.stat().st_size != expected_size_bytes
+            or _file_sha256(source) != expected_sha256
+        ):
+            raise ValueError(
+                "Input video changed while its immutable audio snapshot was created."
+            )
+        yield snapshot
+
+
 def write_single_manifest(
     path: Path,
     *,
@@ -321,6 +399,8 @@ def write_single_manifest(
     opensmile_feature_set: str,
     keep_temp_audio: bool,
     source_context: dict[str, object] | None = None,
+    input_sha256: str | None = None,
+    input_size_bytes: int | None = None,
 ) -> Path:
     """Write per-video provenance in a compact machine-readable form."""
 
@@ -332,6 +412,10 @@ def write_single_manifest(
         "pipeline": "Multimodal Emotion Analysis Tool audio research data extraction",
         "stage_role": "per-window machine-output extraction only; no final interpretation or statistics",
         "input_video": str(input_video),
+        "input_sha256": input_sha256 or _file_sha256(input_video),
+        "input_size_bytes": (
+            int(input_size_bytes) if input_size_bytes is not None else input_video.stat().st_size
+        ),
         "source_id": str(provenance.get("source_id") or ""),
         "source_speaker": str(provenance.get("speaker") or ""),
         "source_metadata": user_metadata,
@@ -368,6 +452,14 @@ def write_single_manifest(
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def tool_path(resolver) -> str:
