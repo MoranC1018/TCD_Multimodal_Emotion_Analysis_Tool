@@ -54,7 +54,12 @@ param(
     # Useful on managed machines where software installation is performed by
     # IT. The corresponding runtime checks are never silently skipped.
     [switch]$SkipPythonInstall,
-    [switch]$SkipJdkInstall
+    [switch]$SkipJdkInstall,
+
+    # Internal verification hook: load function definitions without performing
+    # installations. Hidden from normal help and used by verify_setup.ps1.
+    [Parameter(DontShow = $true)]
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,7 +89,9 @@ function Invoke-NativeCommand {
         [Parameter(Mandatory = $true)]
         [string[]]$Arguments,
         [Parameter(Mandatory = $true)]
-        [string]$FailureMessage
+        [string]$FailureMessage,
+        [switch]$AllowNonZeroExit,
+        [switch]$PassThru
     )
 
     try {
@@ -96,8 +103,11 @@ function Invoke-NativeCommand {
     catch {
         throw "$FailureMessage $($_.Exception.Message)"
     }
-    if ($exitCode -ne 0) {
+    if ($exitCode -ne 0 -and -not $AllowNonZeroExit) {
         throw "$FailureMessage (exit code $exitCode)."
+    }
+    if ($PassThru) {
+        return [int]$exitCode
     }
 }
 
@@ -199,7 +209,11 @@ function Invoke-WinGetInstall {
     param(
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
-        [string]$Version = ""
+        [string]$Version = "",
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$VerifyInstalled,
+        [Parameter(Mandatory = $true)]
+        [string]$RequirementDescription
     )
 
     $arguments = @(
@@ -218,8 +232,69 @@ function Invoke-WinGetInstall {
         # check failed, so --force cannot make repeat runs reinstall it.
         $arguments += @("--version", $Version, "--force")
     }
-    Invoke-NativeCommand -Executable (Get-WinGetPath) -Arguments $arguments `
-        -FailureMessage "WinGet could not install $PackageId."
+    $installError = $null
+    $exitCode = $null
+    try {
+        $exitCode = Invoke-NativeCommand -Executable (Get-WinGetPath) -Arguments $arguments `
+            -FailureMessage "WinGet could not install $PackageId." `
+            -AllowNonZeroExit -PassThru
+    }
+    catch {
+        $installError = $_
+    }
+
+    # WinGet uses non-zero statuses for outcomes such as "already installed and
+    # no upgrade is available".  The external command is not the source of
+    # truth: refresh discovery and verify the required postcondition after every
+    # attempt, including launch errors and non-zero exits.
+    Refresh-ProcessPath
+    $verificationError = $null
+    $verified = $false
+    try {
+        $verificationResult = & $VerifyInstalled
+        $verified = [bool]($verificationResult | Select-Object -Last 1)
+    }
+    catch {
+        $verificationError = $_
+    }
+    if ($verified) {
+        if ($null -ne $installError) {
+            Write-Warning (
+                "WinGet reported an error for $PackageId, but $RequirementDescription " +
+                "was verified after the attempt. Continuing."
+            )
+        }
+        elseif ($exitCode -ne 0) {
+            Write-Warning (
+                "WinGet exited with code $exitCode for $PackageId, but " +
+                "$RequirementDescription was verified. Continuing."
+            )
+        }
+        return
+    }
+
+    if ($null -ne $verificationError) {
+        throw (
+            "Could not verify $RequirementDescription after the WinGet attempt for " +
+            "$PackageId. $($verificationError.Exception.Message)"
+        )
+    }
+    if ($null -ne $installError) {
+        throw (
+            "WinGet could not install $PackageId, and $RequirementDescription remains " +
+            "unavailable. $($installError.Exception.Message)"
+        )
+    }
+    if ($exitCode -ne 0) {
+        throw (
+            "WinGet exited with code $exitCode for $PackageId, and " +
+            "$RequirementDescription remains unavailable."
+        )
+    }
+    throw (
+        "WinGet reported success for $PackageId, but $RequirementDescription could " +
+        "not be verified."
+    )
 }
 
 function Refresh-ProcessPath {
@@ -230,7 +305,10 @@ function Refresh-ProcessPath {
     $seen = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
-    foreach ($scope in @("Machine", "User", "Process")) {
+    # Preserve caller-specific prefixes such as an activated virtual
+    # environment. Newly installed persistent entries are appended without
+    # allowing Machine/User PATH values to displace current-process choices.
+    foreach ($scope in @("Process", "User", "Machine")) {
         $value = [Environment]::GetEnvironmentVariable("Path", $scope)
         foreach ($entry in @($value -split [IO.Path]::PathSeparator)) {
             $trimmed = $entry.Trim()
@@ -257,17 +335,25 @@ function Get-CompatiblePythonDetails {
     if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
         return $null
     }
-    $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @(
-        "-c",
+    # Build one Python program before constructing the argument array. Inside a
+    # PowerShell @(...), newline-separated `+` expressions become separate
+    # array items; Python would then execute only the first fragment after -c.
+    $probeCode = (
         "import sys; ok = sys.version_info[:2] >= (3, 11); " +
         "print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}') if ok else None; " +
         "raise SystemExit(0 if ok else 1)"
     )
+    $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @("-I", "-c", $probeCode)
     if ($probe.ExitCode -ne 0 -or $probe.Output.Count -eq 0) {
         return $null
     }
+    $versionLines = @($probe.Output | Where-Object { $_ -match '^\d+\.\d+\.\d+$' })
+    if ($versionLines.Count -eq 0) {
+        return $null
+    }
     try {
-        $version = [version]([string]($probe.Output | Select-Object -Last 1)).Trim()
+        $versionText = ([string]($versionLines | Select-Object -Last 1)).Trim()
+        $version = [version]$versionText
     }
     catch {
         return $null
@@ -386,8 +472,9 @@ function Confirm-CompatiblePython {
         "Python 3.11 or newer was not found; installing the recommended " +
         "$pythonPackageId fallback with WinGet."
     )
-    Invoke-WinGetInstall -PackageId $pythonPackageId
-    Refresh-ProcessPath
+    Invoke-WinGetInstall -PackageId $pythonPackageId `
+        -RequirementDescription "a working Python 3.11-or-newer interpreter" `
+        -VerifyInstalled { $null -ne (Find-CompatiblePython) }
     $resolved = Find-CompatiblePython
     if ($null -eq $resolved) {
         throw "WinGet completed, but a compatible Python could not be resolved in the current process."
@@ -407,12 +494,27 @@ function Move-IncompatibleEnvironmentAside {
         return
     }
     $suffix = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backup = "$environmentPath.incompatible-$suffix"
+    $backup = "$environmentPath-incompatible-$suffix"
     if (Test-Path -LiteralPath $backup) {
         $backup = "$backup-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
     }
     Move-Item -LiteralPath $environmentPath -Destination $backup
     Write-Warning "Moved the incompatible project environment to $backup"
+    if ($env:VIRTUAL_ENV) {
+        try {
+            $activeEnvironment = [IO.Path]::GetFullPath([string]$env:VIRTUAL_ENV)
+            $projectEnvironment = [IO.Path]::GetFullPath($environmentPath)
+            if ($activeEnvironment.Equals($projectEnvironment, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Warning (
+                    "The moved environment is still marked active in the calling shell. " +
+                    "After setup finishes, open a new terminal or activate the new .venv."
+                )
+            }
+        }
+        catch {
+            # A malformed inherited VIRTUAL_ENV value must not block recovery.
+        }
+    }
 }
 
 function Get-ExactSharedFfmpegDirectory {
@@ -487,8 +589,9 @@ function Confirm-ExactSharedFfmpeg {
             )
         }
         Write-Host "Installing exact FFmpeg $ffmpegVersion full-shared runtime."
-        Invoke-WinGetInstall -PackageId $ffmpegPackageId -Version $ffmpegVersion
-        Refresh-ProcessPath
+        Invoke-WinGetInstall -PackageId $ffmpegPackageId -Version $ffmpegVersion `
+            -RequirementDescription "the exact FFmpeg $ffmpegVersion full-shared runtime" `
+            -VerifyInstalled { $null -ne (Get-ExactSharedFfmpegDirectory) }
         $directory = Get-ExactSharedFfmpegDirectory
         if ($null -eq $directory) {
             throw (
@@ -563,8 +666,9 @@ function Confirm-Jdk {
             throw "A complete JDK (java.exe plus javac.exe) was not found and installation was explicitly skipped."
         }
         Write-Host "A complete JDK was not found; installing $jdkPackageId with WinGet."
-        Invoke-WinGetInstall -PackageId $jdkPackageId
-        Refresh-ProcessPath
+        Invoke-WinGetInstall -PackageId $jdkPackageId `
+            -RequirementDescription "a working JDK with java.exe and javac.exe" `
+            -VerifyInstalled { $null -ne (Find-JdkBin) }
         $directory = Find-JdkBin
         if ($null -eq $directory) {
             throw "WinGet completed, but a matching java.exe and javac.exe could not be resolved."
@@ -581,6 +685,12 @@ function Confirm-Jdk {
 }
 
 function Test-TorchFamily {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("cpu", "cu128")]
+        [string]$Runtime
+    )
+
     $validation = @'
 import importlib.metadata as metadata
 import sys
@@ -605,9 +715,16 @@ if runtime == 'cu128' and (cuda is None or not str(cuda).startswith('12.8')):
     raise SystemExit(f'Expected a CUDA 12.8 PyTorch build, but torch reports {cuda!r}')
 if runtime == 'cu128' and not torch.cuda.is_available():
     raise SystemExit('CUDA 12.8 PyTorch is installed, but no usable CUDA device is available')
+if runtime == 'cu128':
+    # Availability alone only proves that the driver initialized. Exercise a
+    # real kernel and synchronization so setup fails before long model runs do.
+    value = (torch.ones(8, device='cuda') * 2).sum().item()
+    torch.cuda.synchronize()
+    if value != 16:
+        raise SystemExit(f'CUDA computation smoke test returned {value!r}, expected 16')
 print(f'Matched PyTorch family: {actual}; runtime={runtime}; torch CUDA={cuda!r}')
 '@
-    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-c", $validation, $TorchRuntime) `
+    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-c", $validation, $Runtime) `
         -FailureMessage "The installed PyTorch family is not the requested matched runtime."
 }
 
@@ -630,21 +747,39 @@ else:
     return [string]($result.Output | Select-Object -Last 1)
 }
 
+if ($FunctionsOnly) {
+    return
+}
+
 # Module checks below must resolve this repository even when the caller invokes
 # the script from another working directory.
 Push-Location -LiteralPath $projectRoot
 try {
+    if ($env:OS -ne "Windows_NT") {
+        throw "This setup script supports Windows 10 and Windows 11 only."
+    }
     Refresh-ProcessPath
-    $TorchRuntime = Resolve-TorchRuntime -RequestedRuntime $TorchRuntime
+    $selectedTorchRuntime = Resolve-TorchRuntime -RequestedRuntime $TorchRuntime
 
     if (-not (Test-VirtualEnvironment)) {
-        Move-IncompatibleEnvironmentAside
+        # Resolve or install a usable base interpreter before touching the
+        # existing project environment. A second probe protects against a
+        # transient first failure and avoids moving a now-healthy .venv.
         $basePython = Confirm-CompatiblePython
-        Write-Host "Creating the compatible Python project environment at $environmentPath"
-        Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
-            -FailureMessage "Could not create the compatible Python project environment."
-        if (-not (Test-VirtualEnvironment)) {
-            throw "The new .venv did not contain a working Python 3.11-or-newer interpreter."
+        if (Test-VirtualEnvironment) {
+            Write-Warning (
+                "The project environment passed a repeat compatibility check; " +
+                "reusing it without moving any files."
+            )
+        }
+        else {
+            Move-IncompatibleEnvironmentAside
+            Write-Host "Creating the compatible Python project environment at $environmentPath"
+            Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
+                -FailureMessage "Could not create the compatible Python project environment."
+            if (-not (Test-VirtualEnvironment)) {
+                throw "The new .venv did not contain a working Python 3.11-or-newer interpreter."
+            }
         }
     }
     else {
@@ -655,17 +790,17 @@ try {
         -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools<82", "wheel") `
         -FailureMessage "Could not update the Python packaging tools."
 
-    $torchIndex = "https://download.pytorch.org/whl/$TorchRuntime"
-    Write-Host "Installing the matched PyTorch 2.11 family ($TorchRuntime)."
+    $torchIndex = "https://download.pytorch.org/whl/$selectedTorchRuntime"
+    Write-Host "Installing the matched PyTorch 2.11 family ($selectedTorchRuntime)."
     $torchInstallArguments = @(
         "-m", "pip", "install",
         "torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0",
         "--index-url", $torchIndex
     )
     $installedTorchRuntime = Get-InstalledTorchRuntime
-    if ($installedTorchRuntime -ne "missing" -and $installedTorchRuntime -ne $TorchRuntime) {
+    if ($installedTorchRuntime -ne "missing" -and $installedTorchRuntime -ne $selectedTorchRuntime) {
         Write-Host (
-            "Replacing the installed PyTorch runtime ($installedTorchRuntime) with $TorchRuntime."
+            "Replacing the installed PyTorch runtime ($installedTorchRuntime) with $selectedTorchRuntime."
         )
         # PEP 440 treats 2.11.0+cpu as satisfying torch==2.11.0. Force the
         # exact-index wheels only when changing runtime families; requirements
@@ -688,7 +823,7 @@ try {
         -Arguments @("-m", "pip", "install", "-r", $requirementsPath) `
         -FailureMessage "Could not install project requirements."
 
-    Test-TorchFamily
+    Test-TorchFamily -Runtime $selectedTorchRuntime
     $ffmpegDirectory = Confirm-ExactSharedFfmpeg
 
     Invoke-NativeCommand -Executable $pythonPath -Arguments @("-m", "pip", "check") `

@@ -75,11 +75,14 @@ caches, logs, and reports are intentionally excluded from git.
 
 The supported desktop path is Windows 10 or Windows 11.
 
-Install:
+Required components:
 
-- Python 3.11 or newer.
+- Python 3.11 or newer. The automatic setup can install the recommended Python
+  3.12 fallback when no compatible interpreter is present.
 - [FFmpeg](https://ffmpeg.org/download.html), including `ffmpeg` and
-  `ffprobe`, on `PATH`.
+  `ffprobe`. The automatic setup installs and selects the exact supported
+  full-shared runtime; manual installations must make both commands available
+  on `PATH`.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed by
   `requirements.txt` or available on `PATH`.
 - Microsoft Edge WebView2 Runtime. It is already present on normal current
@@ -103,7 +106,22 @@ yt-dlp --version
 
 ### 2. Create The Python Environment
 
-From the repository root:
+The supported automatic Windows setup creates or reuses `.venv`, installs the
+matched CPU/CUDA PyTorch family and project requirements, verifies the exact
+shared FFmpeg runtime, prepares Face model weights, and checks readiness. From
+the repository root, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1
+```
+
+The setup may use WinGet for a missing Python 3.12 fallback, the exact supported
+FFmpeg runtime, or a JDK when Text is enabled. After every WinGet attempt it
+verifies the actual required files and commands; an already-installed package
+is accepted when that post-install verification succeeds.
+
+If Python, PyTorch, FFmpeg, and model preparation are managed separately, the
+manual Python-only path is:
 
 ```powershell
 python -m venv .venv
@@ -111,6 +129,9 @@ python -m venv .venv
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+The manual path does not select a CPU/CUDA wheel family, install the required
+shared FFmpeg DLLs, prepare Face weights, or perform the setup readiness checks.
 
 For automated tests:
 
@@ -566,6 +587,7 @@ python -m analysis.workflow --help
 Run the test suite:
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_setup.ps1
 python -m pytest -q
 node --check application\static\app.js
 ```
