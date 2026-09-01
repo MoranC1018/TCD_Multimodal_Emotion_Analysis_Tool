@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from procurement.procurement_beta.readiness import build_readiness_report
 from procurement.external_tools import credential_free_media_environment, resolve_nvidia_smi
+from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from analysis.profile import profile_from_payload
 from application import backend
 
@@ -2871,11 +2872,26 @@ def create_server(host: str, preferred_port: int) -> LauncherHttpServer:
     raise RuntimeError(f"Could not bind a local launcher UI port: {last_error}")
 
 
+def initialize_launcher_ffmpeg_runtime() -> Path | None:
+    """Expose the supported FFmpeg runtime to the UI and every child process."""
+
+    directory = configure_ffmpeg_shared_libraries()
+    if directory is None:
+        APP_STATE.log(
+            "WARNING: Supported FFmpeg/ffprobe runtime was not found; "
+            "run scripts/setup.ps1 before scanning or processing media."
+        )
+        return None
+    APP_STATE.log(f"FFmpeg runtime: {directory}")
+    return directory
+
+
 def run_launcher(args: argparse.Namespace) -> int:
     """Run one already-locked desktop launcher instance."""
 
     APP_STATE.reset_shutdown()
     APP_STATE.reset_client_seen()
+    initialize_launcher_ffmpeg_runtime()
     if not ensure_eula_accepted(REPO_ROOT):
         return 1
 
