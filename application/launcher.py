@@ -113,6 +113,7 @@ CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
         "TORCH_HOME",
         "TRANSFORMERS_CACHE",
         "TRANSFORMERS_OFFLINE",
+        "USERNAME",
         "USERPROFILE",
         "VOX_PROFILE_RELEASE_DIR",
         "WINDIR",

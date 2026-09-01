@@ -996,6 +996,7 @@ const state = {
     analysis: null,
   },
   handledRunIds: new Set(),
+  faceReadinessPending: false,
   pendingAudioOutput: "",
   pendingFaceOutput: "",
   pendingTextOutput: "",
@@ -3549,6 +3550,7 @@ async function runFaceProcessing() {
   }
   const response = await api("/api/run-face", { method: "POST", body: faceRequestBody() });
   state.activeRunIds.face = Number(response.runId || 0) || null;
+  updateFaceReadinessControls();
   state.pendingFaceOutput = faceOutputRootInput.value.trim();
   faceProgressBar.style.width = "0%";
   faceProgressLabel.textContent = "Starting...";
@@ -3572,18 +3574,41 @@ async function runTextProcessing() {
 }
 
 async function checkFaceReadiness(prepareModels = false) {
+  if (state.faceReadinessPending || state.activeRunIds.face) {
+    faceReadinessStatus.textContent = "Another Face operation is already running. Wait for it to finish.";
+    return;
+  }
   const endpoint = prepareModels ? "/api/prepare-face-models" : "/api/face-readiness";
-  const response = await api(endpoint, {
-    method: "POST",
-    body: { device: faceDeviceSelect.value },
-    timeoutMs: LONG_API_TIMEOUT_MS,
-  });
-  state.activeRunIds.face = Number(response.runId || 0) || null;
+  state.faceReadinessPending = true;
+  updateFaceReadinessControls();
   faceReadinessStatus.textContent = prepareModels
-    ? "Preparing and verifying Py-Feat models..."
-    : response.ready
-      ? `Ready on ${response.device || faceDeviceSelect.value}: ${response.detail || "all Face dependencies verified"}`
-      : `Not ready: ${response.detail || "one or more Face dependencies are missing"}`;
+    ? "Starting Py-Feat model preparation..."
+    : "Checking Face model readiness...";
+  try {
+    const response = await api(endpoint, {
+      method: "POST",
+      body: { device: faceDeviceSelect.value },
+      timeoutMs: LONG_API_TIMEOUT_MS,
+    });
+    state.activeRunIds.face = Number(response.runId || 0) || null;
+    faceReadinessStatus.textContent = prepareModels
+      ? "Preparing and verifying Py-Feat models..."
+      : response.ready
+        ? `Ready on ${response.device || faceDeviceSelect.value}: ${response.detail || "all Face dependencies verified"}`
+        : `Not ready: ${response.detail || "one or more Face dependencies are missing"}`;
+  } catch (error) {
+    faceReadinessStatus.textContent = `Face readiness failed: ${error.message}`;
+    throw error;
+  } finally {
+    state.faceReadinessPending = false;
+    updateFaceReadinessControls();
+  }
+}
+
+function updateFaceReadinessControls() {
+  const locked = state.faceReadinessPending || Boolean(state.activeRunIds.face);
+  checkFaceReadinessButton.disabled = locked;
+  prepareFaceModelsButton.disabled = locked;
 }
 
 async function checkTextReadiness() {
@@ -3974,6 +3999,7 @@ async function pollState() {
             : "Face readiness check complete; see the run log for the structured result.";
         }
         state.activeRunIds.face = null;
+        updateFaceReadinessControls();
       }
       if (runKind === "text") {
         if (progressMode === "text-native") {
@@ -4000,6 +4026,7 @@ async function pollState() {
       if (runKind === "face") {
         state.pendingFaceOutput = "";
         state.activeRunIds.face = null;
+        updateFaceReadinessControls();
       }
       if (runKind === "text") {
         state.pendingTextOutput = "";

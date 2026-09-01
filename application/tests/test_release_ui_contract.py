@@ -509,7 +509,7 @@ class ReleaseUiContractTests(unittest.TestCase):
         for endpoint in ("/api/scan", "/api/face-readiness", "/api/text-readiness"):
             with self.subTest(endpoint=endpoint):
                 endpoint_start = self.javascript.index(endpoint)
-                request_block = self.javascript[endpoint_start:endpoint_start + 300]
+                request_block = self.javascript[endpoint_start:endpoint_start + 600]
                 self.assertIn("timeoutMs: LONG_API_TIMEOUT_MS", request_block)
 
     def test_supported_formats_are_explicit_and_docx_wording_is_consistent(self) -> None:

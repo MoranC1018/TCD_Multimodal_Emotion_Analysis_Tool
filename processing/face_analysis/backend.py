@@ -144,11 +144,18 @@ class PyFeatBackend:
                 import feat
                 from feat import Detectorv2
                 from feat import utils as feat_utils
-            except ImportError as exc:
+            except ModuleNotFoundError as exc:
+                if exc.name == "feat":
+                    raise RuntimeError(
+                        "Py-Feat is not installed. Run `scripts/setup.ps1` from the "
+                        "repository, then use `.venv\\Scripts\\python`."
+                    ) from exc
                 raise RuntimeError(
-                    "Py-Feat is not installed. Run `scripts/setup.ps1` from the "
-                    "repository, then use `.venv\\Scripts\\python`."
+                    "Py-Feat could not be imported because a runtime dependency is "
+                    f"missing ({exc.name or 'unknown'}): {exc}"
                 ) from exc
+            except ImportError as exc:
+                raise RuntimeError(f"Py-Feat could not be imported: {exc}") from exc
 
             module_version = str(getattr(feat, "__version__", "unknown"))
             if (

@@ -178,6 +178,7 @@ class NativeProcessingBackendTests(unittest.TestCase):
         base = {
             "PATH": r"C:\Windows\System32",
             "SYSTEMROOT": r"C:\Windows",
+            "USERNAME": "researcher",
             "MULTIMODAL_EMOTION_ROCKSTEADY_HOME": r"C:\RockSteady",
             "OPENSMILE_HOME": r"C:\OpenSMILE",
             "OPENSMILE_BINARY": r"C:\OpenSMILE\bin\SMILExtract.exe",
@@ -216,6 +217,7 @@ class NativeProcessingBackendTests(unittest.TestCase):
             self.assertNotIn("HUGGINGFACE_TOKEN", environment)
             self.assertEqual(environment["PATH"], base["PATH"])
             self.assertEqual(environment["SYSTEMROOT"], base["SYSTEMROOT"])
+            self.assertEqual(environment["USERNAME"], base["USERNAME"])
         self.assertEqual(
             text_run["MULTIMODAL_EMOTION_ROCKSTEADY_HOME"],
             base["MULTIMODAL_EMOTION_ROCKSTEADY_HOME"],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 import pandas as pd
@@ -136,3 +137,31 @@ def test_ensure_ready_constructs_detector_once(monkeypatch) -> None:
 
     assert created == ["cpu"]
     assert first == second
+
+
+def test_nested_pyfeat_dependency_error_is_not_reported_as_missing_pyfeat(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        backend, "resolve_detector_v2_weights", lambda _cache: complete_weights()
+    )
+    monkeypatch.setattr(backend, "model_weights_ready", lambda _weights: True)
+    original_import = builtins.__import__
+
+    def import_with_missing_runtime_dependency(name, *args, **kwargs):
+        if name == "feat":
+            raise ModuleNotFoundError("No module named 'pwd'", name="pwd")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_runtime_dependency)
+    engine = PyFeatBackend()
+
+    try:
+        engine.ensure_ready(FaceProcessingConfig(device="cpu"))
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("A missing nested Py-Feat dependency must fail readiness")
+
+    assert "runtime dependency is missing (pwd)" in message
+    assert "Py-Feat is not installed" not in message
