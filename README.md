@@ -61,7 +61,7 @@ redistribution. Attribution and contribution guidance are in
 | Clean speaker segments | Face visibility, voice activity, overlap selection, and stitching | Model-backed runs require the dependencies described below |
 | Face processing | Native Py-Feat processing or import | Cached Detectorv2 models and the native Python stack must pass readiness |
 | Audio processing | OpenSMILE and optional audio-emotion models | OpenSMILE 3.0.0 uses the audEERING Research License; review its non-commercial/product boundary |
-| Text processing | Native Whisper/RockSteady processing or import | RockSteady 0.4 and a JDK are separately installed external requirements |
+| Text processing | Native Whisper/RockSteady processing or import | The authorized RockSteady 0.4 JAR is versioned with Git LFS; a JDK remains an external requirement |
 | iMotions analysis | Emotions, action units, movement, geometry, and comparisons | Expects valid iMotions CSV exports |
 | Native Face analysis | Primary-face Py-Feat emotion, valence, and arousal reports | Kept distinct from iMotions/AFFDEX because the providers are not interchangeable |
 | Audio analysis | Emotion-model and OpenSMILE report generation | Expects outputs from this tool's audio processor |
@@ -621,7 +621,7 @@ Before Clean Speaker or native Face, select the corresponding **Check model
 readiness** action. Face preparation is an explicit network-enabled action;
 normal Face runs are offline and receive no credentials. Before Audio, run the
 `doctor` command above. Native Text readiness checks Whisper, FFmpeg, the JDK,
-and the separately installed RockSteady 0.4 JAR/dictionaries before processing.
+and the Git LFS-managed RockSteady 0.4 JAR/dictionaries before processing.
 
 Common causes:
 
@@ -634,7 +634,7 @@ Common causes:
 | Audio emotion columns are blank | Emotion models toggle, audio `doctor`, model downloads, and manifest warnings |
 | OpenSMILE output is missing | `OPENSMILE_HOME`, executable/config path, and audio `doctor` |
 | Native Face is not ready | Run its structured readiness check; install the pinned native stack and explicitly prepare cached Detectorv2 weights |
-| Native Text is not ready | Install the pinned Whisper stack plus a supported JDK and separately licensed RockSteady 0.4 runtime; the repository setup does not download RockSteady |
+| Native Text is not ready | Install the pinned Whisper stack and a supported JDK; ensure Git LFS has materialized the separately licensed RockSteady 0.4 runtime |
 | Focus video does not preview | Try MP4/WebM, but processing may still work through FFmpeg |
 | Long run pauses | Resource monitor has reached CPU, GPU, or RAM limit; inspect the visible launcher/PowerShell log |
 | OneDrive file is unavailable | Hydrate the file locally or move the run to a non-synced NTFS folder |

@@ -851,8 +851,8 @@ try {
     elseif (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
         $textStatus = "NOT READY: licensed RockSteady JAR is missing"
         $message = (
-            "The licensed RockSteady JAR is not redistributed by this repository. " +
-            "Place your licensed copy at exactly:`n  $rockSteadyJar"
+            "The Git LFS-managed RockSteady JAR is missing from this checkout. " +
+            "Run 'git lfs pull' or restore the project-authorized copy at exactly:`n  $rockSteadyJar"
         )
         if ($TextMode -eq "Require") {
             throw "$message`nFace is ready now: $faceCommand"
