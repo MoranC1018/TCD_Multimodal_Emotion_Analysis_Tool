@@ -3,11 +3,12 @@
 Installs and validates the single supported Windows environment.
 
 .DESCRIPTION
-The default setup makes Face processing ready and also validates Text when the
-licensed RockSteady JAR is present. The pinned stack requires Python 3.11 or
-newer. Python 3.12 is tested and recommended, while other compatible versions
-are accepted. The script is safe to rerun: it reuses a compatible environment
-and installs FFmpeg only when the exact supported 8.1.2 full-shared runtime is
+The default setup makes Face processing ready and also validates Text. It
+materializes the exact Git LFS-managed RockSteady JAR when that tracked object
+is missing or still a pointer. The pinned stack requires Python 3.11 or newer.
+Python 3.12 is tested and recommended, while other compatible versions are
+accepted. The script is safe to rerun: it reuses a compatible environment and
+installs FFmpeg only when the exact supported 8.1.2 full-shared runtime is
 absent. If no compatible Python is installed, the automatic fallback installs
 Python 3.12.
 
@@ -71,6 +72,8 @@ $pythonPath = Join-Path $environmentPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $rockSteadyJarName = "rocksteady-desktop-application-0.4#2018-05-16.jar"
 $rockSteadyJar = Join-Path $projectRoot "external\RockSteady\$rockSteadyJarName"
+$rockSteadyJarSizeBytes = [long]67417737
+$rockSteadyJarSha256 = "02ddb9b418952df4b109fa8ca1e6a59000115af2d4b81aca29d555e28a448534"
 $ffmpegVersion = "8.1.2"
 $ffmpegPackageId = "Gyan.FFmpeg.Shared"
 $jdkPackageId = "EclipseAdoptium.Temurin.21.JDK"
@@ -140,6 +143,154 @@ function Invoke-NativeProbe {
     finally {
         $ErrorActionPreference = $previousPreference
     }
+}
+
+function Get-GitPath {
+    $command = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        throw "Git is required to materialize the tracked RockSteady Git LFS object."
+    }
+    return $command.Source
+}
+
+function Get-RockSteadyJarState {
+    if (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "missing"
+            Detail = "RockSteady JAR is missing: $rockSteadyJar"
+        }
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $rockSteadyJar
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "unreadable"
+            Detail = "RockSteady JAR metadata could not be read: $($_.Exception.Message)"
+        }
+    }
+    if ($item.Length -le 1024) {
+        $reader = $null
+        try {
+            $reader = [IO.StreamReader]::new(
+                $item.FullName,
+                [Text.Encoding]::UTF8,
+                $true
+            )
+            $firstLine = $reader.ReadLine()
+        }
+        catch {
+            return [pscustomobject]@{
+                Ready = $false
+                Status = "unreadable"
+                Detail = "RockSteady JAR could not be read: $($_.Exception.Message)"
+            }
+        }
+        finally {
+            if ($null -ne $reader) {
+                $reader.Dispose()
+            }
+        }
+        if ($firstLine -eq "version https://git-lfs.github.com/spec/v1") {
+            return [pscustomobject]@{
+                Ready = $false
+                Status = "lfs-pointer"
+                Detail = "RockSteady is still a Git LFS pointer instead of the JAR bytes."
+            }
+        }
+    }
+
+    if ($item.Length -ne $rockSteadyJarSizeBytes) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "invalid-size"
+            Detail = (
+                "RockSteady JAR size is invalid: expected $rockSteadyJarSizeBytes bytes, " +
+                "found $($item.Length) bytes at $rockSteadyJar"
+            )
+        }
+    }
+
+    try {
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $rockSteadyJar).Hash.ToLowerInvariant()
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "unreadable"
+            Detail = "RockSteady JAR could not be hashed: $($_.Exception.Message)"
+        }
+    }
+    if ($actualSha256 -ne $rockSteadyJarSha256) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "hash-mismatch"
+            Detail = (
+                "RockSteady JAR SHA-256 is invalid: expected $rockSteadyJarSha256, " +
+                "found $actualSha256"
+            )
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready = $true
+        Status = "ready"
+        Detail = "RockSteady JAR passed exact size and SHA-256 validation."
+    }
+}
+
+function Invoke-RockSteadyLfsPull {
+    $gitPath = Get-GitPath
+    $lfsProbe = Invoke-NativeProbe -Executable $gitPath -Arguments @("lfs", "version")
+    if ($lfsProbe.ExitCode -ne 0) {
+        throw "Git LFS is not available. Install Git LFS, run 'git lfs install', and retry setup."
+    }
+
+    $relativeJar = "external/RockSteady/$rockSteadyJarName"
+    Write-Host "Materializing the tracked RockSteady runtime with Git LFS."
+    $pull = Invoke-NativeProbe -Executable $gitPath -Arguments @(
+        "-C", $projectRoot,
+        "lfs", "pull",
+        "--include=$relativeJar",
+        "--exclude="
+    )
+    if ($pull.ExitCode -ne 0) {
+        $output = ($pull.Output -join " ").Trim()
+        if (-not $output) {
+            $output = "no diagnostic output"
+        }
+        throw "Git LFS could not materialize RockSteady (exit code $($pull.ExitCode)): $output"
+    }
+}
+
+function Resolve-RockSteadyJar {
+    $state = Get-RockSteadyJarState
+    if ($state.Ready) {
+        return $state
+    }
+    if ($state.Status -notin @("missing", "lfs-pointer")) {
+        return $state
+    }
+
+    try {
+        Invoke-RockSteadyLfsPull
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "lfs-pull-failed"
+            Detail = $_.Exception.Message
+        }
+    }
+
+    $state = Get-RockSteadyJarState
+    if ($state.Ready) {
+        Write-Host $state.Detail
+    }
+    return $state
 }
 
 function Get-WinGetPath {
@@ -848,26 +999,26 @@ try {
         $textStatus = "SKIPPED by explicit -TextMode Skip"
         Write-Warning "Text setup was explicitly skipped; full multimodal readiness is not claimed."
     }
-    elseif (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
-        $textStatus = "NOT READY: licensed RockSteady JAR is missing"
-        $message = (
-            "The Git LFS-managed RockSteady JAR is missing from this checkout. " +
-            "Run 'git lfs pull' or restore the project-authorized copy at exactly:`n  $rockSteadyJar"
-        )
-        if ($TextMode -eq "Require") {
-            throw "$message`nFace is ready now: $faceCommand"
-        }
-        Write-Warning $message
-        Write-Host "After placing the JAR, rerun this setup script; it will install/check the JDK and validate Text."
-    }
     else {
-        Confirm-Jdk
-        Write-Host "Running the Text/RockSteady compile, dictionary and category readiness check."
-        Invoke-NativeCommand -Executable $pythonPath `
-            -Arguments @("-m", "processing.text_analysis", "--check") `
-            -FailureMessage "Text/RockSteady readiness check failed."
-        $textReady = $true
-        $textStatus = "READY"
+        $rockSteadyState = Resolve-RockSteadyJar
+        if (-not $rockSteadyState.Ready) {
+            $textStatus = "NOT READY: $($rockSteadyState.Status)"
+            $message = $rockSteadyState.Detail
+            if ($TextMode -eq "Require") {
+                throw "$message`nFace is ready now: $faceCommand"
+            }
+            Write-Warning $message
+            Write-Host "Restore the tracked JAR, then rerun setup to install/check the JDK and validate Text."
+        }
+        else {
+            Confirm-Jdk
+            Write-Host "Running the Text/RockSteady compile, dictionary and category readiness check."
+            Invoke-NativeCommand -Executable $pythonPath `
+                -Arguments @("-m", "processing.text_analysis", "--check") `
+                -FailureMessage "Text/RockSteady readiness check failed."
+            $textReady = $true
+            $textStatus = "READY"
+        }
     }
 
     Write-Host ""

@@ -634,7 +634,7 @@ Common causes:
 | Audio emotion columns are blank | Emotion models toggle, audio `doctor`, model downloads, and manifest warnings |
 | OpenSMILE output is missing | `OPENSMILE_HOME`, executable/config path, and audio `doctor` |
 | Native Face is not ready | Run its structured readiness check; install the pinned native stack and explicitly prepare cached Detectorv2 weights |
-| Native Text is not ready | Install the pinned Whisper stack and a supported JDK; ensure Git LFS has materialized the separately licensed RockSteady 0.4 runtime |
+| Native Text is not ready | Install the pinned Whisper stack and a supported JDK; rerun setup so it can materialize and validate the exact Git LFS-managed RockSteady 0.4 runtime |
 | Focus video does not preview | Try MP4/WebM, but processing may still work through FFmpeg |
 | Long run pauses | Resource monitor has reached CPU, GPU, or RAM limit; inspect the visible launcher/PowerShell log |
 | OneDrive file is unavailable | Hydrate the file locally or move the run to a non-synced NTFS folder |

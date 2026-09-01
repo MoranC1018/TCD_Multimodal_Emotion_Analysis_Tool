@@ -74,7 +74,8 @@ licensed under this project's root MIT License. A project-authorized copy of
 the application JAR is versioned through Git LFS at
 `external/RockSteady/rocksteady-desktop-application-0.4#2018-05-16.jar`;
 downstream use and redistribution remain subject to RockSteady's own terms.
-The setup script does not obtain a separate RockSteady distribution.
+The setup script only materializes and validates this exact tracked LFS object;
+it does not obtain an alternative RockSteady distribution.
 
 ## Other Dependencies, Models, And Marks
 

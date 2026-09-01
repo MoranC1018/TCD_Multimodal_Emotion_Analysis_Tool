@@ -90,6 +90,12 @@ $requiredContracts = [ordered]@{
     "offline Face readiness smoke" = '"processing.face_analysis", "--check"'
     "Text readiness check" = '"processing.text_analysis", "--check"'
     "licensed JAR gate" = 'rocksteady-desktop-application-0.4#2018-05-16.jar'
+    "RockSteady exact byte size" = '$rockSteadyJarSizeBytes = [long]67417737'
+    "RockSteady exact SHA-256" = '02ddb9b418952df4b109fa8ca1e6a59000115af2d4b81aca29d555e28a448534'
+    "RockSteady state validation" = 'function Get-RockSteadyJarState'
+    "RockSteady scoped LFS materialization" = 'function Invoke-RockSteadyLfsPull'
+    "RockSteady LFS resolution" = 'function Resolve-RockSteadyJar'
+    "RockSteady exact LFS include" = '"--include=$relativeJar"'
     "explicit Text policy" = 'ValidateSet("Auto", "Require", "Skip")'
     "independent Face handoff" = 'processing.face_analysis Videos'
     "independent Text handoff" = 'processing.text_analysis Videos'
@@ -148,6 +154,11 @@ $resolveIndex = $setupEntry.IndexOf('$basePython = Confirm-CompatiblePython')
 $moveIndex = $setupEntry.IndexOf('Move-IncompatibleEnvironmentAside')
 Assert-SetupCondition ($resolveIndex -ge 0 -and $moveIndex -gt $resolveIndex) `
     "setup.ps1 must resolve a replacement Python before moving the project environment."
+$rockSteadyResolveIndex = $setupEntry.IndexOf('$rockSteadyState = Resolve-RockSteadyJar')
+$jdkIndex = $setupEntry.IndexOf('Confirm-Jdk')
+Assert-SetupCondition `
+    ($rockSteadyResolveIndex -ge 0 -and $jdkIndex -gt $rockSteadyResolveIndex) `
+    "setup.ps1 must materialize and validate RockSteady before installing/checking the JDK."
 
 $ignoreSource = Get-Content -LiteralPath (Join-Path $projectRoot ".gitignore") -Raw
 Assert-SetupCondition ($ignoreSource.Contains('.venv.incompatible-*/')) `
@@ -264,6 +275,136 @@ try {
     finally {
         $env:PATH = $originalProcessPath
     }
+
+    # Exercise RockSteady state detection and the exact Git LFS pull contract
+    # with a temporary mock artifact. No network, repository file, or real LFS
+    # object is touched by this verification.
+    $originalRockSteadyJar = $rockSteadyJar
+    $originalRockSteadyJarSizeBytes = $rockSteadyJarSizeBytes
+    $originalRockSteadyJarSha256 = $rockSteadyJarSha256
+    $originalGetGitPath = (Get-Command Get-GitPath -CommandType Function).ScriptBlock
+    $originalNativeProbe = (Get-Command Invoke-NativeProbe -CommandType Function).ScriptBlock
+    $rockSteadyProbeDirectory = Join-Path `
+        ([IO.Path]::GetTempPath()) `
+        ("rocksteady-setup-verification-" + [Guid]::NewGuid().ToString("N"))
+    $rockSteadyProbeFile = Join-Path $rockSteadyProbeDirectory $rockSteadyJarName
+    [void](New-Item -ItemType Directory -Path $rockSteadyProbeDirectory)
+    try {
+        [byte[]]$validBytes = 0..63
+        [IO.File]::WriteAllBytes($rockSteadyProbeFile, $validBytes)
+        $rockSteadyJar = $rockSteadyProbeFile
+        $rockSteadyJarSizeBytes = [long]$validBytes.LongLength
+        $rockSteadyJarSha256 = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $rockSteadyProbeFile
+        ).Hash.ToLowerInvariant()
+
+        $state = Get-RockSteadyJarState
+        Assert-SetupCondition ($state.Ready -and $state.Status -eq "ready") `
+            "An exact RockSteady artifact must pass size and SHA-256 validation."
+
+        $pointer = (
+            "version https://git-lfs.github.com/spec/v1`n" +
+            "oid sha256:$rockSteadyJarSha256`n" +
+            "size $rockSteadyJarSizeBytes`n"
+        )
+        [IO.File]::WriteAllText(
+            $rockSteadyProbeFile,
+            $pointer,
+            [Text.UTF8Encoding]::new($false)
+        )
+        $state = Get-RockSteadyJarState
+        Assert-SetupCondition ($state.Status -eq "lfs-pointer") `
+            "A Git LFS pointer must never be accepted as the RockSteady JAR."
+
+        Remove-Item -LiteralPath $rockSteadyProbeFile -Force
+        $state = Get-RockSteadyJarState
+        Assert-SetupCondition ($state.Status -eq "missing") `
+            "A missing RockSteady artifact must be reported explicitly."
+
+        $script:mockRockSteadyBytes = $validBytes
+        $script:capturedRockSteadyLfsArguments = @()
+        $script:mockGitLfsAvailable = $true
+        $script:mockGitLfsPullExitCode = 0
+        function Get-GitPath { return "mock-git.exe" }
+        function Invoke-NativeProbe {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Executable,
+                [string[]]$Arguments = @()
+            )
+
+            if ($Arguments.Count -ge 2 -and $Arguments[0] -eq "lfs" -and $Arguments[1] -eq "version") {
+                return [pscustomobject]@{
+                    ExitCode = $(if ($script:mockGitLfsAvailable) { 0 } else { 1 })
+                    Output = @()
+                }
+            }
+            if ($Arguments -contains "pull") {
+                $script:capturedRockSteadyLfsArguments = @($Arguments)
+                if ($script:mockGitLfsPullExitCode -eq 0) {
+                    [IO.File]::WriteAllBytes($rockSteadyJar, $script:mockRockSteadyBytes)
+                }
+                return [pscustomobject]@{
+                    ExitCode = $script:mockGitLfsPullExitCode
+                    Output = @("mock LFS pull diagnostic")
+                }
+            }
+            return [pscustomobject]@{
+                ExitCode = 0
+                Output = @()
+            }
+        }
+
+        $state = Resolve-RockSteadyJar
+        Assert-SetupCondition ($state.Ready) `
+            "A successful exact Git LFS pull must materialize and validate RockSteady."
+        $relativeJar = "external/RockSteady/$rockSteadyJarName"
+        Assert-SetupCondition `
+            ($script:capturedRockSteadyLfsArguments -contains "--include=$relativeJar") `
+            "RockSteady Git LFS pull must include only the exact tracked path."
+        Assert-SetupCondition `
+            ($script:capturedRockSteadyLfsArguments -contains "--exclude=") `
+            "RockSteady Git LFS pull must explicitly clear broader include/exclude configuration."
+
+        [byte[]]$invalidBytes = @($validBytes)
+        $invalidBytes[0] = 255
+        [IO.File]::WriteAllBytes($rockSteadyProbeFile, $invalidBytes)
+        $state = Get-RockSteadyJarState
+        Assert-SetupCondition ($state.Status -eq "hash-mismatch") `
+            "A same-size RockSteady artifact with different bytes must fail closed."
+
+        $script:capturedRockSteadyLfsArguments = @()
+        $state = Resolve-RockSteadyJar
+        Assert-SetupCondition `
+            ($state.Status -eq "hash-mismatch" -and $script:capturedRockSteadyLfsArguments.Count -eq 0) `
+            "Setup must not overwrite a present but unapproved RockSteady artifact."
+
+        Remove-Item -LiteralPath $rockSteadyProbeFile -Force
+        $script:mockGitLfsAvailable = $false
+        $state = Resolve-RockSteadyJar
+        Assert-SetupCondition ($state.Status -eq "lfs-pull-failed") `
+            "Missing Git LFS must produce an explicit non-ready RockSteady state."
+
+        $script:mockGitLfsAvailable = $true
+        $script:mockGitLfsPullExitCode = 9
+        $state = Resolve-RockSteadyJar
+        Assert-SetupCondition `
+            ($state.Status -eq "lfs-pull-failed" -and $state.Detail -match 'exit code 9') `
+            "A failed Git LFS pull must preserve an actionable exit-code diagnostic."
+    }
+    finally {
+        $rockSteadyJar = $originalRockSteadyJar
+        $rockSteadyJarSizeBytes = $originalRockSteadyJarSizeBytes
+        $rockSteadyJarSha256 = $originalRockSteadyJarSha256
+        Set-Item -LiteralPath Function:\Get-GitPath -Value $originalGetGitPath
+        Set-Item -LiteralPath Function:\Invoke-NativeProbe -Value $originalNativeProbe
+        if (Test-Path -LiteralPath $rockSteadyProbeFile -PathType Leaf) {
+            Remove-Item -LiteralPath $rockSteadyProbeFile -Force
+        }
+        if (Test-Path -LiteralPath $rockSteadyProbeDirectory -PathType Container) {
+            Remove-Item -LiteralPath $rockSteadyProbeDirectory -Force
+        }
+    }
 }
 finally {
     $env:PYTHON_MANAGER_AUTOMATIC_INSTALL = $oldPythonManagerSetting
@@ -271,5 +412,6 @@ finally {
 
 Write-Host (
     "setup.ps1 verification passed: parse, static contracts, Python argument " +
-    "shape, WinGet postconditions, recovery ordering, and PATH precedence."
+    "shape, WinGet postconditions, recovery ordering, PATH precedence, and " +
+    "RockSteady Git LFS integrity."
 )
