@@ -503,6 +503,15 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn("return selectedPath;", self.javascript)
         self.assertNotIn('setStatus("Enter a YouTube URL, local folder, DOCX list, or video file.");', self.javascript)
 
+    def test_long_local_operations_do_not_use_the_short_api_timeout(self) -> None:
+        self.assertIn("const LONG_API_TIMEOUT_MS = 5 * 60 * 1000;", self.javascript)
+        self.assertIn("const { timeoutMs = API_TIMEOUT_MS, ...requestOptions } = options;", self.javascript)
+        for endpoint in ("/api/scan", "/api/face-readiness", "/api/text-readiness"):
+            with self.subTest(endpoint=endpoint):
+                endpoint_start = self.javascript.index(endpoint)
+                request_block = self.javascript[endpoint_start:endpoint_start + 300]
+                self.assertIn("timeoutMs: LONG_API_TIMEOUT_MS", request_block)
+
     def test_supported_formats_are_explicit_and_docx_wording_is_consistent(self) -> None:
         for expected in ("YouTube URL", "Folder tree", "CSV or DOCX catalog", "Local video"):
             with self.subTest(expected=expected):

@@ -158,6 +158,38 @@ class LauncherHttpSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("keep this log", launcher.APP_STATE.logs)
 
+    def test_disconnected_post_is_not_rewritten_as_a_server_error(self) -> None:
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        handler.path = "/api/scan"
+        handler.request_authority_is_valid = lambda: True
+        handler.token_is_valid = lambda _parsed: True
+        handler.privileged_origin_is_valid = lambda _parsed: True
+        handler.read_json_body = lambda: {"path": "videos"}
+        handler.handle_scan = unittest.mock.Mock(
+            side_effect=ConnectionAbortedError("local UI closed the request")
+        )
+        handler.send_error_json = unittest.mock.Mock()
+
+        with (
+            patch.object(launcher.backend, "terms_are_accepted", return_value=True),
+            patch.object(launcher.APP_STATE, "log") as log,
+        ):
+            handler.do_POST()
+
+        handler.send_error_json.assert_not_called()
+        log.assert_not_called()
+
+    def test_request_loop_ignores_a_disconnected_client(self) -> None:
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        with patch.object(
+            launcher.BaseHTTPRequestHandler,
+            "handle_one_request",
+            side_effect=ConnectionResetError("local UI closed the request"),
+        ) as base_handler:
+            handler.handle_one_request()
+
+        base_handler.assert_called_once_with()
+
     def test_cross_origin_media_request_is_rejected(self) -> None:
         token = launcher.API_TOKEN
         with tempfile.TemporaryDirectory() as temp_dir:

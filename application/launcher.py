@@ -608,6 +608,14 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
 
     server_version = "MultimodalEmotionAnalysisLauncher/1.0"
 
+    def handle_one_request(self) -> None:
+        """Treat a closed local UI connection as a normal cancelled request."""
+
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+
     def end_headers(self) -> None:
         """Attach the same restrictive browser boundary to every response."""
 
@@ -734,6 +742,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.handle_validate_path(payload)
             else:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown API endpoint.")
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
         except ValueError as exc:
             APP_STATE.log(f"INPUT ERROR: {exc}")
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
