@@ -358,8 +358,8 @@ def test_native_text_is_preferred_recomputed_and_profile_splits_are_allowed(tmp_
     book = openpyxl.load_workbook(result.workbook_path, data_only=False)
     text = book["Text sentiment"]
     valence_row = TEXT_CONSTRUCTS.index("Text Valence") + 2
-    assert text.cell(valence_row, 4).value == pytest.approx(.8)
-    assert text.cell(valence_row, 8).value == pytest.approx(-.6)
+    assert text.cell(valence_row, 4).value == pytest.approx(80.0)
+    assert text.cell(valence_row, 8).value == pytest.approx(-60.0)
     # Overall is recomputed from selected positive/negative values, not .1 child mean.
     assert "S2" in text.cell(valence_row, 19).value
     assert "S3" in text.cell(valence_row, 19).value

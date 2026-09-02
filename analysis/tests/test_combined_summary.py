@@ -3,6 +3,7 @@ import dataclasses
 import json
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ from analysis.combined_summary import (
     VIDEO_METRICS,
     VIDEO_SENTIMENT,
     VIDEO_VALENCE,
+    COMPARISON_CONSTRUCTS,
     CombinedSource,
     InputError,
     SpeakerGroupDefinition,
@@ -226,19 +228,20 @@ class CombinedSummaryTests(unittest.TestCase):
                         self.assertIsNone(book["Video"][metric_cells.speaker_cells[0]].value)
                         self.assertIsNone(book["Video"][metric_cells.overall].value)
                     comparison = book["Construct Comparison"]
-                    unavailable_label = next(iter(unavailable_metrics))
-                    comparison_row = next(
-                        row
-                        for row in range(1, comparison.max_row + 1)
-                        if comparison.cell(row, 1).value
-                        in {
-                            f"Dimensions: {unavailable_label}",
-                            f"Emotions: {unavailable_label}",
-                            f"Sentiment: {unavailable_label}",
-                            f"Valence: {unavailable_label}",
-                        }
+                    face_boxes = "\n".join(
+                        str(comparison.cell(row, 2).value or "")
+                        for row in range(7, 14)
                     )
-                    self.assertIsNone(comparison.cell(comparison_row, 2).value)
+                    extrema_boxes = "\n".join(
+                        str(comparison.cell(row, column).value or "")
+                        for row in range(7, 14)
+                        for column in (6, 7)
+                    )
+                    for metric in unavailable_metrics:
+                        metric_cells = result.source_cells[f"Video|{metric}"]
+                        reference = f"'Video'!{metric_cells.speaker_cells[0]}"
+                        self.assertNotIn(reference, face_boxes)
+                        self.assertNotIn(f"Face: {metric} ", extrema_boxes)
 
     def test_video_provenance_flows_to_result_and_measure_guide_without_source_writes(self) -> None:
         """Omitting provider metadata from CombinedSource must not force Task 4 to inspect sheets."""
@@ -658,16 +661,21 @@ class CombinedSummaryTests(unittest.TestCase):
                 for metric in (*VIDEO_EMOTIONS, *VIDEO_SENTIMENT, "Engagement", "Adaptive Engagement")
             },
             **{("Video", metric): "-100..100" for metric in (*VIDEO_VALENCE, "Arousal")},
-            **{("Text", metric): "0..1" for metric in TEXT_SENTIMENT[:2]},
-            ("Text", "Text Valence"): "-1..1",
-            **{("Text", metric): "-1..1" for metric in TEXT_DIMENSIONS},
+            **{("Text", metric): "0..100" for metric in TEXT_SENTIMENT[:2]},
+            ("Text", "Text Valence"): "-100..100",
+            **{("Text", metric): "-100..100" for metric in TEXT_DIMENSIONS},
+            ("Face / Audio / Text", "Min / Max"): "Ranked raw scores",
         }
         self.assertEqual({key: row[5] for key, row in rows.items()}, expected_ranges)
         self.assertTrue(
-            any("not directly comparable without rescaling" in str(row[6]) for row in rows.values())
+            any("not calibrated for direct cross-modality interpretation" in str(row[6]) for row in rows.values())
+        )
+        self.assertIn(
+            "Min selects the lowest available measure inside each modality box",
+            rows[("Face / Audio / Text", "Min / Max")][6],
         )
 
-    def test_legacy_audio_report_keeps_optional_emotions_blank_with_one_warning(self) -> None:
+    def test_legacy_audio_report_hides_unavailable_optional_emotions(self) -> None:
         report = (
             self.audio_emotion_root
             / "emotion"
@@ -685,12 +693,80 @@ class CombinedSummaryTests(unittest.TestCase):
         )
 
         book = openpyxl.load_workbook(result.workbook_path, data_only=False)
-        for metric in set(AUDIO_METRICS) - set(AUDIO_REQUIRED_METRICS):
-            coordinate = result.source_cells[f"Audio|{metric}"].speaker_cells[0]
-            self.assertIsNone(book["Audio"][coordinate].value)
+        optional_metrics = {"Contempt", "Disgust", "Fear", "Surprise", "Other"}
+        self.assertEqual(
+            set(result.source_cells),
+            {
+                "Audio|Anger",
+                "Audio|Joy",
+                "Audio|Sadness",
+                "Audio|Neutral",
+                "Audio|Valence",
+                "Audio|Arousal",
+                "Audio|Dominance",
+            },
+        )
+        audio_labels = {
+            cell.value
+            for cell in book["Audio"]["B"]
+            if isinstance(cell.value, str)
+        }
+        self.assertTrue(optional_metrics.isdisjoint(audio_labels))
+        guide_audio_labels = {
+            row[2].value
+            for row in book["Measure Guide"].iter_rows(min_row=2)
+            if row[1].value == "Audio"
+        }
+        self.assertTrue(optional_metrics.isdisjoint(guide_audio_labels))
         legacy_warnings = [warning for warning in result.warnings if "legacy audio report" in warning.casefold()]
         self.assertEqual(len(legacy_warnings), 1)
-        self.assertIn("cells are blank", legacy_warnings[0])
+        self.assertIn("omitted from speaker displays", legacy_warnings[0])
+
+    def test_optional_audio_emotions_are_shown_only_for_speakers_with_values(self) -> None:
+        report = (
+            self.audio_emotion_root
+            / "emotion"
+            / "Andy Burnham"
+            / "combined"
+            / "other_findings"
+            / "descriptive_statistics.csv"
+        )
+        write_sectioned_report(report, AUDIO_REQUIRED_METRICS, 10)
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=(
+                SpeakerGroupDefinition("focus", "Focus", ("Andy Burnham", "Marine Le Pen")),
+            ),
+            include_construct_comparison=True,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        comparison = book["Construct Comparison"]
+        andy_audio = "\n".join(
+            str(comparison.cell(row, 3).value or "") for row in range(7, 14)
+        )
+        marine_audio = "\n".join(
+            str(comparison.cell(row, 11).value or "") for row in range(7, 14)
+        )
+        andy_extrema = "\n".join(
+            str(comparison.cell(row, column).value or "")
+            for row in range(7, 14)
+            for column in (6, 7)
+        )
+        for metric in ("Contempt", "Disgust", "Fear", "Surprise", "Other"):
+            cells = result.source_cells[f"Audio|{metric}"]
+            andy_reference = f"'Audio'!{cells.speaker_cells[0]}"
+            marine_reference = f"'Audio'!{cells.speaker_cells[1]}"
+            self.assertNotIn(andy_reference, andy_audio)
+            self.assertNotIn(f'"{metric}: "', andy_audio)
+            self.assertNotIn(f"Audio: {metric} ", andy_extrema)
+            self.assertIn(marine_reference, marine_audio)
+            self.assertIn(f'"{metric}: "', marine_audio)
+        self.assertIn("'Audio'!D6", andy_audio)
 
     def test_arbitrary_non_political_speaker_names_build_grouped_workbook(self) -> None:
         root = self.root / "arbitrary-audio"
@@ -760,24 +836,36 @@ class CombinedSummaryTests(unittest.TestCase):
         self.assertEqual(sheet["A1"].value, "Multimodal construct comparison by speaker")
         self.assertEqual(sheet["A4"].value, "United Kingdom")
         self.assertEqual(sheet["A5"].value, "Andy Burnham")
-        self.assertEqual(sheet["A7"].value, "Emotions: Anger")
-        self.assertIn("'Video'!D2", sheet["B7"].value)
-        self.assertIn("'Audio'!D2", sheet["C7"].value)
+        self.assertEqual(
+            [sheet.cell(row, 1).value for row in range(7, 14)],
+            [
+                "Positive Sentiment",
+                "Negative Sentiment",
+                "Neutral / Other",
+                "Arousal / Activation",
+                "Valence",
+                "Dominance / Power",
+                "Affiliation / Social orientation",
+            ],
+        )
+        self.assertIn("'Video'!D6", sheet["B7"].value)
+        self.assertNotIn("'Video'!D12", sheet["B7"].value)
+        self.assertNotIn("'Video'!D13", sheet["B7"].value)
+        self.assertIn("'Audio'!D6", sheet["C7"].value)
+        self.assertNotIn("'Audio'!D11", sheet["C7"].value)
         self.assertIsNone(sheet["D7"].value)
-
-        labelled_rows: dict[str, int] = {}
-        for row in range(7, sheet.max_row + 1):
-            label = sheet.cell(row, 1).value
-            if label:
-                labelled_rows.setdefault(label, row)
-        positive_row = labelled_rows["Sentiment: Positive Sentiment"]
-        self.assertIsNone(sheet.cell(positive_row, 2).value)
-        self.assertIsNone(sheet.cell(positive_row, 3).value)
-        self.assertIsNone(sheet.cell(positive_row, 4).value)
-        valence_row = labelled_rows["Valence: Valence"]
-        self.assertIn("'Video'!D12", sheet.cell(valence_row, 2).value)
-        self.assertIn("'Audio'!D11", sheet.cell(valence_row, 3).value)
-        self.assertNotIn("Joy", str(sheet.cell(valence_row, 2).value))
+        self.assertIn("'Video'!D12", sheet["B11"].value)
+        self.assertIn("'Video'!D13", sheet["B11"].value)
+        self.assertIn("'Audio'!D11", sheet["C11"].value)
+        self.assertEqual(sheet["F6"].value, "Min")
+        self.assertEqual(sheet["G6"].value, "Max")
+        self.assertIsNone(sheet["E6"].value)
+        self.assertIsNone(sheet["H6"].value)
+        self.assertEqual(sheet.column_dimensions["E"].width, 3)
+        self.assertEqual(sheet.column_dimensions["H"].width, 3)
+        self.assertEqual(sheet["I5"].value, None)
+        self.assertEqual(sheet["Q5"].value, None)
+        self.assertGreaterEqual(sheet.max_column, 24)
 
         without_comparison = self.root / "without-comparison.xlsx"
         build_combined_workbook(
@@ -809,7 +897,10 @@ class CombinedSummaryTests(unittest.TestCase):
         )
 
         result = build_combined_workbook(
-            {"video": discover_combined_sources(self.video_emotion_root, "video")},
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
             self.output_path,
             speaker_groups=groups,
             text_summaries=(text_summary,),
@@ -817,18 +908,314 @@ class CombinedSummaryTests(unittest.TestCase):
         )
 
         book = openpyxl.load_workbook(result.workbook_path, data_only=False)
-        self.assertEqual(book["Text sentiment"]["D2"].value, 0.20)
-        self.assertEqual(book["Text sentiment"]["D7"].value, 0.50)
+        self.assertEqual(book["Text sentiment"]["D2"].value, 20.0)
+        self.assertEqual(book["Text sentiment"]["D7"].value, 50.0)
+        self.assertAlmostEqual(book["Text sentiment"]["D4"].value, 100 / 3)
+        self.assertIn("100*(", book["Text sentiment"]["S4"].value)
+        self.assertEqual(text_summary.constructs["Positive Sentiment"], 0.20)
+        self.assertEqual(text_summary.constructs["Affiliation / Social orientation"], 0.50)
         comparison = book["Construct Comparison"]
         positive_row = next(
             row
             for row in range(7, comparison.max_row + 1)
-            if comparison.cell(row, 1).value == "Sentiment: Positive Sentiment"
+            if comparison.cell(row, 1).value == "Positive Sentiment"
         )
         self.assertIn("'Text sentiment'!D2", comparison.cell(positive_row, 4).value)
-        self.assertIsNone(comparison.cell(positive_row, 2).value)
-        self.assertIsNone(comparison.cell(positive_row, 3).value)
+        self.assertNotIn("'Text sentiment'!D4", comparison.cell(positive_row, 4).value)
+        self.assertIn("'Video'!D6", comparison.cell(positive_row, 2).value)
+        self.assertEqual(
+            comparison.cell(positive_row, 6).value,
+            "Face: Joy 36.00\nText: Positive Sentiment 20.00\nAudio: Joy 16.00",
+        )
+        self.assertEqual(
+            comparison.cell(positive_row, 7).value,
+            "Face: Joy 36.00\nText: Positive Sentiment 20.00\nAudio: Joy 16.00",
+        )
+        valence_row = next(
+            row
+            for row in range(7, comparison.max_row + 1)
+            if comparison.cell(row, 1).value == "Valence"
+        )
+        self.assertIn("'Video'!D12", comparison.cell(valence_row, 2).value)
+        self.assertIn("'Video'!D13", comparison.cell(valence_row, 2).value)
+        self.assertIn("'Audio'!D11", comparison.cell(valence_row, 3).value)
+        self.assertIn("'Text sentiment'!D4", comparison.cell(valence_row, 4).value)
+        self.assertEqual(
+            comparison.cell(valence_row, 6).value,
+            "Face: Valence 42.00\nText: Text Valence 33.33\nAudio: Valence 21.00",
+        )
+        self.assertEqual(
+            comparison.cell(valence_row, 7).value,
+            "Face: Adaptive Valence 43.00\nText: Text Valence 33.33\nAudio: Valence 21.00",
+        )
         self.assertNotIn("Text|Positive Sentiment", result.source_cells)
+
+    def test_construct_boxes_classify_every_non_au_measure_exactly_once(self) -> None:
+        expected_mapping = {
+            "Positive Sentiment": {
+                "Video": ("Joy",),
+                "Audio": ("Joy",),
+                "Text": ("Positive Sentiment",),
+            },
+            "Negative Sentiment": {
+                "Video": ("Anger", "Contempt", "Disgust", "Fear", "Sadness"),
+                "Audio": ("Anger", "Contempt", "Disgust", "Fear", "Sadness"),
+                "Text": ("Negative Sentiment",),
+            },
+            "Neutral / Other": {
+                "Video": ("Neutral", "Confusion", "Sentimentality"),
+                "Audio": ("Neutral", "Other"),
+                "Text": (),
+            },
+            "Arousal / Activation": {
+                "Video": ("Surprise", "Arousal", "Engagement", "Adaptive Engagement"),
+                "Audio": ("Surprise", "Arousal"),
+                "Text": ("Arousal / Activation",),
+            },
+            "Valence": {
+                "Video": ("Valence", "Adaptive Valence"),
+                "Audio": ("Valence",),
+                "Text": ("Text Valence",),
+            },
+            "Dominance / Power": {
+                "Video": (),
+                "Audio": ("Dominance",),
+                "Text": ("Dominance / Power",),
+            },
+            "Affiliation / Social orientation": {
+                "Video": (),
+                "Audio": (),
+                "Text": ("Affiliation / Social orientation",),
+            },
+        }
+        self.assertEqual(
+            {
+                construct.label: {
+                    "Video": tuple(metric for _, metric in construct.video_metrics),
+                    "Audio": tuple(metric for _, metric in construct.audio_metrics),
+                    "Text": tuple(metric for _, metric in construct.text_metrics),
+                }
+                for construct in COMPARISON_CONSTRUCTS
+            },
+            expected_mapping,
+        )
+        assigned_by_modality = {
+            "Video": tuple(
+                metric
+                for construct in COMPARISON_CONSTRUCTS
+                for _, metric in construct.video_metrics
+            ),
+            "Audio": tuple(
+                metric
+                for construct in COMPARISON_CONSTRUCTS
+                for _, metric in construct.audio_metrics
+            ),
+            "Text": tuple(
+                metric
+                for construct in COMPARISON_CONSTRUCTS
+                for _, metric in construct.text_metrics
+            ),
+        }
+        self.assertEqual(Counter(assigned_by_modality["Video"]), Counter(VIDEO_METRICS))
+        self.assertEqual(Counter(assigned_by_modality["Audio"]), Counter(AUDIO_METRICS))
+        self.assertEqual(
+            Counter(assigned_by_modality["Text"]),
+            Counter((*TEXT_SENTIMENT, *TEXT_DIMENSIONS)),
+        )
+        self.assertTrue(
+            all(
+                count == 1
+                for assigned in assigned_by_modality.values()
+                for count in Counter(assigned).values()
+            )
+        )
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+        text_summary = TextConstructSummary(
+            speaker_id="andy_burnham",
+            display_name="Andy Burnham",
+            country="United Kingdom",
+            constructs={
+                "Positive Sentiment": 0.20,
+                "Negative Sentiment": 0.10,
+                "Arousal / Activation": 0.30,
+                "Dominance / Power": 0.40,
+                "Affiliation / Social orientation": 0.50,
+            },
+            source_path=self.root / "speaker_level_summary.csv",
+        )
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+            text_summaries=(text_summary,),
+            include_construct_comparison=True,
+        )
+
+        book = openpyxl.load_workbook(result.workbook_path, data_only=False)
+        comparison = book["Construct Comparison"]
+        boxes = {
+            "Video": [str(comparison.cell(row, 2).value or "") for row in range(7, 14)],
+            "Audio": [str(comparison.cell(row, 3).value or "") for row in range(7, 14)],
+            "Text": [str(comparison.cell(row, 4).value or "") for row in range(7, 14)],
+        }
+        for modality, metrics in (
+            ("Video", VIDEO_METRICS),
+            ("Audio", AUDIO_METRICS),
+        ):
+            for metric in metrics:
+                cells = result.source_cells[f"{modality}|{metric}"]
+                reference = f"'{cells.sheet}'!{cells.speaker_cells[0]}"
+                self.assertEqual(
+                    sum(reference in box for box in boxes[modality]),
+                    1,
+                    f"{modality} {metric} must occur in exactly one construct box",
+                )
+        for index, construct in enumerate((*TEXT_SENTIMENT, *TEXT_DIMENSIONS), start=2):
+            reference = f"'Text sentiment'!D{index}"
+            self.assertEqual(
+                sum(reference in box for box in boxes["Text"]),
+                1,
+                f"Text {construct} must occur in exactly one construct box",
+            )
+
+    def test_negative_text_scores_are_scaled_without_changing_sign(self) -> None:
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+        text_summary = TextConstructSummary(
+            speaker_id="andy_burnham",
+            display_name="Andy Burnham",
+            country="United Kingdom",
+            constructs={
+                "Positive Sentiment": 0.20,
+                "Negative Sentiment": 0.10,
+                "Arousal / Activation": -0.25,
+                "Dominance / Power": 0.40,
+                "Affiliation / Social orientation": 0.50,
+            },
+            source_path=self.root / "speaker_level_summary.csv",
+        )
+
+        result = build_combined_workbook(
+            {},
+            self.output_path,
+            speaker_groups=groups,
+            text_summaries=(text_summary,),
+            include_construct_comparison=True,
+        )
+
+        text_sheet = openpyxl.load_workbook(result.workbook_path, data_only=False)["Text sentiment"]
+        self.assertEqual(text_sheet["D5"].value, -25.0)
+
+    def test_missing_text_measure_is_hidden_from_its_box_and_extrema(self) -> None:
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+        text_summary = TextConstructSummary(
+            speaker_id="andy_burnham",
+            display_name="Andy Burnham",
+            country="United Kingdom",
+            constructs={
+                "Positive Sentiment": 0.20,
+                "Negative Sentiment": None,
+                "Arousal / Activation": 0.30,
+                "Dominance / Power": 0.40,
+                "Affiliation / Social orientation": 0.50,
+            },
+            source_path=self.root / "speaker_level_summary.csv",
+        )
+
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+            text_summaries=(text_summary,),
+            include_construct_comparison=True,
+        )
+
+        comparison = openpyxl.load_workbook(result.workbook_path, data_only=False)[
+            "Construct Comparison"
+        ]
+        valence_row = next(
+            row
+            for row in range(7, comparison.max_row + 1)
+            if comparison.cell(row, 1).value == "Valence"
+        )
+        self.assertIsNone(comparison.cell(valence_row, 4).value)
+        self.assertNotIn("Text Valence", comparison.cell(valence_row, 6).value)
+        self.assertNotIn("Text Valence", comparison.cell(valence_row, 7).value)
+        self.assertEqual(
+            comparison.cell(valence_row, 6).value,
+            "Face: Valence 42.00\nAudio: Valence 21.00",
+        )
+        self.assertEqual(
+            comparison.cell(valence_row, 7).value,
+            "Face: Adaptive Valence 43.00\nAudio: Valence 21.00",
+        )
+
+    def test_every_speaker_panel_has_four_column_ranked_suffix(self) -> None:
+        self._write_report(self.audio_emotion_root, "Nigel Farage", AUDIO_METRICS, 50)
+        self._write_report(self.video_emotion_root, "Nigel Farage", VIDEO_METRICS, 60)
+        speakers = ("Andy Burnham", "Marine Le Pen", "Nigel Farage")
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=(SpeakerGroupDefinition("sample", "Sample", speakers),),
+            include_construct_comparison=True,
+        )
+
+        comparison = openpyxl.load_workbook(result.workbook_path, data_only=False)[
+            "Construct Comparison"
+        ]
+        for start, speaker in zip((1, 9, 17), speakers):
+            self.assertEqual(comparison.cell(5, start).value, speaker)
+            self.assertEqual(
+                [comparison.cell(6, start + offset).value for offset in range(8)],
+                ["Psychological construct", "Face", "Audio", "Text", None, "Min", "Max", None],
+            )
+            self.assertTrue(comparison.cell(7, start + 5).value)
+            self.assertTrue(comparison.cell(7, start + 6).value)
+        self.assertGreaterEqual(comparison.max_column, 24)
+
+    def test_equal_extrema_use_face_audio_text_tie_order(self) -> None:
+        self._write_report(self.video_emotion_root, "Andy Burnham", VIDEO_METRICS, 10)
+        groups = (SpeakerGroupDefinition("uk", "United Kingdom", ("Andy Burnham",)),)
+        text_summary = TextConstructSummary(
+            speaker_id="andy_burnham",
+            display_name="Andy Burnham",
+            country="United Kingdom",
+            constructs={
+                "Positive Sentiment": 0.16,
+                "Negative Sentiment": 0.0,
+                "Arousal / Activation": 0.30,
+                "Dominance / Power": 0.40,
+                "Affiliation / Social orientation": 0.50,
+            },
+            source_path=self.root / "speaker_level_summary.csv",
+        )
+        result = build_combined_workbook(
+            {
+                "audio": discover_combined_sources(self.audio_emotion_root, "audio"),
+                "video": discover_combined_sources(self.video_emotion_root, "video"),
+            },
+            self.output_path,
+            speaker_groups=groups,
+            text_summaries=(text_summary,),
+            include_construct_comparison=True,
+        )
+
+        comparison = openpyxl.load_workbook(result.workbook_path, data_only=False)[
+            "Construct Comparison"
+        ]
+        self.assertEqual(
+            comparison["F7"].value,
+            "Face: Joy 16.00\nAudio: Joy 16.00\nText: Positive Sentiment 16.00",
+        )
 
     def test_headline_policy_defaults_to_observation_weighting_and_allows_equal_videos(self) -> None:
         report = (

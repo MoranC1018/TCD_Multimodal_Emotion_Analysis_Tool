@@ -170,12 +170,13 @@ def test_profile_workbook_orders_more_than_twelve_sources_and_keeps_metric_contr
     assert audio[cells.speaker_cells[0][0] + "1"].value == "'=Research formula"
     assert audio[cells.overall].value.startswith("=AVERAGE(")
     guide = book["Measure Guide"]
-    assert guide.max_row == 34
+    assert guide.max_row == 35
     assert {guide.cell(row, 1).value for row in range(2, guide.max_row + 1)} == {
         "Emotions",
         "Sentiment",
         "Valence",
         "Dimensions",
+        "Comparison",
     }
     assert (_digest(manifest), _digest(metadata.metadata_path)) == sidecar_hashes
 
@@ -591,8 +592,8 @@ def test_construct_comparison_keeps_every_member_of_a_large_group(tmp_path: Path
     comparison = openpyxl.load_workbook(result.workbook_path, data_only=False)[
         "Construct Comparison"
     ]
-    assert [comparison.cell(5, column).value for column in (1, 6, 11, 16, 21)] == speakers
-    assert comparison.max_column >= 24
+    assert [comparison.cell(5, column).value for column in (1, 9, 17, 25, 33)] == speakers
+    assert comparison.max_column >= 40
 
 
 def test_profile_maps_registry_speaker_ids_back_to_manifest_identity(tmp_path: Path) -> None:
@@ -638,7 +639,7 @@ def test_profile_maps_imported_text_summary_to_source_identity(tmp_path: Path) -
     )
 
     text_sheet = openpyxl.load_workbook(result.workbook_path, data_only=False)["Text sentiment"]
-    assert text_sheet["D2"].value == 0.2
+    assert text_sheet["D2"].value == 20.0
 
 
 def test_profile_rejects_a_modality_report_with_no_manifest_speaker(tmp_path: Path) -> None:
@@ -733,7 +734,7 @@ def test_profile_keeps_text_at_one_observation_per_speaker(tmp_path: Path) -> No
 
     text = openpyxl.load_workbook(result.workbook_path, data_only=False)["Text sentiment"]
     assert [text["D1"].value, text["E1"].value] == ["Speaker A", "Speaker B"]
-    assert [text["D2"].value, text["E2"].value] == [1.0, 0.0]
+    assert [text["D2"].value, text["E2"].value] == [100.0, 0.0]
     assert text["S2"].value == "=AVERAGE(D2,E2)"
 
 

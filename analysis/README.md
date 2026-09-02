@@ -175,24 +175,41 @@ The combined workbook and its **Measure Guide** use four explicit sections:
   and source `Happiness` is displayed as Joy. Video Anger, Contempt, Disgust,
   Fear, Joy, Sadness, Surprise, Neutral, and Confusion are `0..100`.
 - **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
-  Negative Sentiment are `0..1`. Legacy imported headers `Positive valence`
+  Negative Sentiment are imported on `0..1` and multiplied by `100` for the
+  combined workbook. Legacy imported headers `Positive valence`
   and `Negative valence` remain accepted aliases, but canonical sentiment
   headers win when both versions exist.
 - **Valence:** Audio Valence maps source `0..1` to output `-100..100` with
   `(raw * 200) - 100`. Video Valence and Adaptive Valence are `-100..100`.
-  Joy and Valence are not Positive/Negative Sentiment proxies.
+  Text Valence is derived on source scale `-1..1` and multiplied by `100` for
+  combined-workbook scale `-100..100`. Joy and Valence are not
+  Positive/Negative Sentiment proxies.
 - **Dimensions:** Audio Arousal and Dominance map source `0..1` to `0..100`.
   Video Engagement and Adaptive Engagement are `0..100`. Text Arousal /
   Activation, Dominance / Power, and Affiliation / Social orientation are
-  `-1..1`.
+  imported on `-1..1` and multiplied by `100` in the combined workbook;
+  signed values retain their sign.
 
-Cross-modality scales are not directly comparable without rescaling. The
+Numeric ranges overlap after Text `x100` scaling, but the modality constructs
+are not calibrated equivalents. The
 Measure Guide columns are Section, Modality, Display measure, Imported source
-label, Workbook sheet, Output range, and Transformation/meaning. Older valid
-audio reports without optional emotion classes render those measures as blanks
-and produce one concise warning; newly generated audio reports retain all nine
-emotions. Action units, muscles, and tones stay in detailed/raw reports and are
-outside the combined emotional workbook.
+label, Workbook sheet, Output range, and Transformation/meaning. Audio rows and
+guide entries are created only for measures with a numeric observation among
+the selected speakers. A speaker's unavailable optional Audio emotions are
+omitted, while numeric zero remains a valid displayed score. Newly generated
+full reports retain all nine emotions. Action units, muscles, and tones stay in
+detailed/raw reports and are outside the combined emotional workbook.
+
+The **Construct Comparison** sheet uses seven ordered heuristic construct
+families: Positive Sentiment, Negative Sentiment, Neutral / Other, Arousal /
+Activation, Valence, Dominance / Power, and Affiliation / Social orientation.
+Its taxonomy assigns all 15 canonical Video measures, all 12 Audio measures,
+and all six Text measures exactly once while excluding Action Units. Every
+speaker keeps multiline Face, Audio, and Text boxes. A four-column suffix adds
+blank, `Min`, `Max`, blank: Min/Max select the per-modality internal extreme
+and rank the resulting modality values high-to-low, using Face, Audio, Text tie
+order. Missing/no-direct boxes are blank and excluded, and the rankings are
+descriptive raw-score extrema only.
 
 ## Reusable Output Customization
 
