@@ -68,14 +68,22 @@ def _candidate_directories() -> Iterable[Path]:
 
     exact: list[Path] = []
     other_winget: list[Path] = []
+    package_directories: list[Path] = []
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
-        packages = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        package_directories.append(
+            Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+        )
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        package_directories.append(Path(program_files) / "WinGet" / "Packages")
+
+    expected_directory = f"ffmpeg-{SUPPORTED_FFMPEG_RELEASE}-full_build-shared"
+    for packages in package_directories:
         try:
             package_roots = sorted(packages.glob("Gyan.FFmpeg.Shared_*"), key=str)
         except OSError:
             package_roots = []
-        expected_directory = f"ffmpeg-{SUPPORTED_FFMPEG_RELEASE}-full_build-shared"
         for package_root in package_roots:
             exact_candidate = package_root / expected_directory / "bin"
             exact.append(exact_candidate)
