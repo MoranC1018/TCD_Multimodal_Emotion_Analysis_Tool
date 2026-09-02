@@ -3,11 +3,12 @@
 Installs and validates the single supported Windows environment.
 
 .DESCRIPTION
-The default setup makes Face processing ready and also validates Text when the
-licensed RockSteady JAR is present. The pinned stack requires Python 3.11 or
-newer. Python 3.12 is tested and recommended, while other compatible versions
-are accepted. The script is safe to rerun: it reuses a compatible environment
-and installs FFmpeg only when the exact supported 8.1.2 full-shared runtime is
+The default setup makes Face processing ready and also validates Text. It
+materializes the exact Git LFS-managed RockSteady JAR when that tracked object
+is missing or still a pointer. The pinned stack requires Python 3.11 or newer.
+Python 3.12 is tested and recommended, while other compatible versions are
+accepted. The script is safe to rerun: it reuses a compatible environment and
+installs FFmpeg only when the exact supported 8.1.2 full-shared runtime is
 absent. If no compatible Python is installed, the automatic fallback installs
 Python 3.12.
 
@@ -54,7 +55,12 @@ param(
     # Useful on managed machines where software installation is performed by
     # IT. The corresponding runtime checks are never silently skipped.
     [switch]$SkipPythonInstall,
-    [switch]$SkipJdkInstall
+    [switch]$SkipJdkInstall,
+
+    # Internal verification hook: load function definitions without performing
+    # installations. Hidden from normal help and used by verify_setup.ps1.
+    [Parameter(DontShow = $true)]
+    [switch]$FunctionsOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +72,8 @@ $pythonPath = Join-Path $environmentPath "Scripts\python.exe"
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $rockSteadyJarName = "rocksteady-desktop-application-0.4#2018-05-16.jar"
 $rockSteadyJar = Join-Path $projectRoot "external\RockSteady\$rockSteadyJarName"
+$rockSteadyJarSizeBytes = [long]67417737
+$rockSteadyJarSha256 = "02ddb9b418952df4b109fa8ca1e6a59000115af2d4b81aca29d555e28a448534"
 $ffmpegVersion = "8.1.2"
 $ffmpegPackageId = "Gyan.FFmpeg.Shared"
 $jdkPackageId = "EclipseAdoptium.Temurin.21.JDK"
@@ -84,7 +92,9 @@ function Invoke-NativeCommand {
         [Parameter(Mandatory = $true)]
         [string[]]$Arguments,
         [Parameter(Mandatory = $true)]
-        [string]$FailureMessage
+        [string]$FailureMessage,
+        [switch]$AllowNonZeroExit,
+        [switch]$PassThru
     )
 
     try {
@@ -96,8 +106,11 @@ function Invoke-NativeCommand {
     catch {
         throw "$FailureMessage $($_.Exception.Message)"
     }
-    if ($exitCode -ne 0) {
+    if ($exitCode -ne 0 -and -not $AllowNonZeroExit) {
         throw "$FailureMessage (exit code $exitCode)."
+    }
+    if ($PassThru) {
+        return [int]$exitCode
     }
 }
 
@@ -130,6 +143,154 @@ function Invoke-NativeProbe {
     finally {
         $ErrorActionPreference = $previousPreference
     }
+}
+
+function Get-GitPath {
+    $command = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        throw "Git is required to materialize the tracked RockSteady Git LFS object."
+    }
+    return $command.Source
+}
+
+function Get-RockSteadyJarState {
+    if (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "missing"
+            Detail = "RockSteady JAR is missing: $rockSteadyJar"
+        }
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $rockSteadyJar
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "unreadable"
+            Detail = "RockSteady JAR metadata could not be read: $($_.Exception.Message)"
+        }
+    }
+    if ($item.Length -le 1024) {
+        $reader = $null
+        try {
+            $reader = [IO.StreamReader]::new(
+                $item.FullName,
+                [Text.Encoding]::UTF8,
+                $true
+            )
+            $firstLine = $reader.ReadLine()
+        }
+        catch {
+            return [pscustomobject]@{
+                Ready = $false
+                Status = "unreadable"
+                Detail = "RockSteady JAR could not be read: $($_.Exception.Message)"
+            }
+        }
+        finally {
+            if ($null -ne $reader) {
+                $reader.Dispose()
+            }
+        }
+        if ($firstLine -eq "version https://git-lfs.github.com/spec/v1") {
+            return [pscustomobject]@{
+                Ready = $false
+                Status = "lfs-pointer"
+                Detail = "RockSteady is still a Git LFS pointer instead of the JAR bytes."
+            }
+        }
+    }
+
+    if ($item.Length -ne $rockSteadyJarSizeBytes) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "invalid-size"
+            Detail = (
+                "RockSteady JAR size is invalid: expected $rockSteadyJarSizeBytes bytes, " +
+                "found $($item.Length) bytes at $rockSteadyJar"
+            )
+        }
+    }
+
+    try {
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $rockSteadyJar).Hash.ToLowerInvariant()
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "unreadable"
+            Detail = "RockSteady JAR could not be hashed: $($_.Exception.Message)"
+        }
+    }
+    if ($actualSha256 -ne $rockSteadyJarSha256) {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "hash-mismatch"
+            Detail = (
+                "RockSteady JAR SHA-256 is invalid: expected $rockSteadyJarSha256, " +
+                "found $actualSha256"
+            )
+        }
+    }
+
+    return [pscustomobject]@{
+        Ready = $true
+        Status = "ready"
+        Detail = "RockSteady JAR passed exact size and SHA-256 validation."
+    }
+}
+
+function Invoke-RockSteadyLfsPull {
+    $gitPath = Get-GitPath
+    $lfsProbe = Invoke-NativeProbe -Executable $gitPath -Arguments @("lfs", "version")
+    if ($lfsProbe.ExitCode -ne 0) {
+        throw "Git LFS is not available. Install Git LFS, run 'git lfs install', and retry setup."
+    }
+
+    $relativeJar = "external/RockSteady/$rockSteadyJarName"
+    Write-Host "Materializing the tracked RockSteady runtime with Git LFS."
+    $pull = Invoke-NativeProbe -Executable $gitPath -Arguments @(
+        "-C", $projectRoot,
+        "lfs", "pull",
+        "--include=$relativeJar",
+        "--exclude="
+    )
+    if ($pull.ExitCode -ne 0) {
+        $output = ($pull.Output -join " ").Trim()
+        if (-not $output) {
+            $output = "no diagnostic output"
+        }
+        throw "Git LFS could not materialize RockSteady (exit code $($pull.ExitCode)): $output"
+    }
+}
+
+function Resolve-RockSteadyJar {
+    $state = Get-RockSteadyJarState
+    if ($state.Ready) {
+        return $state
+    }
+    if ($state.Status -notin @("missing", "lfs-pointer")) {
+        return $state
+    }
+
+    try {
+        Invoke-RockSteadyLfsPull
+    }
+    catch {
+        return [pscustomobject]@{
+            Ready = $false
+            Status = "lfs-pull-failed"
+            Detail = $_.Exception.Message
+        }
+    }
+
+    $state = Get-RockSteadyJarState
+    if ($state.Ready) {
+        Write-Host $state.Detail
+    }
+    return $state
 }
 
 function Get-WinGetPath {
@@ -199,7 +360,11 @@ function Invoke-WinGetInstall {
     param(
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
-        [string]$Version = ""
+        [string]$Version = "",
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$VerifyInstalled,
+        [Parameter(Mandatory = $true)]
+        [string]$RequirementDescription
     )
 
     $arguments = @(
@@ -218,8 +383,69 @@ function Invoke-WinGetInstall {
         # check failed, so --force cannot make repeat runs reinstall it.
         $arguments += @("--version", $Version, "--force")
     }
-    Invoke-NativeCommand -Executable (Get-WinGetPath) -Arguments $arguments `
-        -FailureMessage "WinGet could not install $PackageId."
+    $installError = $null
+    $exitCode = $null
+    try {
+        $exitCode = Invoke-NativeCommand -Executable (Get-WinGetPath) -Arguments $arguments `
+            -FailureMessage "WinGet could not install $PackageId." `
+            -AllowNonZeroExit -PassThru
+    }
+    catch {
+        $installError = $_
+    }
+
+    # WinGet uses non-zero statuses for outcomes such as "already installed and
+    # no upgrade is available".  The external command is not the source of
+    # truth: refresh discovery and verify the required postcondition after every
+    # attempt, including launch errors and non-zero exits.
+    Refresh-ProcessPath
+    $verificationError = $null
+    $verified = $false
+    try {
+        $verificationResult = & $VerifyInstalled
+        $verified = [bool]($verificationResult | Select-Object -Last 1)
+    }
+    catch {
+        $verificationError = $_
+    }
+    if ($verified) {
+        if ($null -ne $installError) {
+            Write-Warning (
+                "WinGet reported an error for $PackageId, but $RequirementDescription " +
+                "was verified after the attempt. Continuing."
+            )
+        }
+        elseif ($exitCode -ne 0) {
+            Write-Warning (
+                "WinGet exited with code $exitCode for $PackageId, but " +
+                "$RequirementDescription was verified. Continuing."
+            )
+        }
+        return
+    }
+
+    if ($null -ne $verificationError) {
+        throw (
+            "Could not verify $RequirementDescription after the WinGet attempt for " +
+            "$PackageId. $($verificationError.Exception.Message)"
+        )
+    }
+    if ($null -ne $installError) {
+        throw (
+            "WinGet could not install $PackageId, and $RequirementDescription remains " +
+            "unavailable. $($installError.Exception.Message)"
+        )
+    }
+    if ($exitCode -ne 0) {
+        throw (
+            "WinGet exited with code $exitCode for $PackageId, and " +
+            "$RequirementDescription remains unavailable."
+        )
+    }
+    throw (
+        "WinGet reported success for $PackageId, but $RequirementDescription could " +
+        "not be verified."
+    )
 }
 
 function Refresh-ProcessPath {
@@ -230,7 +456,10 @@ function Refresh-ProcessPath {
     $seen = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase
     )
-    foreach ($scope in @("Machine", "User", "Process")) {
+    # Preserve caller-specific prefixes such as an activated virtual
+    # environment. Newly installed persistent entries are appended without
+    # allowing Machine/User PATH values to displace current-process choices.
+    foreach ($scope in @("Process", "User", "Machine")) {
         $value = [Environment]::GetEnvironmentVariable("Path", $scope)
         foreach ($entry in @($value -split [IO.Path]::PathSeparator)) {
             $trimmed = $entry.Trim()
@@ -257,17 +486,25 @@ function Get-CompatiblePythonDetails {
     if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
         return $null
     }
-    $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @(
-        "-c",
+    # Build one Python program before constructing the argument array. Inside a
+    # PowerShell @(...), newline-separated `+` expressions become separate
+    # array items; Python would then execute only the first fragment after -c.
+    $probeCode = (
         "import sys; ok = sys.version_info[:2] >= (3, 11); " +
         "print(f'{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}') if ok else None; " +
         "raise SystemExit(0 if ok else 1)"
     )
+    $probe = Invoke-NativeProbe -Executable $Candidate -Arguments @("-I", "-c", $probeCode)
     if ($probe.ExitCode -ne 0 -or $probe.Output.Count -eq 0) {
         return $null
     }
+    $versionLines = @($probe.Output | Where-Object { $_ -match '^\d+\.\d+\.\d+$' })
+    if ($versionLines.Count -eq 0) {
+        return $null
+    }
     try {
-        $version = [version]([string]($probe.Output | Select-Object -Last 1)).Trim()
+        $versionText = ([string]($versionLines | Select-Object -Last 1)).Trim()
+        $version = [version]$versionText
     }
     catch {
         return $null
@@ -386,8 +623,9 @@ function Confirm-CompatiblePython {
         "Python 3.11 or newer was not found; installing the recommended " +
         "$pythonPackageId fallback with WinGet."
     )
-    Invoke-WinGetInstall -PackageId $pythonPackageId
-    Refresh-ProcessPath
+    Invoke-WinGetInstall -PackageId $pythonPackageId `
+        -RequirementDescription "a working Python 3.11-or-newer interpreter" `
+        -VerifyInstalled { $null -ne (Find-CompatiblePython) }
     $resolved = Find-CompatiblePython
     if ($null -eq $resolved) {
         throw "WinGet completed, but a compatible Python could not be resolved in the current process."
@@ -407,12 +645,27 @@ function Move-IncompatibleEnvironmentAside {
         return
     }
     $suffix = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backup = "$environmentPath.incompatible-$suffix"
+    $backup = "$environmentPath-incompatible-$suffix"
     if (Test-Path -LiteralPath $backup) {
         $backup = "$backup-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
     }
     Move-Item -LiteralPath $environmentPath -Destination $backup
     Write-Warning "Moved the incompatible project environment to $backup"
+    if ($env:VIRTUAL_ENV) {
+        try {
+            $activeEnvironment = [IO.Path]::GetFullPath([string]$env:VIRTUAL_ENV)
+            $projectEnvironment = [IO.Path]::GetFullPath($environmentPath)
+            if ($activeEnvironment.Equals($projectEnvironment, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Warning (
+                    "The moved environment is still marked active in the calling shell. " +
+                    "After setup finishes, open a new terminal or activate the new .venv."
+                )
+            }
+        }
+        catch {
+            # A malformed inherited VIRTUAL_ENV value must not block recovery.
+        }
+    }
 }
 
 function Get-ExactSharedFfmpegDirectory {
@@ -487,8 +740,9 @@ function Confirm-ExactSharedFfmpeg {
             )
         }
         Write-Host "Installing exact FFmpeg $ffmpegVersion full-shared runtime."
-        Invoke-WinGetInstall -PackageId $ffmpegPackageId -Version $ffmpegVersion
-        Refresh-ProcessPath
+        Invoke-WinGetInstall -PackageId $ffmpegPackageId -Version $ffmpegVersion `
+            -RequirementDescription "the exact FFmpeg $ffmpegVersion full-shared runtime" `
+            -VerifyInstalled { $null -ne (Get-ExactSharedFfmpegDirectory) }
         $directory = Get-ExactSharedFfmpegDirectory
         if ($null -eq $directory) {
             throw (
@@ -563,8 +817,9 @@ function Confirm-Jdk {
             throw "A complete JDK (java.exe plus javac.exe) was not found and installation was explicitly skipped."
         }
         Write-Host "A complete JDK was not found; installing $jdkPackageId with WinGet."
-        Invoke-WinGetInstall -PackageId $jdkPackageId
-        Refresh-ProcessPath
+        Invoke-WinGetInstall -PackageId $jdkPackageId `
+            -RequirementDescription "a working JDK with java.exe and javac.exe" `
+            -VerifyInstalled { $null -ne (Find-JdkBin) }
         $directory = Find-JdkBin
         if ($null -eq $directory) {
             throw "WinGet completed, but a matching java.exe and javac.exe could not be resolved."
@@ -581,6 +836,12 @@ function Confirm-Jdk {
 }
 
 function Test-TorchFamily {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("cpu", "cu128")]
+        [string]$Runtime
+    )
+
     $validation = @'
 import importlib.metadata as metadata
 import sys
@@ -605,9 +866,16 @@ if runtime == 'cu128' and (cuda is None or not str(cuda).startswith('12.8')):
     raise SystemExit(f'Expected a CUDA 12.8 PyTorch build, but torch reports {cuda!r}')
 if runtime == 'cu128' and not torch.cuda.is_available():
     raise SystemExit('CUDA 12.8 PyTorch is installed, but no usable CUDA device is available')
+if runtime == 'cu128':
+    # Availability alone only proves that the driver initialized. Exercise a
+    # real kernel and synchronization so setup fails before long model runs do.
+    value = (torch.ones(8, device='cuda') * 2).sum().item()
+    torch.cuda.synchronize()
+    if value != 16:
+        raise SystemExit(f'CUDA computation smoke test returned {value!r}, expected 16')
 print(f'Matched PyTorch family: {actual}; runtime={runtime}; torch CUDA={cuda!r}')
 '@
-    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-c", $validation, $TorchRuntime) `
+    Invoke-NativeCommand -Executable $pythonPath -Arguments @("-c", $validation, $Runtime) `
         -FailureMessage "The installed PyTorch family is not the requested matched runtime."
 }
 
@@ -630,21 +898,39 @@ else:
     return [string]($result.Output | Select-Object -Last 1)
 }
 
+if ($FunctionsOnly) {
+    return
+}
+
 # Module checks below must resolve this repository even when the caller invokes
 # the script from another working directory.
 Push-Location -LiteralPath $projectRoot
 try {
+    if ($env:OS -ne "Windows_NT") {
+        throw "This setup script supports Windows 10 and Windows 11 only."
+    }
     Refresh-ProcessPath
-    $TorchRuntime = Resolve-TorchRuntime -RequestedRuntime $TorchRuntime
+    $selectedTorchRuntime = Resolve-TorchRuntime -RequestedRuntime $TorchRuntime
 
     if (-not (Test-VirtualEnvironment)) {
-        Move-IncompatibleEnvironmentAside
+        # Resolve or install a usable base interpreter before touching the
+        # existing project environment. A second probe protects against a
+        # transient first failure and avoids moving a now-healthy .venv.
         $basePython = Confirm-CompatiblePython
-        Write-Host "Creating the compatible Python project environment at $environmentPath"
-        Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
-            -FailureMessage "Could not create the compatible Python project environment."
-        if (-not (Test-VirtualEnvironment)) {
-            throw "The new .venv did not contain a working Python 3.11-or-newer interpreter."
+        if (Test-VirtualEnvironment) {
+            Write-Warning (
+                "The project environment passed a repeat compatibility check; " +
+                "reusing it without moving any files."
+            )
+        }
+        else {
+            Move-IncompatibleEnvironmentAside
+            Write-Host "Creating the compatible Python project environment at $environmentPath"
+            Invoke-NativeCommand -Executable $basePython -Arguments @("-m", "venv", $environmentPath) `
+                -FailureMessage "Could not create the compatible Python project environment."
+            if (-not (Test-VirtualEnvironment)) {
+                throw "The new .venv did not contain a working Python 3.11-or-newer interpreter."
+            }
         }
     }
     else {
@@ -655,17 +941,17 @@ try {
         -Arguments @("-m", "pip", "install", "--upgrade", "pip", "setuptools<82", "wheel") `
         -FailureMessage "Could not update the Python packaging tools."
 
-    $torchIndex = "https://download.pytorch.org/whl/$TorchRuntime"
-    Write-Host "Installing the matched PyTorch 2.11 family ($TorchRuntime)."
+    $torchIndex = "https://download.pytorch.org/whl/$selectedTorchRuntime"
+    Write-Host "Installing the matched PyTorch 2.11 family ($selectedTorchRuntime)."
     $torchInstallArguments = @(
         "-m", "pip", "install",
         "torch==2.11.0", "torchvision==0.26.0", "torchaudio==2.11.0",
         "--index-url", $torchIndex
     )
     $installedTorchRuntime = Get-InstalledTorchRuntime
-    if ($installedTorchRuntime -ne "missing" -and $installedTorchRuntime -ne $TorchRuntime) {
+    if ($installedTorchRuntime -ne "missing" -and $installedTorchRuntime -ne $selectedTorchRuntime) {
         Write-Host (
-            "Replacing the installed PyTorch runtime ($installedTorchRuntime) with $TorchRuntime."
+            "Replacing the installed PyTorch runtime ($installedTorchRuntime) with $selectedTorchRuntime."
         )
         # PEP 440 treats 2.11.0+cpu as satisfying torch==2.11.0. Force the
         # exact-index wheels only when changing runtime families; requirements
@@ -688,7 +974,7 @@ try {
         -Arguments @("-m", "pip", "install", "-r", $requirementsPath) `
         -FailureMessage "Could not install project requirements."
 
-    Test-TorchFamily
+    Test-TorchFamily -Runtime $selectedTorchRuntime
     $ffmpegDirectory = Confirm-ExactSharedFfmpeg
 
     Invoke-NativeCommand -Executable $pythonPath -Arguments @("-m", "pip", "check") `
@@ -713,26 +999,26 @@ try {
         $textStatus = "SKIPPED by explicit -TextMode Skip"
         Write-Warning "Text setup was explicitly skipped; full multimodal readiness is not claimed."
     }
-    elseif (-not (Test-Path -LiteralPath $rockSteadyJar -PathType Leaf)) {
-        $textStatus = "NOT READY: licensed RockSteady JAR is missing"
-        $message = (
-            "The licensed RockSteady JAR is not redistributed by this repository. " +
-            "Place your licensed copy at exactly:`n  $rockSteadyJar"
-        )
-        if ($TextMode -eq "Require") {
-            throw "$message`nFace is ready now: $faceCommand"
-        }
-        Write-Warning $message
-        Write-Host "After placing the JAR, rerun this setup script; it will install/check the JDK and validate Text."
-    }
     else {
-        Confirm-Jdk
-        Write-Host "Running the Text/RockSteady compile, dictionary and category readiness check."
-        Invoke-NativeCommand -Executable $pythonPath `
-            -Arguments @("-m", "processing.text_analysis", "--check") `
-            -FailureMessage "Text/RockSteady readiness check failed."
-        $textReady = $true
-        $textStatus = "READY"
+        $rockSteadyState = Resolve-RockSteadyJar
+        if (-not $rockSteadyState.Ready) {
+            $textStatus = "NOT READY: $($rockSteadyState.Status)"
+            $message = $rockSteadyState.Detail
+            if ($TextMode -eq "Require") {
+                throw "$message`nFace is ready now: $faceCommand"
+            }
+            Write-Warning $message
+            Write-Host "Restore the tracked JAR, then rerun setup to install/check the JDK and validate Text."
+        }
+        else {
+            Confirm-Jdk
+            Write-Host "Running the Text/RockSteady compile, dictionary and category readiness check."
+            Invoke-NativeCommand -Executable $pythonPath `
+                -Arguments @("-m", "processing.text_analysis", "--check") `
+                -FailureMessage "Text/RockSteady readiness check failed."
+            $textReady = $true
+            $textStatus = "READY"
+        }
     }
 
     Write-Host ""

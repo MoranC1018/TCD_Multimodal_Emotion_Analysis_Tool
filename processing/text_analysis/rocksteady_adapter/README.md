@@ -8,20 +8,25 @@ an authoritative inventory whose identities may be the current
 
 ## Runtime setup
 
-RockSteady is third-party software and its redistribution terms have not been
-established, so the application JAR is intentionally not committed. Put a
-licensed copy at the ignored repository-local path:
+RockSteady is third-party, separately licensed software and is not covered by
+the repository's root MIT License. The project-authorized application JAR is
+versioned with Git LFS at:
 
 ```text
 external/RockSteady/
   rocksteady-desktop-application-0.4#2018-05-16.jar
 ```
 
-Alternatively set `MULTIMODAL_EMOTION_ROCKSTEADY_HOME` or create the ignored
-`config.local.json` beside this README. A JDK with both `java` and `javac` on
-`PATH` is required; the Java bridge compiles automatically when its source
-or application JAR changes. Compilation is content-addressed, atomic, and held
-under a shared build lock, so concurrent Text jobs cannot corrupt `build/classes`.
+During setup, a missing JAR or LFS pointer triggers a pull limited to this exact
+path. The resulting bytes must match the approved 67,417,737-byte artifact and
+SHA-256 `02ddb9b418952df4b109fa8ca1e6a59000115af2d4b81aca29d555e28a448534`.
+If automatic materialization is unavailable, install Git LFS and run
+`git lfs pull` manually. Alternatively set `MULTIMODAL_EMOTION_ROCKSTEADY_HOME`
+or create the ignored `config.local.json` beside this README. A JDK with both
+`java` and `javac` on `PATH` is required; the Java bridge compiles automatically
+when its source or application JAR changes. Compilation is content-addressed,
+atomic, and held under a shared build lock, so concurrent Text jobs cannot
+corrupt `build/classes`.
 
 ## Run
 

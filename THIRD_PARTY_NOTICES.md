@@ -69,10 +69,13 @@ project's root MIT License.
 A **Java Development Kit** supplies `java` and `javac` for the Text adapter.
 The JDK remains governed by its distributor's licence and notices.
 
-**RockSteady 0.4** is an external, separately obtained dependency. Its JAR and
-dictionaries are deliberately not distributed by this repository or downloaded
-by `scripts/setup.ps1`. Users must provide a lawfully licensed copy and comply
-with its own terms.
+**RockSteady 0.4** is third-party, separately licensed software and is not
+licensed under this project's root MIT License. A project-authorized copy of
+the application JAR is versioned through Git LFS at
+`external/RockSteady/rocksteady-desktop-application-0.4#2018-05-16.jar`;
+downstream use and redistribution remain subject to RockSteady's own terms.
+The setup script only materializes and validates this exact tracked LFS object;
+it does not obtain an alternative RockSteady distribution.
 
 ## Other Dependencies, Models, And Marks
 

@@ -2,10 +2,12 @@
 # Multimodal Emotion Analysis Tool - local and generated files
 # ============================================================
 
-# --- RockSteady (ownership/licensing unconfirmed - do not publish) ---
-external/
-**/external/RockSteady/
-**/rocksteady-desktop-application*.jar
+# --- External runtimes (local by default) ---
+# The project-authorized RockSteady runtime below is the sole versioned file.
+external/*
+!external/RockSteady/
+external/RockSteady/*
+!external/RockSteady/rocksteady-desktop-application-0.4#2018-05-16.jar
 
 # RockSteady adapter local runtime/configuration and generated artifacts
 processing/text_analysis/rocksteady_adapter/config.local.json
@@ -70,6 +72,8 @@ youtube_metadata_cache.json
 # --- Temporary / scratch files ---
 .venv/
 .venv-*/
+# Backups produced by setup.ps1 releases before the hyphenated naming fix.
+.venv.incompatible-*/
 tmp/
 temp/
 tempdebugging/
