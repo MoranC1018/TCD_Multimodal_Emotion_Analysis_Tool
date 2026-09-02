@@ -66,6 +66,7 @@ TEXT_DIMENSIONS = (
     "Affiliation / Social orientation",
 )
 TEXT_CONSTRUCTS = (*TEXT_SENTIMENT, *TEXT_DIMENSIONS)
+TEXT_COMPARISON_SCALE = 100.0
 ORDINAL_LABELS = ("1st", "2nd", "3rd", "4th", "5th")
 GROUP_LABEL_COLUMNS = (2, 7, 11, 15)
 GROUP_SPEAKER_COLUMNS = ((4, 5, 6), (8, 9, 10), (12, 13, 14), (16, 17, 18))
@@ -178,6 +179,17 @@ class TextConstructSummary:
     source_path: Path
     grain: Literal["speaker", "source"] = "speaker"
     source_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ComparisonConstruct:
+    """One compact comparison row and its exactly-once modality mappings."""
+
+    label: str
+    video_metrics: tuple[tuple[str, str], ...]
+    audio_metrics: tuple[tuple[str, str], ...]
+    text_metrics: tuple[tuple[str, str], ...]
+    fill_color: str
 
 
 @dataclass(frozen=True)
@@ -851,11 +863,15 @@ def _append_optional_audio_warning(
 ) -> None:
     if report is None:
         return
-    missing = [metric for metric in AUDIO_METRICS if metric not in report]
+    missing = [
+        metric
+        for metric in AUDIO_METRICS
+        if metric not in report or not any(report[metric].available)
+    ]
     if missing:
         warnings.append(
             f"Legacy audio report for {speaker.display_name} lacks optional emotions "
-            f"{', '.join(missing)}; cells are blank."
+            f"{', '.join(missing)}; unavailable values are omitted from speaker displays."
         )
 
 
@@ -1023,11 +1039,24 @@ def _write_linked_audio_sheet(
     positions = _linked_speaker_positions(groups)
     linked_layout = _linked_layout(groups)
     source_count = _report_source_count(reports)
+    selected_speaker_ids = {
+        speaker.speaker_id for group in groups for speaker in group.speakers
+    }
+    visible_metrics = tuple(
+        metric
+        for metric in AUDIO_METRICS
+        if any(
+            (series := reports.get(speaker_id, {}).get(metric)) is not None
+            and any(series.available)
+            for speaker_id in selected_speaker_ids
+        )
+    )
     layout = (
         AUDIO_LAYOUT
         if source_count == LEGACY_MINIMUM_LAYOUT_SOURCE_COUNT
+        and visible_metrics == AUDIO_METRICS
         else _measure_layout(
-            AUDIO_METRICS,
+            visible_metrics,
             count_gap=0,
             count_rows=3 + source_count,
             count_starts_at_heading=False,
@@ -1037,7 +1066,7 @@ def _write_linked_audio_sheet(
     _set_default_font(sheet, layout.max_row, linked_layout.overall_column, 9, min_column=2)
     _set_linked_column_widths(sheet, linked_layout)
     source_cells = _write_linked_headlines(
-        sheet, AUDIO_METRICS, reports, groups, warnings, headline_policy
+        sheet, visible_metrics, reports, groups, warnings, headline_policy
     )
     sheet.cell(layout.count_heading, 2, "COUNT")
     for row, label in enumerate(
@@ -1049,7 +1078,12 @@ def _write_linked_audio_sheet(
         report = reports.get(speaker.speaker_id)
         if report is None:
             continue
-        series = report[AUDIO_METRICS[0]]
+        series = next(
+            (report[metric] for metric in visible_metrics if metric in report),
+            None,
+        )
+        if series is None:
+            continue
         counts = _observed_counts(series)
         sheet.cell(layout.count_start, column, sum(counts))
         sheet.cell(layout.count_start + 1, column, sum(counts) / len(counts))
@@ -1061,7 +1095,7 @@ def _write_linked_audio_sheet(
             if available:
                 sheet.cell(source_index, column, count)
     sheet.cell(layout.detail_heading, 2, "Measures")
-    for metric_index, metric in enumerate(AUDIO_METRICS):
+    for metric_index, metric in enumerate(visible_metrics):
         start_row = layout.detail_start + metric_index * source_count
         sheet[f"B{start_row}"] = metric
         for source_index in range(source_count):
@@ -1178,6 +1212,7 @@ def _write_linked_video_sheet(
 def _write_definition_sheets(
     book: Workbook,
     video_provenance: Sequence[VideoOutputProvenance] = (),
+    audio_metrics: Sequence[str] = AUDIO_METRICS,
 ) -> None:
     """Port the historical static definition sheets without analytical values."""
 
@@ -1211,12 +1246,13 @@ def _write_definition_sheets(
         text_sheet.row_dimensions[row].height = height
     for row, height in {3: 59, 4: 44.25, 5: 29.5, 6: 73.75, 7: 29.5, 10: 44.25, 11: 103.25, 12: 59, 13: 73.75}.items():
         speech_sheet.row_dimensions[row].height = height
-    _write_measure_guide(book, video_provenance)
+    _write_measure_guide(book, video_provenance, audio_metrics)
 
 
 def _write_measure_guide(
     book: Workbook,
     video_provenance: Sequence[VideoOutputProvenance] = (),
+    audio_metrics: Sequence[str] = AUDIO_METRICS,
 ) -> None:
     """Document every displayed measure from the same ordered metric contracts."""
 
@@ -1239,7 +1275,10 @@ def _write_measure_guide(
         "Channel identifiers",
     )
     sheet.append(headers)
-    cross_scale_note = "Cross-modality scales are not directly comparable without rescaling."
+    cross_scale_note = (
+        "Numeric ranges may overlap after Text x100 scaling, but constructs are not calibrated "
+        "for direct cross-modality interpretation."
+    )
 
     def add(
         section: str,
@@ -1279,7 +1318,7 @@ def _write_measure_guide(
     add(
         "Emotions",
         "Audio",
-        AUDIO_EMOTIONS,
+        tuple(metric for metric in AUDIO_EMOTIONS if metric in audio_metrics),
         "0..100",
         "Model probability transformed from source 0..1 to output 0..100.",
         {"Joy": "Happiness"},
@@ -1287,14 +1326,14 @@ def _write_measure_guide(
     add(
         "Valence",
         "Audio",
-        AUDIO_VALENCE,
+        tuple(metric for metric in AUDIO_VALENCE if metric in audio_metrics),
         "-100..100",
         "Model value transformed from source 0..1 to output -100..100.",
     )
     add(
         "Dimensions",
         "Audio",
-        AUDIO_DIMENSIONS,
+        tuple(metric for metric in AUDIO_DIMENSIONS if metric in audio_metrics),
         "0..100",
         "Model probability transformed from source 0..1 to output 0..100.",
     )
@@ -1397,8 +1436,8 @@ def _write_measure_guide(
         "Sentiment",
         "Text",
         TEXT_SENTIMENT[:2],
-        "0..1",
-        "Imported transcript sentiment score; legacy valence-named headers are aliases only.",
+        "0..100",
+        "Imported transcript sentiment score multiplied by 100 in combined-workbook postprocessing; legacy valence-named headers are aliases only.",
         {
             "Positive Sentiment": "Positive Sentiment (legacy: Positive valence)",
             "Negative Sentiment": "Negative Sentiment (legacy: Negative valence)",
@@ -1408,15 +1447,34 @@ def _write_measure_guide(
         "Valence",
         "Text",
         ("Text Valence",),
-        "-1..1",
-        "Recomputed as (Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment); blank for a zero denominator.",
+        "-100..100",
+        "Recomputed as (Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment), then multiplied by 100 in combined-workbook postprocessing; blank for a zero denominator.",
     )
     add(
         "Dimensions",
         "Text",
         TEXT_DIMENSIONS,
-        "-1..1",
-        "Imported transcript dimension score.",
+        "-100..100",
+        "Imported transcript dimension score multiplied by 100 in combined-workbook postprocessing; signed values retain their sign.",
+    )
+    sheet.append(
+        (
+            "Comparison",
+            "Face / Audio / Text",
+            "Min / Max",
+            "Classified construct-box measures",
+            "Construct Comparison",
+            "Ranked raw scores",
+            "Min selects the lowest available measure inside each modality box; Max selects the highest. Each column then ranks the selected Face, Audio, and Text values from highest to lowest, breaking equal-score ties in Face, Audio, Text order. Missing and no-direct measures are excluded. The ranking is descriptive because modality constructs are not calibrated.",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
     )
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
@@ -1883,8 +1941,9 @@ def _write_text_construct_sheet(
         name="Aptos Narrow", size=11, bold=True
     )
     sheet["B8"] = (
-        "Transcript lexical constructs are imported proxies on their documented text scales; "
-        "they are not calibrated facial or audio emotion measurements."
+        "Transcript lexical constructs are imported proxies multiplied by 100 for the "
+        "combined comparison; signed values retain their sign. They are not calibrated "
+        "facial or audio emotion measurements."
     )
     sheet["B8"].alignment = Alignment(wrap_text=True, vertical="top")
     sheet.merge_cells(
@@ -1907,7 +1966,7 @@ def _write_text_construct_sheet(
             summary = summaries.get(speaker.speaker_id)
             value = summary.constructs.get(construct) if summary is not None else None
             if value is not None:
-                cell.value = value
+                cell.value = value * TEXT_COMPARISON_SCALE
                 valid_cells.append(coordinate)
         overall = f"{get_column_letter(layout.overall_column)}{row}"
         if construct == "Text Valence":
@@ -1916,7 +1975,10 @@ def _write_text_construct_sheet(
             if positive is not None and negative is not None:
                 pos = positive.overall
                 neg = negative.overall
-                sheet[overall] = f'=IF(OR({pos}="",{neg}="",{pos}+{neg}=0),"",({pos}-{neg})/({pos}+{neg}))'
+                sheet[overall] = (
+                    f'=IF(OR({pos}="",{neg}="",{pos}+{neg}=0),"",'
+                    f'{TEXT_COMPARISON_SCALE:g}*({pos}-{neg})/({pos}+{neg}))'
+                )
             else:
                 sheet[overall] = ""
         else:
@@ -1942,26 +2004,60 @@ def _write_text_construct_sheet(
     return text_cells
 
 
-_COMPARISON_ROWS = (
-    *(("Emotions", metric, metric if metric in VIDEO_EMOTIONS else None,
-       metric if metric in AUDIO_EMOTIONS else None, None, "EAF4EC")
-      for metric in (*AUDIO_EMOTIONS, "Confusion") if metric in set(AUDIO_EMOTIONS + VIDEO_EMOTIONS)),
-    ("Sentiment", "Sentimentality", "Sentimentality", None, None, "E8F0FA"),
-    ("Sentiment", "Positive Sentiment", None, None, "Positive Sentiment", "E8F0FA"),
-    ("Sentiment", "Negative Sentiment", None, None, "Negative Sentiment", "E8F0FA"),
-    ("Valence", "Valence", "Valence", "Valence", "Text Valence", "F8ECEC"),
-    ("Valence", "Adaptive Valence", "Adaptive Valence", None, None, "F8ECEC"),
-    ("Dimensions", "Arousal", "Arousal", "Arousal", "Arousal / Activation", "FFF6E3"),
-    ("Dimensions", "Dominance", None, "Dominance", "Dominance / Power", "FFF6E3"),
-    ("Dimensions", "Engagement", "Engagement", None, None, "FFF6E3"),
-    ("Dimensions", "Adaptive Engagement", "Adaptive Engagement", None, None, "FFF6E3"),
-    (
-        "Dimensions",
-        "Affiliation / Social orientation",
-        None,
-        None,
-        "Affiliation / Social orientation",
+COMPARISON_CONSTRUCTS = (
+    ComparisonConstruct(
+        "Positive Sentiment",
+        (("Joy", "Joy"),),
+        (("Joy", "Joy"),),
+        (("Positive Sentiment", "Positive Sentiment"),),
+        "EAF4EC",
+    ),
+    ComparisonConstruct(
+        "Negative Sentiment",
+        tuple((metric, metric) for metric in ("Anger", "Contempt", "Disgust", "Fear", "Sadness")),
+        tuple((metric, metric) for metric in ("Anger", "Contempt", "Disgust", "Fear", "Sadness")),
+        (("Negative Sentiment", "Negative Sentiment"),),
+        "F8ECEC",
+    ),
+    ComparisonConstruct(
+        "Neutral / Other",
+        tuple((metric, metric) for metric in ("Neutral", "Confusion", "Sentimentality")),
+        (("Neutral", "Neutral"), ("Other", "Other")),
+        (),
+        "F1F1F1",
+    ),
+    ComparisonConstruct(
+        "Arousal / Activation",
+        (
+            ("Surprise", "Surprise"),
+            ("Arousal", "Arousal"),
+            ("Engagement", "Engagement"),
+            ("Adaptive Engagement", "Adaptive Engagement"),
+        ),
+        (("Surprise", "Surprise"), ("Arousal", "Arousal")),
+        (("Arousal / Activation", "Arousal / Activation"),),
         "FFF6E3",
+    ),
+    ComparisonConstruct(
+        "Valence",
+        (("Valence", "Valence"), ("Adaptive Valence", "Adaptive Valence")),
+        (("Valence", "Valence"),),
+        (("Text Valence", "Text Valence"),),
+        "E8F1F8",
+    ),
+    ComparisonConstruct(
+        "Dominance / Power",
+        (),
+        (("Dominance", "Dominance"),),
+        (("Dominance / Power", "Dominance / Power"),),
+        "F2ECF8",
+    ),
+    ComparisonConstruct(
+        "Affiliation / Social orientation",
+        (),
+        (),
+        (("Affiliation / Social orientation", "Affiliation / Social orientation"),),
+        "F5F0F2",
     ),
 )
 
@@ -1985,30 +2081,117 @@ def _speaker_metric_references(
     return tuple(f"'{sheet}'!{coordinate}" for coordinate in coordinates)
 
 
-def _comparison_metric_formula(
+def _speaker_metric_is_available(
+    book: Workbook,
     source_cells: Mapping[str, CombinedMetricCells],
     modality: str,
-    metric: str | None,
+    metric: str,
     speaker: Speaker,
-) -> str | None:
-    if metric is None:
-        return None
-    references = _speaker_metric_references(source_cells, modality, metric, speaker)
-    if not references:
-        return None
+) -> bool:
     cells = source_cells.get(f"{modality}|{metric}")
+    if cells is None:
+        return False
     candidate_ids = tuple(dict.fromkeys((speaker.speaker_id, *speaker.aliases)))
-    if cells is not None and cells.speaker_observations and not any(
-        any(value is not None for value in cells.speaker_observations[index])
+    return any(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
         for index, speaker_id in enumerate(cells.speaker_ids)
         if speaker_id in candidate_ids
-    ):
+        for value in (book[cells.sheet][cells.speaker_cells[index]].value,)
+    )
+
+
+def _comparison_box_formula(
+    book: Workbook,
+    source_cells: Mapping[str, CombinedMetricCells],
+    modality: str,
+    metrics: Sequence[tuple[str, str]],
+    speaker: Speaker,
+) -> str | None:
+    """Build one multiline, formula-linked modality box for a construct row."""
+
+    if not metrics:
         return None
-    if len(references) == 1:
-        reference = references[0]
-        return f'=IF(ISNUMBER({reference}),{reference},"Unavailable")'
-    joined = ",".join(references)
-    return f'=IF(COUNT({joined})>0,AVERAGE({joined}),"Unavailable")'
+    entries: list[tuple[str, tuple[str, ...], str]] = []
+    for label, metric in metrics:
+        if not _speaker_metric_is_available(book, source_cells, modality, metric, speaker):
+            continue
+        references = _speaker_metric_references(source_cells, modality, metric, speaker)
+        expression = references[0] if len(references) == 1 else f"AVERAGE({','.join(references)})"
+        entries.append((label, references, expression))
+    if not entries:
+        return None
+    all_references = ",".join(
+        reference for _, references, _ in entries for reference in references
+    )
+    lines = [
+        f'"{label}: "&IF(COUNT({",".join(references)})>0,TEXT({expression},"0.00"),"")'
+        for label, references, expression in entries
+    ]
+    return f'=IF(COUNT({all_references})=0,"",{"&CHAR(10)&".join(lines)})'
+
+
+def _speaker_metric_numeric_value(
+    book: Workbook,
+    source_cells: Mapping[str, CombinedMetricCells],
+    modality: str,
+    metric: str,
+    speaker: Speaker,
+) -> float | None:
+    """Read the numeric speaker means that feed the linked comparison formula."""
+
+    cells = source_cells.get(f"{modality}|{metric}")
+    if cells is None:
+        return None
+    candidate_ids = tuple(dict.fromkeys((speaker.speaker_id, *speaker.aliases)))
+    values: list[float] = []
+    for index, speaker_id in enumerate(cells.speaker_ids):
+        if speaker_id not in candidate_ids:
+            continue
+        value = book[cells.sheet][cells.speaker_cells[index]].value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if math.isfinite(numeric):
+                values.append(numeric)
+    return statistics.fmean(values) if values else None
+
+
+def _ranked_construct_extrema(
+    book: Workbook,
+    source_cells: Mapping[str, CombinedMetricCells],
+    construct: ComparisonConstruct,
+    speaker: Speaker,
+    extreme: Literal["min", "max"],
+) -> str | None:
+    """Select one extreme per modality, then rank those selections high-to-low."""
+
+    modality_specs = (
+        ("Face", "Video", construct.video_metrics),
+        ("Audio", "Audio", construct.audio_metrics),
+        ("Text", "Text", construct.text_metrics),
+    )
+    selected: list[tuple[float, int, str, str]] = []
+    for modality_order, (display_name, source_name, metrics) in enumerate(modality_specs):
+        candidates: list[tuple[float, int, str]] = []
+        for metric_order, (label, metric) in enumerate(metrics):
+            value = _speaker_metric_numeric_value(
+                book, source_cells, source_name, metric, speaker
+            )
+            if value is not None:
+                candidates.append((value, metric_order, label))
+        if not candidates:
+            continue
+        chooser = min if extreme == "min" else max
+        value, _, label = chooser(candidates, key=lambda item: item[0])
+        selected.append((value, modality_order, display_name, label))
+    if not selected:
+        return None
+    selected.sort(key=lambda item: (-item[0], item[1]))
+    return "\n".join(
+        f"{display_name}: {label} {(0.0 if abs(value) < 0.005 else value):.2f}"
+        for value, _, display_name, label in selected
+    )
 
 
 def _write_construct_comparison_sheet(
@@ -2019,12 +2202,14 @@ def _write_construct_comparison_sheet(
     """Create the at-a-glance construct tables using formula-linked source means."""
 
     sheet = book.create_sheet("Construct Comparison")
-    modality_headers = ("Video", "Audio", "Text")
+    modality_headers = ("Face", "Audio", "Text")
     largest_group = max((len(group.speakers) for group in groups), default=0)
     table_count = max(3, largest_group)
     table_width = 1 + len(modality_headers)
-    table_starts = tuple(1 + (index * (table_width + 1)) for index in range(table_count))
-    last_column = table_starts[-1] + table_width - 1
+    suffix_width = 4
+    panel_width = table_width + suffix_width
+    table_starts = tuple(1 + (index * panel_width) for index in range(table_count))
+    last_column = table_starts[-1] + panel_width - 1
     thin_border = Border(
         left=Side(style="thin", color="B8B8B8"),
         right=Side(style="thin", color="B8B8B8"),
@@ -2041,13 +2226,17 @@ def _write_construct_comparison_sheet(
 
     sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_column)
     sheet["A2"] = (
-        "Video and Audio values are formula-linked to the selected speaker means. "
-        "Text remains blank unless compatible text results are imported."
+        "Face, Audio, and Text boxes are formula-linked to speaker means; Text is multiplied "
+        "by 100 in postprocessing. Min and Max select one extreme per modality box, then rank "
+        "the selected modalities from highest to lowest. Missing measures are omitted rather "
+        "than displayed as zero or placeholders. These are descriptive raw-score rankings, "
+        "not calibrated cross-modal effect comparisons."
     )
     sheet["A2"].font = Font(name="Aptos", size=10, italic=True, color="333333")
     sheet["A2"].fill = PatternFill("solid", fgColor="ECECEC")
     sheet["A2"].alignment = Alignment(vertical="center")
-    sheet.row_dimensions[2].height = 24
+    sheet["A2"].alignment = Alignment(vertical="center", wrap_text=True)
+    sheet.row_dimensions[2].height = 44
 
     group_row = 4
     for group in groups:
@@ -2084,54 +2273,86 @@ def _write_construct_comparison_sheet(
             title.font = Font(name="Aptos", size=11, bold=True, color="FFFFFF")
             title.fill = PatternFill("solid", fgColor="444444")
             title.alignment = Alignment(vertical="center")
+            extrema_title = sheet.cell(title_row, table_start + 5, "Ranked extrema")
+            sheet.merge_cells(
+                start_row=title_row,
+                start_column=table_start + 5,
+                end_row=title_row,
+                end_column=table_start + 6,
+            )
+            extrema_title.font = Font(name="Aptos", size=10, bold=True, color="FFFFFF")
+            extrema_title.fill = PatternFill("solid", fgColor="444444")
+            extrema_title.alignment = Alignment(horizontal="center", vertical="center")
             sheet.row_dimensions[title_row].height = 23
 
-            for offset, header in enumerate(("Section / measure", *modality_headers)):
+            for offset, header in enumerate(("Psychological construct", *modality_headers)):
                 cell = sheet.cell(header_row, table_start + offset, header)
                 cell.font = Font(name="Aptos", size=10, bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="666666")
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
                 cell.border = thin_border
+            for offset, header in ((5, "Min"), (6, "Max")):
+                cell = sheet.cell(header_row, table_start + offset, header)
+                cell.font = Font(name="Aptos", size=10, bold=True, color="FFFFFF")
+                cell.fill = PatternFill(
+                    "solid", fgColor="4F81BD" if header == "Min" else "548235"
+                )
+                cell.alignment = Alignment(horizontal="center", vertical="top")
+                cell.border = thin_border
             sheet.row_dimensions[header_row].height = 31
 
-            for row_offset, (
-                section,
-                label,
-                video_metric,
-                audio_metric,
-                text_metric,
-                fill_color,
-            ) in enumerate(_COMPARISON_ROWS):
+            for row_offset, construct in enumerate(COMPARISON_CONSTRUCTS):
                 row = first_data_row + row_offset
-                sheet.cell(row, table_start, f"{section}: {label}")
-                sheet.cell(row, table_start + 1).value = _comparison_metric_formula(
-                    source_cells, "Video", video_metric, speaker
+                sheet.cell(row, table_start, construct.label)
+                sheet.cell(row, table_start + 1).value = _comparison_box_formula(
+                    book, source_cells, "Video", construct.video_metrics, speaker
                 )
-                next_column = table_start + 2
-                sheet.cell(row, next_column).value = _comparison_metric_formula(
-                    source_cells, "Audio", audio_metric, speaker
+                sheet.cell(row, table_start + 2).value = _comparison_box_formula(
+                    book, source_cells, "Audio", construct.audio_metrics, speaker
                 )
-                sheet.cell(row, next_column + 1).value = _comparison_metric_formula(
-                    source_cells, "Text", text_metric, speaker
+                sheet.cell(row, table_start + 3).value = _comparison_box_formula(
+                    book, source_cells, "Text", construct.text_metrics, speaker
+                )
+                sheet.cell(row, table_start + 5).value = _ranked_construct_extrema(
+                    book, source_cells, construct, speaker, "min"
+                )
+                sheet.cell(row, table_start + 6).value = _ranked_construct_extrema(
+                    book, source_cells, construct, speaker, "max"
                 )
                 for column in range(table_start, table_end + 1):
                     cell = sheet.cell(row, column)
                     cell.font = Font(name="Aptos", size=9, bold=column == table_start)
                     cell.fill = PatternFill(
-                        "solid", fgColor="FAFAFA" if column == table_end else fill_color
+                        "solid",
+                        fgColor="FAFAFA" if column == table_end else construct.fill_color,
                     )
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
                     cell.border = thin_border
-                sheet.row_dimensions[row].height = 43
+                for offset, color in ((5, "EAF2F8"), (6, "E2F0D9")):
+                    cell = sheet.cell(row, table_start + offset)
+                    cell.font = Font(name="Aptos", size=9)
+                    cell.fill = PatternFill("solid", fgColor=color)
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+                    cell.border = thin_border
+                max_lines = max(
+                    len(construct.video_metrics),
+                    len(construct.audio_metrics),
+                    len(construct.text_metrics),
+                    3,
+                )
+                sheet.row_dimensions[row].height = max(52, 14 * max_lines + 16)
 
-        group_row += len(_COMPARISON_ROWS) + 4
+        group_row += len(COMPARISON_CONSTRUCTS) + 4
 
     for table_start in table_starts:
         sheet.column_dimensions[get_column_letter(table_start)].width = 22
-        for offset in range(1, table_width):
-            sheet.column_dimensions[get_column_letter(table_start + offset)].width = 23
-    for table_start in table_starts[:-1]:
-        sheet.column_dimensions[get_column_letter(table_start + table_width)].width = 3
+        sheet.column_dimensions[get_column_letter(table_start + 1)].width = 28
+        sheet.column_dimensions[get_column_letter(table_start + 2)].width = 26
+        sheet.column_dimensions[get_column_letter(table_start + 3)].width = 28
+        sheet.column_dimensions[get_column_letter(table_start + 4)].width = 3
+        sheet.column_dimensions[get_column_letter(table_start + 5)].width = 28
+        sheet.column_dimensions[get_column_letter(table_start + 6)].width = 28
+        sheet.column_dimensions[get_column_letter(table_start + 7)].width = 3
     sheet.freeze_panes = "A3"
     sheet.sheet_view.showGridLines = False
 
@@ -2239,18 +2460,21 @@ def build_combined_workbook(
     warnings: list[str] = []
     source_cells: dict[str, CombinedMetricCells] = {}
     quantitative_sheets: list[str] = []
+    visible_audio_metrics: tuple[str, ...] = ()
     if audio_reports:
         audio = book.create_sheet("Audio")
+        audio_cells = _write_linked_audio_sheet(
+            audio, audio_reports, groups, warnings, headline_policy
+        )
+        visible_audio_metrics = tuple(audio_cells)
         source_cells.update(
             {
                 f"Audio|{metric}": cells
-                for metric, cells in _write_linked_audio_sheet(
-                    audio, audio_reports, groups, warnings, headline_policy
-                ).items()
+                for metric, cells in audio_cells.items()
             }
         )
         quantitative_sheets.append("Audio")
-    _write_definition_sheets(book, video_provenance)
+    _write_definition_sheets(book, video_provenance, visible_audio_metrics)
     if video_reports:
         video = book.create_sheet("Video", book.index(book["Domain Def Text"]) + 1)
         source_cells.update(

@@ -37,30 +37,48 @@ The combined workbook separates measures into four direct semantic sections:
   seven primary-face probabilities to `0..100`; measures that provider does
   not produce, including Contempt and Confusion, remain blank.
 - **Sentiment:** Video Sentimentality is `0..100`. Text Positive Sentiment and
-  Negative Sentiment are `0..1`. Text imports also accept legacy
+  Negative Sentiment are imported on `0..1` and multiplied by `100` for the
+  combined workbook's `0..100` display. Text imports also accept legacy
   `Positive valence` and `Negative valence` headers, while preferring canonical
   sentiment headers when both are present.
 - **Valence:** Audio Valence converts source `0..1` to `-100..100` using
   `(raw * 200) - 100`. Video Valence and Adaptive Valence are `-100..100`.
   Native Face valence converts source `-1..1` to `-100..100`.
   Text Valence is `(Positive Sentiment - Negative Sentiment) / (Positive
-  Sentiment + Negative Sentiment)` on `-1..1` and is blank when its denominator
-  is zero. Joy and Valence are never used as Positive/Negative Sentiment proxies.
+  Sentiment + Negative Sentiment)` on source scale `-1..1`, multiplied by `100`
+  for workbook scale `-100..100`, and blank when its denominator is zero. Joy
+  and Valence are never used as Positive/Negative Sentiment proxies.
 - **Dimensions:** Audio Arousal and Dominance convert source `0..1` to
   `0..100`. iMotions Video Engagement and Adaptive Engagement are `0..100`.
   Native Face Arousal converts source `-1..1` to `-100..100` and remains
   explicitly named `Arousal`; it is never relabelled or substituted as
   Engagement. Text Arousal / Activation, Dominance / Power, and Affiliation /
-  Social orientation are `-1..1`.
+  Social orientation are imported on `-1..1` and multiplied by `100` for the
+  workbook; signed values retain their sign.
 
 The **Measure Guide** sheet is non-quantitative and has the columns Section,
 Modality, Display measure, Imported source label, Workbook sheet, Output range,
-and Transformation/meaning. It states that cross-modality scales are not
-directly comparable without rescaling and is not given a probability mirror.
-Valid legacy audio reports that lack optional emotion classes show blank cells
-plus one warning; new full reports retain all nine audio emotions. Action
-units, muscles, and tones remain in detailed/raw outputs rather than this
-combined emotional workbook.
+and Transformation/meaning. It states that overlapping numeric ranges after
+Text `x100` scaling do not make modalities calibrated equivalents and is not
+given a probability mirror.
+For the selected speakers, Audio rows and Measure Guide entries are emitted only
+for measures with at least one numeric observation. Within a speaker panel,
+unavailable optional Audio emotions are omitted rather than shown as blanks or
+zeros; numeric zero remains a valid observation. New full reports retain all
+nine audio emotions. Action units, muscles, and tones remain in detailed/raw
+outputs rather than this combined emotional workbook.
+
+The **Construct Comparison** sheet groups all canonical non-Action-Unit
+measures into seven ordered heuristic boxes: Positive Sentiment, Negative
+Sentiment, Neutral / Other, Arousal / Activation, Valence, Dominance / Power,
+and Affiliation / Social orientation. All 15 Video, 12 Audio, and six Text
+measures are assigned exactly once. Each speaker panel is followed by four
+columns: a blank gutter, `Min`, `Max`, and a blank gutter. `Min` chooses the
+lowest measure inside each available Face, Audio, and Text box; `Max` chooses
+the highest. Both columns then rank those modality selections from highest to
+lowest, with Face, Audio, Text tie order. Missing and no-direct boxes are blank
+and excluded. The extrema are descriptive raw-score summaries, not calibrated
+cross-modal effects.
 
 Both supported providers populate the same canonical `Video` worksheet; no
 provider-specific quantitative sheet is retained. Missing provider measures

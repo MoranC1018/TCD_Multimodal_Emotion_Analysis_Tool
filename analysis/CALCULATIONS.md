@@ -140,27 +140,44 @@ their labels or signs look similar. Its four direct-mapping sections are:
   The distinct `Py-Feat / Native Face` provider contributes its seven mapped
   primary-face probabilities on `0..100`; it is never labelled AFFDEX.
 - **Sentiment:** Video Sentimentality uses `0..100`. Text Positive Sentiment
-  and Negative Sentiment use `0..1`. `Positive valence` and `Negative valence`
-  are legacy text-header aliases only; canonical sentiment headers take
-  precedence when both are present.
+  and Negative Sentiment are imported on source scale `0..1`, then multiplied
+  by `100` when written to the combined workbook. `Positive valence` and
+  `Negative valence` are legacy text-header aliases only; canonical sentiment
+  headers take precedence when both are present.
 - **Valence:** Audio Valence uses `(raw * 200) - 100` from source `0..1` to
   output `-100..100`. Video Valence and Adaptive Valence use `-100..100`.
   Native Face valence and arousal use `-100..100`. Text Valence uses
   `(Positive Sentiment - Negative Sentiment) / (Positive Sentiment + Negative Sentiment)`
-  on `-1..1` and is blank when the denominator is zero. Neither Joy nor
+  on source scale `-1..1`, then is multiplied by `100` for workbook scale
+  `-100..100`; it is blank when the denominator is zero. Neither Joy nor
   Valence is used as a Positive/Negative Sentiment proxy.
 - **Dimensions:** Audio Arousal and Dominance use source probability `* 100`
   and output `0..100`. Video Engagement and Adaptive Engagement use
   `0..100`. Text Arousal / Activation, Dominance / Power, and Affiliation /
-  Social orientation use `-1..1`.
+  Social orientation are imported on source scale `-1..1`, then multiplied by
+  `100` for workbook scale `-100..100`; negative values retain their sign.
 
-Cross-modality scales are not directly comparable without rescaling. The
+The numeric ranges overlap after the requested Text `x100` conversion, but the
+lexical, facial, and audio constructs are not calibrated equivalents. The
 non-quantitative **Measure Guide** is generated from these same ordered metric
 constants and records Section, Modality, Display measure, Imported source
-label, Workbook sheet, Output range, and Transformation/meaning. Missing
-optional classes in valid legacy audio reports remain blank with one warning;
-full new reports retain all nine audio emotions. Action units, muscles, and
-tones are deliberately outside the combined emotional workbook.
+label, Workbook sheet, Output range, and Transformation/meaning. Audio rows and
+guide entries are emitted only for measures with numeric observations among the
+selected speakers. Within a speaker panel, unavailable optional Audio classes
+are omitted; numeric zero is retained. Full new reports retain all nine audio
+emotions. Action units, muscles, and tones are deliberately outside the
+combined emotional workbook.
+
+The **Construct Comparison** sheet uses seven ordered heuristic display
+families: Positive Sentiment, Negative Sentiment, Neutral / Other, Arousal /
+Activation, Valence, Dominance / Power, and Affiliation / Social orientation.
+Together they cover all 15 Video measures, all 12 Audio measures, and all six
+Text measures exactly once; Action Units remain excluded. For each row and
+modality box, `Min` selects its lowest available score and `Max` selects its
+highest. Each result column then sorts those Face, Audio, and Text selections
+from highest to lowest, breaking ties in Face, Audio, Text order. Missing and
+no-direct boxes remain blank and do not enter the ranking. These are descriptive
+raw-score extrema, not calibrated cross-modal effect comparisons.
 
 For a native Text profile, Text Valence is recomputed from the selected
 SourceID positive and negative totals. Averaging per-source valences would give

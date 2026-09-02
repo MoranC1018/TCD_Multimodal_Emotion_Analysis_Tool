@@ -1009,12 +1009,12 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertEqual(tree_hash(text_root), before)
         book = openpyxl.load_workbook(result.workbook_path, data_only=False)
-        self.assertEqual(book["Text sentiment"]["D2"].value, 0.2)
+        self.assertEqual(book["Text sentiment"]["D2"].value, 20.0)
         positive_row = next(
             row
             for row in range(1, book["Construct Comparison"].max_row + 1)
             if book["Construct Comparison"].cell(row, 1).value
-            == "Sentiment: Positive Sentiment"
+            == "Positive Sentiment"
         )
         self.assertIn(
             "'Text sentiment'!D2",
