@@ -603,18 +603,21 @@ class LauncherHttpServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionAbortedError,
+    ConnectionResetError,
+)
+
+
+class _ClientDisconnected(Exception):
+    """Signal a disconnect observed while reading the local HTTP client."""
+
+
 class VideoStackUiHandler(BaseHTTPRequestHandler):
     """Small JSON/static-file server used by the standalone launcher window."""
 
     server_version = "MultimodalEmotionAnalysisLauncher/1.0"
-
-    def handle_one_request(self) -> None:
-        """Treat a closed local UI connection as a normal cancelled request."""
-
-        try:
-            super().handle_one_request()
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            return
 
     def end_headers(self) -> None:
         """Attach the same restrictive browser boundary to every response."""
@@ -626,6 +629,37 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Suppress only a disconnect raised while emitting an HTTP error response."""
+
+        try:
+            super().send_error(code, message, explain)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
+
+    def _finish_client_headers(self) -> bool:
+        """Flush buffered headers and report whether the client remained connected."""
+
+        try:
+            self.end_headers()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return False
+        return True
+
+    def _write_client_bytes(self, data: bytes) -> bool:
+        """Write response bytes without hiding failures from non-client operations."""
+
+        try:
+            self.wfile.write(data)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return False
+        return True
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -691,7 +725,10 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             if not self.privileged_origin_is_valid(parsed):
                 self.send_error_json(HTTPStatus.FORBIDDEN, "Invalid launcher request origin.")
                 return
-            payload = self.read_json_body()
+            try:
+                payload = self.read_json_body()
+            except _ClientDisconnected:
+                return
             if parsed.path not in ACCESS_EXEMPT_POSTS and not backend.terms_are_accepted(REPO_ROOT):
                 self.send_access_denied(schedule_shutdown=True)
                 return
@@ -742,8 +779,6 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.handle_validate_path(payload)
             else:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown API endpoint.")
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            return
         except ValueError as exc:
             APP_STATE.log(f"INPUT ERROR: {exc}")
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
@@ -764,7 +799,11 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         try:
-            raw = self.rfile.read(length).decode("utf-8")
+            raw_bytes = self.rfile.read(length)
+        except _CLIENT_DISCONNECT_ERRORS as exc:
+            raise _ClientDisconnected from exc
+        try:
+            raw = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Request body must be valid UTF-8 JSON.") from exc
         if not raw.strip():
@@ -1239,8 +1278,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(data)
+        if self._finish_client_headers():
+            self._write_client_bytes(data)
 
     def serve_media(self, parsed) -> None:
         """Stream an authorized local video for the Focus segment selector."""
@@ -1270,7 +1309,7 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Range", f"bytes */{file_size}")
                 self.send_header("Content-Length", "0")
                 self.send_header("Referrer-Policy", "no-referrer")
-                self.end_headers()
+                self._finish_client_headers()
                 return
             status = HTTPStatus.PARTIAL_CONTENT
         else:
@@ -1284,7 +1323,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self.end_headers()
+        if not self._finish_client_headers():
+            return
         with media_path.open("rb") as handle:
             handle.seek(start)
             remaining = length
@@ -1292,7 +1332,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                if not self._write_client_bytes(chunk):
+                    return
                 remaining -= len(chunk)
 
     def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -1301,8 +1342,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(data)
+        if self._finish_client_headers():
+            self._write_client_bytes(data)
 
     def send_error_json(self, status: HTTPStatus, message: str) -> None:
         self.send_json({"error": message}, status=status)
