@@ -1583,6 +1583,45 @@ class LauncherProgressTests(unittest.TestCase):
 
         self.assertTrue(accepted)
 
+    def test_run_launcher_initializes_ffmpeg_before_the_eula_or_server(self) -> None:
+        runtime = Path(r"C:\Program Files\FFmpeg\bin")
+        args = launcher.argparse.Namespace(host="127.0.0.1", port=8766, no_browser=True)
+
+        with patch.object(
+            launcher,
+            "configure_ffmpeg_shared_libraries",
+            return_value=runtime,
+        ) as configure, patch.object(
+            launcher,
+            "ensure_eula_accepted",
+            return_value=False,
+        ) as ensure_eula, patch.object(
+            launcher,
+            "create_server",
+        ) as create_server, patch.object(
+            launcher.APP_STATE,
+            "log",
+        ) as log:
+            result = launcher.run_launcher(args)
+
+        self.assertEqual(result, 1)
+        configure.assert_called_once_with()
+        ensure_eula.assert_called_once_with(launcher.REPO_ROOT)
+        create_server.assert_not_called()
+        log.assert_any_call(f"FFmpeg runtime: {runtime}")
+
+    def test_launcher_warns_when_supported_ffmpeg_is_unavailable(self) -> None:
+        with patch.object(
+            launcher,
+            "configure_ffmpeg_shared_libraries",
+            return_value=None,
+        ), patch.object(launcher.APP_STATE, "log") as log:
+            self.assertIsNone(launcher.initialize_launcher_ffmpeg_runtime())
+
+        warning = " ".join(str(call.args[0]) for call in log.call_args_list)
+        self.assertIn("Supported FFmpeg/ffprobe runtime was not found", warning)
+        self.assertIn("scripts/setup.ps1", warning)
+
     def test_catalog_selection_is_authorized_against_the_exact_server_scan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             catalog_path = Path(temp_dir) / "sources.csv"

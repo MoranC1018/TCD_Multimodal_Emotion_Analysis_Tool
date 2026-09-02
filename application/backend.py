@@ -85,6 +85,7 @@ from procurement.external_tools import (
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 SKIP_FOLDER_NAMES = {"raw_clips", "__pycache__", ".git", ".venv", "venv", "node_modules"}
+LOCAL_SCAN_MAX_WORKERS = 4
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 YOUTUBE_OEMBED_URL = "https://www.youtube.com/oembed"
 PRODUCT_NAME = "Multimodal Emotion Analysis Tool"
@@ -913,42 +914,90 @@ def scan_folder_source(
     if not folder.exists() or not folder.is_dir():
         raise NotADirectoryError(f"Folder does not exist: {folder}")
 
-    duration_reader = duration_reader or read_duration_seconds
-    items: list[VideoItem] = []
-    for video_path in sorted(iter_video_files(folder), key=lambda item: str(item).casefold()):
-        metadata = read_nearby_metadata(video_path)
-        relative_path = video_path.relative_to(folder)
-        speaker = speaker_from_relative_path(folder, relative_path)
-        title = str(metadata.get("title") or metadata.get("video_title") or video_path.stem)
-        youtube_url = str(metadata.get("url") or metadata.get("webpage_url") or "")
-        video_id = str(metadata.get("video_id") or run_docx_extractions.get_youtube_video_id(youtube_url or "") or "")
-        upload_date = str(metadata.get("upload_date") or metadata.get("published_at") or metadata.get("uploadDate") or "")
-        license_text = str(metadata.get("license") or metadata.get("licence") or metadata.get("license_text") or "Local file / unknown")
-        video_duration = metadata_duration_seconds(metadata)
-        item = VideoItem(
-            id=f"folder:{relative_path.as_posix()}",
-            title=title,
-            speaker=speaker,
-            source_path=str(video_path),
-            source_kind="folder",
-            youtube_url=youtube_url,
-            video_id=video_id,
-            duration_seconds=video_duration if video_duration is not None else duration_reader(video_path),
-            upload_date=upload_date,
-            license=license_text,
-            relative_path=relative_path.as_posix(),
-            thumbnail_url=youtube_thumbnail_url(video_id),
-        )
-        items.append(item)
-
-    if not items:
+    video_paths = sorted(iter_video_files(folder), key=lambda item: str(item).casefold())
+    if not video_paths:
         supported = ", ".join(sorted(VIDEO_EXTENSIONS))
         raise ValueError(f"No supported videos were found under {folder}. Supported formats: {supported}.")
+
+    selected_duration_reader = duration_reader or read_duration_seconds
+    if duration_reader is None and len(video_paths) > 1:
+        worker_count = min(LOCAL_SCAN_MAX_WORKERS, len(video_paths))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            items = list(
+                executor.map(
+                    lambda video_path: _folder_video_item(
+                        folder,
+                        video_path,
+                        duration_reader=selected_duration_reader,
+                    ),
+                    video_paths,
+                )
+            )
+    else:
+        # Keep injected readers deterministic for callers and unit tests that
+        # deliberately provide stateful duration lookup functions.
+        items = [
+            _folder_video_item(
+                folder,
+                video_path,
+                duration_reader=selected_duration_reader,
+            )
+            for video_path in video_paths
+        ]
 
     return ScanResult(
         source_path=str(folder),
         source_kind="folder",
         groups=group_video_items_by_speaker(items),
+    )
+
+
+def _folder_video_item(
+    folder: Path,
+    video_path: Path,
+    *,
+    duration_reader: Callable[[Path], float | None],
+) -> VideoItem:
+    """Build one local scan item; independent calls may run concurrently."""
+
+    metadata = read_nearby_metadata(video_path)
+    relative_path = video_path.relative_to(folder)
+    speaker = speaker_from_relative_path(folder, relative_path)
+    title = str(metadata.get("title") or metadata.get("video_title") or video_path.stem)
+    youtube_url = str(metadata.get("url") or metadata.get("webpage_url") or "")
+    video_id = str(
+        metadata.get("video_id")
+        or run_docx_extractions.get_youtube_video_id(youtube_url or "")
+        or ""
+    )
+    upload_date = str(
+        metadata.get("upload_date")
+        or metadata.get("published_at")
+        or metadata.get("uploadDate")
+        or ""
+    )
+    license_text = str(
+        metadata.get("license")
+        or metadata.get("licence")
+        or metadata.get("license_text")
+        or "Local file / unknown"
+    )
+    video_duration = metadata_duration_seconds(metadata)
+    return VideoItem(
+        id=f"folder:{relative_path.as_posix()}",
+        title=title,
+        speaker=speaker,
+        source_path=str(video_path),
+        source_kind="folder",
+        youtube_url=youtube_url,
+        video_id=video_id,
+        duration_seconds=(
+            video_duration if video_duration is not None else duration_reader(video_path)
+        ),
+        upload_date=upload_date,
+        license=license_text,
+        relative_path=relative_path.as_posix(),
+        thumbnail_url=youtube_thumbnail_url(video_id),
     )
 
 
