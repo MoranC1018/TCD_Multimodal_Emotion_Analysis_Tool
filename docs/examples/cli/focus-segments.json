@@ -1,0 +1,21 @@
+{
+  "source_path": "C:/Research/TrinityStudy/media/speaker-a.mp4",
+  "source_kind": "file",
+  "gap_seconds": 1.0,
+  "selected_segments": [
+    {
+      "source_path": "C:/Research/TrinityStudy/media/speaker-a.mp4",
+      "source_kind": "file",
+      "speaker": "Speaker A",
+      "start_seconds": 1.0,
+      "end_seconds": 3.0
+    },
+    {
+      "source_path": "C:/Research/TrinityStudy/media/speaker-a.mp4",
+      "source_kind": "file",
+      "speaker": "Speaker A",
+      "start_seconds": 6.0,
+      "end_seconds": 8.0
+    }
+  ]
+}

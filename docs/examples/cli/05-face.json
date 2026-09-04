@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "stage": "face",
+  "options": {
+    "source_path": "C:/Research/TrinityStudy/media",
+    "sample_fps": 5.0,
+    "confidence_threshold": 0.9,
+    "batch_size": 8,
+    "device": "cpu",
+    "recursive": true,
+    "overwrite": false,
+    "debug": false
+  }
+}

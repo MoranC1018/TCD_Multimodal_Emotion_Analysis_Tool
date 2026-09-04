@@ -515,92 +515,50 @@ model execution is CPU-backed until a CUDA PyTorch build is installed.
 
 ## Command-Line Use
 
-The desktop application is the recommended path for non-technical users. These
-commands are useful for automation and diagnosis.
+The unified CLI runs the existing Procurement, Face, Audio, Text, and Analysis
+engines without opening the desktop application. Jobs can contain one stage or
+a sequential workflow with explicit output handoffs, metadata profiles,
+resource limits, logs, cancellation and deadlines.
 
-Run the DOCX Procurement pipeline:
+See the [complete CLI and automation guide](docs/CLI.md) for all commands,
+exact parameter defaults, stage/resume controls, scheduling instructions and
+[ready-to-edit JSON examples](docs/CLI.md#example-jobs). The desktop interface
+and existing module commands remain available.
 
-```powershell
-.\.venv\Scripts\python.exe -m procurement.run_pipeline "C:\path\to\input.docx"
-```
-
-Run a reusable CSV/DOCX catalog from the command line after recording its
-SHA-256 and chosen SourceIDs:
-
-```powershell
-.\.venv\Scripts\python.exe -m procurement.catalog_runner "C:\path\to\sources.csv" `
-  --run-root "C:\path\to\run" --catalog-sha256 "<sha256>" `
-  --source-id source-0001 --source-id source-0003
-```
-
-Relative local media paths are allowed from the catalog folder. An absolute
-local file outside that folder requires the explicit CLI option
-`--allow-external-local-paths`; UNC shares, device paths, and linked paths are
-always rejected before access.
-
-Useful Procurement options:
+From the repository root after setup:
 
 ```powershell
-.\.venv\Scripts\python.exe -m procurement.run_pipeline INPUT.docx --limit 3
-.\.venv\Scripts\python.exe -m procurement.run_pipeline INPUT.docx --force
-.\.venv\Scripts\python.exe -m procurement.run_pipeline INPUT.docx --no-stitch
-.\.venv\Scripts\python.exe -m procurement.run_pipeline INPUT.docx --dry-run
+$python = (Resolve-Path '.\.venv\Scripts\python.exe').Path
+& $python -m application.cli --help
+& $python -m application.cli doctor --component procurement
+& $python -m application.cli inspect source 'C:\Research\TrinityStudy\media' --no-enrich
+
+# Replace these study paths with your own and edit the job before running.
+$job = 'C:\Research\TrinityStudy\jobs\study.json'
+$run = 'C:\Research\TrinityStudy\runs\study-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+& $python -m application.cli validate --job $job --run-dir $run
+if ($LASTEXITCODE -ne 0) { throw 'Job validation failed.' }
+& $python -m application.cli run --job $job --run-dir $run --timeout 43200
+if ($LASTEXITCODE -ne 0) { throw "Workflow failed. Inspect $run" }
 ```
 
-Check audio dependencies:
+The evidence directory must be new. Relative paths inside a job resolve from
+the job file's directory. Commands return JSON on stdout and diagnostics on
+stderr; processing stages retain their own manifests and provenance. A plan
+can defer checks that require an earlier stage's outputs. Readiness checks do
+not install dependencies, download weights, or establish model accuracy.
+
+Existing low-level commands still work, for example:
 
 ```powershell
-.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py doctor
+& $python -m processing.face_analysis --help
+& $python -m processing.text_analysis --help
+& $python processing\audio_analysis\run_audio_analysis.py doctor
+& $python -m analysis.workflow --help
 ```
 
-Run Audio Processing:
-
-```powershell
-.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py batch "C:\path\to\videos"
-.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py single "C:\path\to\video.mp4"
-```
-
-Run lower-level expert native Face, iMotions, and audio Analysis:
-
-```powershell
-.\.venv\Scripts\python.exe -m analysis.imotions "C:\path\to\imotions_csvs" --logscale
-.\.venv\Scripts\python.exe -m analysis.native_face "C:\path\to\native_face_output" --logscale
-.\.venv\Scripts\python.exe -m analysis.audio "C:\path\to\audio_outputs" --logscale
-```
-
-Run the stable combined workflow. Video is one canonical modality; its source
-may contain iMotions/AFFDEX or verified Py-Feat native Face data and is detected
-before any output is created or archived:
-
-```powershell
-.\.venv\Scripts\python.exe -m analysis.workflow `
-  --output-root "C:\path\to\combined_output" `
-  --video-source "C:\path\to\video_reports" --video-method import `
-  --audio-source "C:\path\to\audio_reports" --audio-method import `
-  --speaker-groups-json '[{"id":"group-1","name":"Group 1","speaker_ids":["Speaker A","Speaker B"]}]'
-```
-
-Use `run` instead of `import` for a modality when its source contains raw
-iMotions exports, verified native `face_core.csv` runs, or processed
-`audio_analysis.csv` files that still need Analysis. The desktop application
-is easier for defining speaker groups.
-
-`--imotions-source` / `--imotions-method` and `--native_face-source` /
-`--native_face-method` remain deprecated one-release aliases. Each normalizes
-to the same Video request and emits a warning; canonical and alias flags, or
-both aliases, cannot be combined.
-
-All documented CLI layers provide `--help`:
-
-```powershell
-.\.venv\Scripts\python.exe -m processing.face_analysis --help
-.\.venv\Scripts\python.exe -m processing.text_analysis --help
-.\.venv\Scripts\python.exe processing/audio_analysis/run_audio_analysis.py --help
-.\.venv\Scripts\python.exe -m analysis.imotions --help
-.\.venv\Scripts\python.exe -m analysis.native_face --help
-.\.venv\Scripts\python.exe -m analysis.audio --help
-.\.venv\Scripts\python.exe -m analysis.workflow --help
-```
+See the [CLI acceptance record](application/tests/REAL_CLI_ACCEPTANCE.md) for
+the actual tested workflows and remaining validation limits.
 
 ## Verification And Troubleshooting
 

@@ -1,0 +1,24 @@
+{
+  "input_path": "C:/Research/TrinityStudy/media",
+  "whisper_root": "C:/Research/TrinityStudy/native-text/transcripts",
+  "selected_whisper_root": "C:/Research/TrinityStudy/native-text/selected_transcripts",
+  "prepared_root": "C:/Research/TrinityStudy/native-text/prepared_segments",
+  "selected_csv_root": "C:/Research/TrinityStudy/native-text/rocksteady/core",
+  "extra_csv_root": "C:/Research/TrinityStudy/native-text/rocksteady/all",
+  "postprocessing_root": "C:/Research/TrinityStudy/native-text/analysis",
+  "whisper_model": "small",
+  "whisper_device": "cpu",
+  "threads": 1,
+  "dictionaries": [
+    "embedded:affectDictionaries/General Language (En)(2011-07-05).dict.xml"
+  ],
+  "categories": [],
+  "dictionary_combination": "merge",
+  "overwrite_rocksteady": false,
+  "write_graphs": true,
+  "default_language_variant": "eng",
+  "whisper_language": "",
+  "source_ids": [],
+  "catalog_sha256": "",
+  "language_policy": {}
+}

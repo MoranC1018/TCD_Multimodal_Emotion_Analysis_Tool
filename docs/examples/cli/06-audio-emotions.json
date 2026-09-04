@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "stage": "audio",
+  "options": {
+    "source_path": "C:/Research/TrinityStudy/media",
+    "mode": "batch",
+    "window_seconds": 10.0,
+    "stride_seconds": 5.0,
+    "opensmile_feature_set": "egemaps",
+    "include_emotions": true,
+    "device": "cpu",
+    "keep_temp_audio": false,
+    "stop_on_error": true
+  }
+}
