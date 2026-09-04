@@ -80,9 +80,9 @@ def test_real_video_duration_and_coverage_ignore_longer_audio(
     assert quality["sampled_frames"] == 10
     assert quality["frames_without_face"] == 0
     assert quality["face_coverage"] == 1.0
-    if suffix == ".mp4":
-        # Complete stream metadata must not trigger a whole-video decoding pass.
-        assert len(probe_commands) == 1
+    # Every probe reads the header and scans timing, even with complete metadata.
+    assert len(probe_commands) == 2
+    assert "-show_frames" in probe_commands[1]
 
 
 def test_real_video_preserves_missing_face_rows_and_rejects_frames_after_video(
@@ -112,6 +112,65 @@ def test_real_video_preserves_missing_face_rows_and_rejects_frames_after_video(
         )
 
 
+def test_complete_metadata_vfr_is_rejected_before_face_analysis(tmp_path: Path, media_tools) -> None:
+    from processing.face_analysis.pipeline import process_face_input
+
+    ffmpeg, ffprobe = media_tools
+    video = tmp_path / "variable_density.mp4"
+    subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc2=s=64x64:r=25:d=4",
+         "-vf", r"select=lt(n\,50)+gte(n\,50)*not(mod(n\,2))", "-fps_mode", "vfr",
+         "-an", "-c:v", "libx264", "-bf", "0", str(video)],
+        check=True, capture_output=True, text=True, timeout=30,
+        env=credential_free_media_environment(),
+    )
+    header = json.loads(subprocess.run(
+        [str(ffprobe), "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=duration,nb_frames,avg_frame_rate", "-of", "json", str(video)],
+        check=True, capture_output=True, text=True, timeout=30,
+        env=credential_free_media_environment(),
+    ).stdout)["streams"][0]
+    assert int(header["nb_frames"]) == 75
+    assert float(header["duration"]) > 0
+
+    with pytest.raises(RuntimeError, match="nonuniform.*timestamps"):
+        probe_video(video, ffprobe=ffprobe)
+
+    class UnusedBackend:
+        def analyse(self, *_args):
+            pytest.fail("A rejected VFR video must not reach model inference")
+
+    output = tmp_path / "output"
+    result = process_face_input(video, output, backend=UnusedBackend())
+    assert result.failed == 1
+    failure = json.loads(result.run_manifest.read_text())["videos"][0]
+    assert failure["error_stage"] == "probe"
+    assert "nonuniform" in failure["error_message"]
+    assert not list(output.rglob("face_core.csv"))
+    assert not list(output.rglob("face_features.parquet"))
+
+
+@pytest.mark.parametrize("suffix", [".mp4", ".mkv"])
+@pytest.mark.parametrize("rate", ["25", "30000/1001"])
+def test_real_cfr_timing_keeps_fractional_rates(tmp_path: Path, media_tools, suffix: str, rate: str) -> None:
+    ffmpeg, ffprobe = media_tools
+    video = tmp_path / f"constant_rate{suffix}"
+    subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", f"testsrc2=s=64x64:r={rate}:d=2", "-an", "-c:v", "libx264",
+         "-bf", "0", str(video)],
+        check=True, capture_output=True, text=True, timeout=30,
+        env=credential_free_media_environment(),
+    )
+
+    metadata = probe_video(video, ffprobe=ffprobe)
+
+    assert metadata.fps == pytest.approx(25 if rate == "25" else 30000 / 1001)
+    assert metadata.frame_count == (50 if rate == "25" else 60)
+    assert metadata.duration_seconds == pytest.approx(2 if rate == "25" else 2.002, abs=.001)
+
+
 @pytest.mark.parametrize("frame_count", [None, 0, -1])
 def test_output_sampling_requires_an_evidenced_positive_frame_count(frame_count) -> None:
     metadata = VideoMetadata("video.mkv", "abc", 1, 4.0, 25.0, frame_count, 64, 64)
@@ -119,14 +178,12 @@ def test_output_sampling_requires_an_evidenced_positive_frame_count(frame_count)
         expected_sampled_frames(metadata, sample_fps=5)
 
 
-def install_probe_response(monkeypatch, tmp_path: Path, stream, *, frames=None, counted=None):
+def install_probe_response(monkeypatch, tmp_path: Path, stream, *, frames=None):
     video = tmp_path / "video.mkv"
     video.write_bytes(b"controlled video metadata")
     monkeypatch.setattr(media, "resolve_media_binary", lambda *_args, **_kwargs: Path("ffprobe"))
 
     def fake_run(command, **kwargs):
-        if "-count_frames" in command:
-            return subprocess.CompletedProcess(command, 0, json.dumps({"streams": [counted]}), "")
         if "compact" in command[command.index("-of") + 1]:
             assert frames is not None, "Unexpected frame timing scan"
             kwargs["stdout"].write(frames)
@@ -147,7 +204,10 @@ def test_known_video_duration_counts_frames_without_estimating_from_rate(
     video = install_probe_response(
         monkeypatch, tmp_path,
         {"duration": "2.0", "avg_frame_rate": "25/1", "width": 64, "height": 64},
-        counted={"nb_read_frames": "49"},
+        frames="".join(
+            f"frame|best_effort_timestamp_time={frame / 25:.6f}|duration_time=0.040000\n"
+            for frame in range(49)
+        ),
     )
     metadata = probe_video(video)
     assert metadata.duration_seconds == 2.0
@@ -215,23 +275,24 @@ def test_frame_timestamp_fallback_fails_closed_for_uncertain_timing(
         probe_video(video)
 
 
-def test_frame_timestamp_fallback_rejects_short_decode_when_header_count_is_known(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize("duration", [None, "0.08"])
+def test_timing_scan_rejects_short_decode_when_header_count_is_known(
+    monkeypatch, tmp_path: Path, duration
 ) -> None:
     video = install_probe_response(
         monkeypatch, tmp_path,
-        {"avg_frame_rate": "25/1", "nb_frames": "2", "width": 64, "height": 64},
+        {"duration": duration, "avg_frame_rate": "25/1", "nb_frames": "2", "width": 64, "height": 64},
         frames="frame|best_effort_timestamp_time=0.000000|duration_time=0.040000\n",
     )
     with pytest.raises(RuntimeError, match="frame count"):
         probe_video(video)
 
 
-def test_count_fallback_rejects_empty_decode(monkeypatch, tmp_path: Path) -> None:
+def test_timing_scan_rejects_empty_decode_with_known_duration(monkeypatch, tmp_path: Path) -> None:
     video = install_probe_response(
         monkeypatch, tmp_path,
         {"duration": "2.0", "avg_frame_rate": "25/1", "width": 64, "height": 64},
-        counted={"nb_read_frames": "0"},
+        frames="",
     )
     with pytest.raises(RuntimeError, match="frame count"):
         probe_video(video)

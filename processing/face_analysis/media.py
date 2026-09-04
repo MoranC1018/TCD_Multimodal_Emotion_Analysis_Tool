@@ -61,7 +61,7 @@ def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
 
 
 def probe_video(path: Path, *, ffprobe: str | Path | None = None) -> VideoMetadata:
-    """Read video-only timing, decoding once if stream metadata is incomplete."""
+    """Read video-only timing and verify every frame against the frame/FPS clock."""
 
     executable = resolve_media_binary(
         "ffprobe",
@@ -82,29 +82,21 @@ def probe_video(path: Path, *, ffprobe: str | Path | None = None) -> VideoMetada
         raise RuntimeError(f"Video has invalid frame rate: {path}")
     duration = _positive_float(stream.get("duration"))
     frame_count = _positive_frame_count(stream.get("nb_frames"))
+    # A complete header's average FPS does not establish a uniform cadence.
+    # Validate all video timestamps before accepting the frame/FPS sampling
+    # contract, including MP4 files with both duration and frame count present.
+    counted, scanned_duration = _scan_video_timing(
+        executable, path, fps, _positive_ratio(stream.get("time_base"))
+    )
+    if frame_count is not None and frame_count != counted:
+        raise RuntimeError(
+            f"Video frame count differs between stream metadata ({frame_count}) "
+            f"and decoded frames ({counted}): {path}"
+        )
+    frame_count = counted
     if duration is None:
-        # Matroska commonly has neither stream duration nor nb_frames. The
-        # container duration (and its longest audio track) cannot establish
-        # the video sampling grid or the end of the video stream.
-        counted, duration = _scan_video_timing(
-            executable, path, fps, _positive_ratio(stream.get("time_base"))
-        )
-        if frame_count is not None and frame_count != counted:
-            raise RuntimeError(
-                f"Video frame count differs between stream metadata ({frame_count}) "
-                f"and decoded frames ({counted}): {path}"
-            )
-        frame_count = counted
-    elif frame_count is None:
-        completed = _run_ffprobe(executable, path, [
-            "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "json",
-        ])
-        counted_streams = json.loads(completed.stdout).get("streams") or []
-        frame_count = _positive_frame_count(
-            counted_streams[0].get("nb_read_frames") if counted_streams else None
-        )
-        if frame_count is None:
-            raise RuntimeError(f"Could not establish a positive video frame count: {path}")
+        # A longer audio/container tail is never evidence for video duration.
+        duration = scanned_duration
     return VideoMetadata(
         path=str(path),
         sha256=file_sha256(path),
