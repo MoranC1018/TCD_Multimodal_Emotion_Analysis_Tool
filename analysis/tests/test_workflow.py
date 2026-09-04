@@ -1139,6 +1139,60 @@ class WorkflowTests(unittest.TestCase):
         current_hash = hashlib.sha256(second.workbook_path.read_bytes()).hexdigest()
         self.assertNotEqual(current_hash, first_workbook_hash)
 
+    def test_release_report_only_cli_reruns_and_can_later_write_a_workbook(self) -> None:
+        from analysis.workflow import main, run_workflow
+
+        args = ["--audio-source", str(self.audio_import_root), "--audio-method", "import",
+                "--output-root", str(self.output_root), "--no-combined-workbook"]
+        self.assertEqual(main(args), 0)
+        self.assertEqual(main(args), 0)
+        current = json.loads((self.output_root / "combined_analysis_manifest.json").read_text())
+        policy = current["stale_artifact_policy"]
+        self.assertIsNone(policy["archived_previous_workbook"])
+        self.assertIsNone(policy["archived_previous_workbook_sha256"])
+        archived = json.loads(Path(policy["archived_previous_manifest"]).read_text())
+        self.assertEqual(archived["status"], "complete")
+        self.assertIsNone(archived["workbook_path"])
+        self.assertFalse(archived["request"]["write_combined_workbook"])
+        self.assertFalse((self.output_root / "combined_analysis.xlsx").exists())
+
+        result = run_workflow(self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(self.ModalityRequest("audio", "import", self.audio_import_root),),
+            speaker_groups=self.groups,
+        ))
+        self.assertTrue(result.workbook_path.is_file())
+
+    def test_release_report_only_archive_rejects_unexpected_workbook(self) -> None:
+        from analysis.workflow import WorkflowError, _archive_fixed_outputs, run_workflow
+
+        result = run_workflow(self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(self.ModalityRequest("audio", "import", self.audio_import_root),),
+            speaker_groups=self.groups, write_combined_workbook=False,
+        ))
+        orphan = self.output_root / "combined_analysis.xlsx"
+        orphan.write_bytes(b"unassociated workbook")
+        before = result.manifest_path.read_bytes()
+        with self.assertRaises(WorkflowError):
+            _archive_fixed_outputs(self.output_root, "2026-09-04T22:00:00Z")
+        self.assertEqual(orphan.read_bytes(), b"unassociated workbook")
+        self.assertEqual(result.manifest_path.read_bytes(), before)
+
+    def test_release_archive_still_rejects_missing_required_workbook(self) -> None:
+        from analysis.workflow import WorkflowError, _archive_fixed_outputs, run_workflow
+
+        result = run_workflow(self.WorkflowRequest(
+            output_root=self.output_root,
+            modalities=(self.ModalityRequest("audio", "import", self.audio_import_root),),
+            speaker_groups=self.groups,
+        ))
+        result.workbook_path.unlink()
+        before = result.manifest_path.read_bytes()
+        with self.assertRaisesRegex(WorkflowError, "must contain both"):
+            _archive_fixed_outputs(self.output_root, "2026-09-04T22:00:00Z")
+        self.assertEqual(result.manifest_path.read_bytes(), before)
+
     def test_successful_video_rerun_archives_its_physical_column_manifest(self) -> None:
         from analysis.workflow import run_workflow
 
@@ -1179,6 +1233,7 @@ class WorkflowTests(unittest.TestCase):
             self.audio_import_root
             / "emotion"
             / "cache-copy"
+            / "Andy Burnham"
             / "combined"
             / "other_findings"
             / "descriptive_statistics.csv"
@@ -1203,8 +1258,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(accepted["reason"], "accepted speaker-level combined report")
         rejected_entry = next(item for item in manifest["rejected_reports"] if item["path"] == str(rejected.resolve()))
         self.assertEqual(rejected_entry["modality"], "audio")
-        self.assertEqual(rejected_entry["normalized_speaker"], "cachecopy")
-        self.assertEqual(rejected_entry["display_speaker"], "cache-copy")
+        self.assertEqual(rejected_entry["normalized_speaker"], "andyburnham")
+        self.assertEqual(rejected_entry["display_speaker"], "Andy Burnham")
         self.assertIn("generated or temporary", rejected_entry["reason"])
 
     def test_failed_discovery_manifest_preserves_zero_source_rejection(self) -> None:
@@ -1215,6 +1270,7 @@ class WorkflowTests(unittest.TestCase):
             analysis_root
             / "emotion"
             / "cache-copy"
+            / "Andy Burnham"
             / "combined"
             / "other_findings"
             / "descriptive_statistics.csv"

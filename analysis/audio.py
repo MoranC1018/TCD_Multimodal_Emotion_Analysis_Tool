@@ -11,6 +11,7 @@ from processing.io_utils import (
     assert_no_output_path_aliases,
 )
 from typing import Iterator, Sequence
+from processing.audio_analysis.audio_pipeline.full_stack import discover_audio_output_files
 
 from analysis.histograms import (
     AnalysisResult,
@@ -107,17 +108,18 @@ def discover_audio_analysis_inputs(input_dir: Path) -> tuple[list[Path], list[Pa
     input_dir = assert_no_output_path_aliases(
         input_dir, description="Audio analysis input"
     ).resolve(strict=True)
+    current_analysis, current_features, _managed_roots = discover_audio_output_files(input_dir)
     analysis_paths = sorted(
         (
             assert_confined_input_file(path, input_dir, description="Audio analysis input")
-            for path in input_dir.rglob(AUDIO_ANALYSIS_FILENAME)
+            for path in current_analysis
         ),
         key=lambda item: str(item).casefold(),
     )
     opensmile_paths = sorted(
         (
             assert_confined_input_file(path, input_dir, description="Audio analysis input")
-            for path in input_dir.rglob(OPENSMILE_FEATURES_FILENAME)
+            for path in current_features
         ),
         key=lambda item: str(item).casefold(),
     )

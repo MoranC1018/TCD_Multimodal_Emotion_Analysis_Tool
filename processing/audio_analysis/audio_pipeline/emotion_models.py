@@ -344,6 +344,19 @@ def suppress_transformers_torchvision() -> None:
     import_utils._torchvision_version = "unavailable-for-audio-pipeline"
 
 
+# The preferred model author's documented input limit is 15 seconds at 16 kHz.
+# Keep the same bound across categorical backends so fallback does not change the protocol.
+MAX_CATEGORICAL_WINDOW_SECONDS = 15
+
+
+def validate_categorical_sample_count(samples) -> None:
+    if len(samples) > MAX_CATEGORICAL_WINDOW_SECONDS * 16000:
+        raise ValueError(
+            f"Categorical emotion input exceeds {MAX_CATEGORICAL_WINDOW_SECONDS} seconds; "
+            "use a supported analysis window instead of truncating audio."
+        )
+
+
 class CategoricalWhisperEmotionModel:
     """Adapter for the preferred MSP-Podcast categorical Whisper model."""
 
@@ -399,9 +412,7 @@ class CategoricalWhisperEmotionModel:
 
     def predict(self, window_wav: Path) -> dict[str, float | str]:
         samples = load_audio_array(window_wav)
-        max_samples = 15 * 16000
-        if len(samples) > max_samples:
-            samples = samples[:max_samples]
+        validate_categorical_sample_count(samples)
         raw_scores = self.classifier({"array": samples, "sampling_rate": 16000}, top_k=None)
         if raw_scores and isinstance(raw_scores[0], list):
             raw_scores = raw_scores[0]
@@ -471,11 +482,9 @@ class VoxProfileWhisperEmotionModel(CategoricalWhisperEmotionModel):
         )
 
     def predict(self, window_wav: Path) -> dict[str, float | str]:
-        torch = import_torch()
         samples = load_audio_array(window_wav)
-        max_samples = 15 * 16000
-        if len(samples) > max_samples:
-            samples = samples[:max_samples]
+        validate_categorical_sample_count(samples)
+        torch = import_torch()
         tensor = torch.from_numpy(samples).float().reshape(1, -1).to(self.device)
         with torch.no_grad():
             outputs = self.classifier(tensor, return_feature=True)

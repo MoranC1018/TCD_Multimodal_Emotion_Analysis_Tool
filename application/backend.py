@@ -2791,6 +2791,11 @@ def build_audio_command(
         raise ValueError(f"Unsupported audio mode: {request.mode}")
     if not 0.5 <= float(request.window_seconds) <= 120:
         raise ValueError("Audio window length must be between 0.5 and 120 seconds.")
+    if request.include_emotions and float(request.window_seconds) > 15:
+        raise ValueError(
+            "Emotion model windows must not exceed 15 seconds. "
+            "Disable emotion models for longer OpenSMILE-only windows."
+        )
     if not 0.5 <= float(request.stride_seconds) <= 120:
         raise ValueError("Audio stride length must be between 0.5 and 120 seconds.")
     feature_set = str(request.opensmile_feature_set or "").casefold()

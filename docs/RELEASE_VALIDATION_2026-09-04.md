@@ -1,4 +1,8 @@
-# Release validation — 4 September 2026
+# Release validation: 4 September 2026
+
+This is the initial validation record. The subsequent
+[software release review](RELEASE_REVIEW_2026-09-04.md) records additional defects,
+their repairs and the refreshed test gate for review.
 
 **Software regression and tested Windows CPU workflows pass. The official
 research-paper release is not approved.** Independent manuscript reconciliation
@@ -7,7 +11,8 @@ numerical and editorial issues. A green software suite cannot close those gates.
 
 The starting feature branch had already merged through PR #4. Validation moved
 to main at `ada3bf87e602a4787613fcad36075b8e3bd99bdc`, then to the local branch
-`codex/release-readiness-20260904`. This work did not push, merge, tag or publish.
+`codex/release-readiness-20260904`. That initial audit stage did not push, merge,
+tag or publish; subsequent branch publication is for pull-request review.
 Private manuscripts, emails, research files and detailed review evidence remain
 outside this sanitized repository.
 

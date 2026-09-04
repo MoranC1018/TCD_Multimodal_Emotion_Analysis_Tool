@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
@@ -28,12 +29,14 @@ from .config import (
     resolve_opensmile_config,
 )
 from .emotion_models import (
+    MAX_CATEGORICAL_WINDOW_SECONDS,
     EmotionModelBundle,
     EmotionModelResult,
     EmotionModels,
     load_debug_fallback_emotion_models,
 )
 from .media import export_window_wav, extract_mono_wav, probe_duration_seconds
+from .full_stack import BATCH_MANIFEST_FILENAME, BATCH_STATE_FILENAME
 from .opensmile_runner import run_opensmile_windows
 from .windows import make_windows
 
@@ -41,6 +44,46 @@ from .windows import make_windows
 ProgressCallback = Callable[[str], None]
 MAX_AUDIO_INPUT_BYTES = 20 * 1024 * 1024 * 1024
 MAX_AUDIO_DURATION_SECONDS = 24 * 60 * 60
+
+
+def validate_audio_options(
+    window_seconds: float,
+    stride_seconds: float,
+    opensmile_feature_set: str,
+    *,
+    skip_emotion_models: bool,
+    device: str,
+) -> None:
+    """Reject invalid settings before loading models or replacing prior results."""
+
+    for name, value in (("window_seconds", window_seconds), ("stride_seconds", stride_seconds)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be a positive finite number")
+    if not skip_emotion_models and window_seconds > MAX_CATEGORICAL_WINDOW_SECONDS:
+        raise ValueError(
+            f"Emotion model window_seconds must not exceed {MAX_CATEGORICAL_WINDOW_SECONDS} seconds. "
+            "Use --skip-emotion-models for longer OpenSMILE-only windows."
+        )
+    if opensmile_feature_set.lower() not in {"egemaps", "compare", "compare16"}:
+        raise ValueError("feature_set must be one of: egemaps, compare, compare16")
+    if device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("Emotion model device must be one of: auto, cpu, cuda")
+
+
+def validate_requested_emotion_models(emotion_models: EmotionModels) -> None:
+    if getattr(emotion_models, "skipped", False):
+        return
+    unavailable = [
+        layer for layer in ("categorical", "dimensional")
+        if not getattr(emotion_models, f"{layer}_available", False)
+    ]
+    if unavailable:
+        details = " | ".join(getattr(emotion_models, "errors", []) or [])
+        suffix = f" Details: {details}" if details else ""
+        raise RuntimeError(
+            f"Emotion analysis was requested, but the {', '.join(unavailable)} model layer(s) are unavailable."
+            f"{suffix}"
+        )
 
 
 @dataclass(frozen=True)
@@ -69,9 +112,15 @@ def run_single_video(
     debug_fallback_emotion_models: EmotionModels | None = None,
     source_context: dict[str, object] | None = None,
     progress: ProgressCallback | None = None,
+    _batch_output_root: Path | None = None,
 ) -> SingleVideoResult:
     """Run reproducible per-window audio feature/model extraction for one MP4."""
 
+    validate_audio_options(
+        window_seconds, stride_seconds, opensmile_feature_set,
+        skip_emotion_models=skip_emotion_models or bool(getattr(emotion_models, "skipped", False)),
+        device=device,
+    )
     input_video = assert_confined_input_file(
         input_video, Path(input_video).expanduser().parent, description="Audio input"
     )
@@ -86,13 +135,26 @@ def run_single_video(
         raise ValueError(
             f"Audio input exceeds the {MAX_AUDIO_DURATION_SECONDS} second duration limit."
         )
+    make_windows(source_duration_seconds, window_seconds, stride_seconds)
     output_dir = assert_safe_output_path(
         output_dir,
         protected_sources=(input_video,),
         description="Audio output",
     )
+    batch_root = _batch_output_root.resolve() if _batch_output_root is not None else None
+    for directory in (output_dir, *output_dir.parents):
+        if any((directory / name).exists() for name in (BATCH_MANIFEST_FILENAME, BATCH_STATE_FILENAME)):
+            if directory != batch_root:
+                raise ValueError(
+                    "Audio output belongs to a managed batch. Rerun that batch or choose a separate "
+                    "single-video output folder to preserve its result manifest."
+                )
     emit_progress(progress, f"Input video: {input_video}")
     emit_progress(progress, f"Output folder: {output_dir}")
+    if emotion_models is None:
+        emit_progress(progress, "Loading emotion models.")
+        emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
+    validate_requested_emotion_models(emotion_models)
     output_dir.mkdir(parents=True, exist_ok=True)
     emit_progress(progress, "Preparing output files.")
     clean_single_video_outputs(output_dir)
@@ -107,9 +169,6 @@ def run_single_video(
     opensmile_csv = output_dir / "opensmile_features.csv"
     manifest_path = output_dir / "audio_analysis_manifest.json"
 
-    if emotion_models is None:
-        emit_progress(progress, "Loading emotion models.")
-        emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
     if emotion_models.skipped:
         emit_progress(progress, "Emotion models skipped; writing OpenSMILE-only rows with blank model outputs.")
     else:

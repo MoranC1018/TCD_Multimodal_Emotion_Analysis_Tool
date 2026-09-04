@@ -459,6 +459,36 @@ def validate_text_profile_grouping(
             "Text is speaker-level, so every visible source for a speaker must stay in "
             f"the same output group: {', '.join(split)}."
         )
+    validate_speaker_text_source_selection(
+        metadata,
+        tuple(source_id for group in resolved.groups for source_id in group.source_ids),
+    )
+
+
+def validate_speaker_text_source_selection(
+    metadata: SourceMetadata,
+    visible_source_ids: Sequence[str],
+) -> None:
+    """A speaker aggregate cannot be filtered to only some of its source videos."""
+
+    selected_by_speaker: dict[str, set[str]] = {}
+    display_by_speaker: dict[str, str] = {}
+    for source in metadata.sources:
+        if source.selected:
+            selected_by_speaker.setdefault(source.speaker_key, set()).add(source.source_id)
+            display_by_speaker.setdefault(source.speaker_key, source.speaker)
+    visible = set(visible_source_ids)
+    partial = [
+        display_by_speaker[speaker_key]
+        for speaker_key, selected in selected_by_speaker.items()
+        if selected & visible and not selected.issubset(visible)
+    ]
+    if partial:
+        raise ValueError(
+            "Cannot apply a partial source selection to speaker-level Text for "
+            f"{', '.join(partial)}. Include every selected source for each speaker, "
+            "or import per-source Text results."
+        )
 
 
 def _safe_source_path(path: Path | str, label: str) -> Path:

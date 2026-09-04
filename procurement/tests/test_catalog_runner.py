@@ -57,6 +57,34 @@ def test_selected_local_processor_consumes_the_sealed_snapshot(tmp_path: Path) -
     assert context["local_identity"] == manifest["sources"][0]["local_identity"]
 
 
+def test_release_local_snapshot_retains_title_and_probes_only_sealed_bytes(tmp_path: Path, monkeypatch) -> None:
+    from application import backend
+
+    original = tmp_path / "Jane_Smith_Interview_2026.mp4"
+    original.write_bytes(b"sealed media")
+    catalog_path = tmp_path / "sources.csv"
+    write_catalog(catalog_path, [[original.name, "Jane Smith", "Ireland", "Irish"]])
+    observed = []
+
+    def read_duration(path):
+        original.write_bytes(b"replacement after snapshot")
+        assert path != original.resolve()
+        assert path.read_bytes() == b"sealed media"
+        observed.append(path)
+        return 12.5
+
+    monkeypatch.setattr(backend, "read_duration_seconds", read_duration)
+    result = run_catalog(catalog_path, tmp_path / "run", processor=lambda *_: {},
+                         local_metadata_fetcher=runner_module._default_local_metadata)
+    entry = json.loads(result.manifest_path.read_text())["sources"][0]
+
+    assert len(observed) == 1
+    assert entry["system_metadata"]["title"] == original.stem
+    assert entry["system_metadata"]["duration_seconds"] == 12.5
+    assert Path(entry["output_mapping"]["video_directory"]).name == f"source-0001_{original.stem}"
+    assert entry["local_identity"]["sha256"] == hashlib.sha256(b"sealed media").hexdigest()
+
+
 def test_clean_speaker_local_catalog_publishes_audio_input_from_sealed_snapshot(
     tmp_path: Path,
     monkeypatch,
