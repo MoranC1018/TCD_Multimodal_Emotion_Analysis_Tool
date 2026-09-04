@@ -9,7 +9,7 @@ current Text output contract.
 ## One-command workflow
 
 ```powershell
-python -m processing.text_analysis Videos
+.\.venv\Scripts\python.exe -m processing.text_analysis Videos
 ```
 
 Stages:
@@ -30,8 +30,8 @@ Stages:
 Long-running work can resume at a stage:
 
 ```powershell
-python -m processing.text_analysis Videos --from-stage prepare
-python -m processing.text_analysis Videos --from-stage postprocess
+.\.venv\Scripts\python.exe -m processing.text_analysis Videos --from-stage prepare
+.\.venv\Scripts\python.exe -m processing.text_analysis Videos --from-stage postprocess
 ```
 
 Resume is provenance-bound: the command validates the exact upstream manifest,
@@ -42,8 +42,8 @@ Check Java, the adapter, the JAR, dictionaries and categories without requiring
 an input video:
 
 ```powershell
-python -m processing.text_analysis --check
-python -m processing.text_analysis --check --config path\to\text-config.json
+.\.venv\Scripts\python.exe -m processing.text_analysis --check
+.\.venv\Scripts\python.exe -m processing.text_analysis --check --config path\to\text-config.json
 ```
 
 The check prints JSON and exits `0` only when the exact requested configuration
@@ -52,11 +52,21 @@ useful for development. Any stage range containing RockSteady performs this
 preflight before Whisper starts, so a missing runtime cannot waste a long
 transcription run.
 
-RockSteady 0.4, its dictionaries, and a supported JDK/Javac are external,
-separately licensed requirements. `scripts/setup.ps1` does not download them.
+RockSteady 0.4, its dictionaries, and a supported JDK/Javac remain separately
+licensed requirements. The supported Windows installer materializes and
+validates the tracked RockSteady Git LFS JAR, including its embedded default
+dictionary, and locates or installs a complete JDK with both `java` and `javac`.
+Use `-TextMode Require` to fail unless Text readiness succeeds. Git/Git LFS and
+repository LFS access are needed when the JAR is missing or still a pointer;
+see [Installation and validation](../../docs/INSTALLATION_VALIDATION.md).
 Whisper, Torch, trusted FFmpeg, Java, the adapter/JAR, dictionaries, and selected
 categories must all pass the structured readiness contract for the requested
 stage range.
+
+The Whisper preflight checks its installed engine, expected checkpoint identity,
+Torch and FFmpeg. It does not load local Whisper weights or transcribe audio.
+The first transcription can still need a checkpoint download. Verify a short
+representative input before a large or offline batch.
 
 The current run is easy to inspect in one Text-owned tree:
 
@@ -131,8 +141,8 @@ An empty `language_policy` means “discover every country and use
 Use the same file with either entry point:
 
 ```powershell
-python -m processing.text_analysis Videos --config path\to\text-config.json
-python -m processing.text_analysis --check --config path\to\text-config.json
+.\.venv\Scripts\python.exe -m processing.text_analysis Videos --config path\to\text-config.json
+.\.venv\Scripts\python.exe -m processing.text_analysis --check --config path\to\text-config.json
 ```
 
 An explicit category list may contain only the extra categories a caller wants;

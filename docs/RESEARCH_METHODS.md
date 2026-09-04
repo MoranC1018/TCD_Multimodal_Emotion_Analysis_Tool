@@ -228,8 +228,10 @@ action; only that child may receive a Hugging Face token.
 Text uses Whisper followed by RockSteady. Language precedence is the catalog
 row's YouTube-reported language, then explicit Whisper language, then blank;
 researcher `Language` remains ordinary metadata. RockSteady 0.4, its
-dictionaries, and a JDK/Javac are separately installed/licensed external
-requirements and are not downloaded by repository setup. SourceID and context
+dictionaries, and a JDK/Javac are separately licensed requirements. The supported
+Windows setup materializes and validates the tracked Git LFS JAR and locates or
+installs a complete JDK. See [Installation and validation](INSTALLATION_VALIDATION.md)
+for acquisition and readiness scope. SourceID and context
 identity pass through every stage and resume fingerprint.
 
 iMotions face CSVs are parsed after the `#DATA` marker or a detected

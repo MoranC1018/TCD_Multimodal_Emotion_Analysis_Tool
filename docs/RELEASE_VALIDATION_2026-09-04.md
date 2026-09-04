@@ -20,7 +20,7 @@ outside this sanitized repository.
 
 | Gate | Observed result |
 | --- | --- |
-| Fresh supported Windows installation | Python 3.12.1 CPU environment created by `scripts/setup.ps1`; shared FFmpeg 8.1.2 installed; exact tracked RockSteady LFS object and offline Py-Feat weights validated. Subsequently applied the tested security dependency updates below. |
+| New environment on an existing Windows host | Python 3.12.1 CPU environment created by `scripts/setup.ps1`; Python and a working JDK already existed. After a controlled missing-FFmpeg failure, the supported rerun installed shared FFmpeg 8.1.2 and validated the exact RockSteady LFS object and offline Py-Feat weights. Subsequently applied the tested dependency updates below. See the [installation record](INSTALLATION_VALIDATION.md) for the sequence and limits. |
 | Final dependencies | 22/22 direct pins match; `pip check` reports no broken requirements. Exact installed inventory is in `validation/windows-cpu-2026-09-04.txt`. |
 | Complete regression suite | **1,162 passed, 321 subtests passed, 13 skipped**, 154.39 seconds. Covers application, procurement, processing, analysis and tools. Strict browser mode was enabled and the browser test executed. |
 | Installer contracts | `scripts/verify_setup.ps1` passed argument, discovery, recovery, PATH, WinGet and RockSteady integrity checks. Its intentional mocked errors are expected tests. |
