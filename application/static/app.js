@@ -2321,6 +2321,7 @@ async function runProcurement(segmentManifest) {
           ? "Finding clean speaker segments"
           : "Sampling videos";
   runSubtitle.textContent = "The selected procurement run is in progress.";
+  setRunScreenState("procurement", "running");
   progressBar.style.width = "0%";
   progressLabel.textContent = "Starting...";
   setStatus("Running");
@@ -2398,7 +2399,7 @@ async function runProcurement(segmentManifest) {
   } catch (error) {
     state.activeRunIds.procurement = null;
     setStatus(error.message);
-    runSubtitle.textContent = error.message;
+    setRunScreenState("procurement", "failed", error.message);
   }
 }
 
@@ -3553,6 +3554,7 @@ async function runFaceProcessing() {
   faceProgressBar.style.width = "0%";
   faceProgressLabel.textContent = "Starting...";
   faceNextStep.classList.add("hidden");
+  setRunScreenState("face", "running");
   await showScreen("face-run");
 }
 
@@ -3568,6 +3570,7 @@ async function runTextProcessing() {
   textProgressBar.style.width = "0%";
   textProgressLabel.textContent = "Starting...";
   textNextStep.classList.add("hidden");
+  setRunScreenState("text", "running");
   await showScreen("text-run");
 }
 
@@ -3656,6 +3659,7 @@ async function runAudioProcessing() {
     audioProgressBar.style.width = "100%";
     audioProgressLabel.textContent = "Imported audio outputs selected";
     audioNextStep.classList.remove("hidden");
+    setRunScreenState("audio", "complete", "Imported audio outputs are ready for Analysis.");
     setStatus("Audio import ready");
     return;
   }
@@ -3694,6 +3698,7 @@ async function runAudioProcessing() {
     });
     state.activeRunIds.audio = Number(response.runId || 0) || null;
     state.pendingAudioOutput = audioOutputRootInput.value.trim();
+    setRunScreenState("audio", "running");
     await showScreen("audio-run");
     setStatus("Running audio");
   } catch (error) {
@@ -3701,6 +3706,7 @@ async function runAudioProcessing() {
     state.pendingAudioOutput = "";
     setStatus(error.message);
     audioProgressLabel.textContent = error.message;
+    setRunScreenState("audio", "failed", error.message);
   }
 }
 
@@ -3802,6 +3808,7 @@ async function runAnalysis() {
     }
     state.activeRunIds.analysis = runId;
     runAccepted = true;
+    setRunScreenState("analysis", "running");
     await showScreen("analysis-run");
     setStatus("Running analysis");
   } catch (error) {
@@ -3861,6 +3868,32 @@ function createSegmentManifest() {
 
 // The backend owns process execution; this poller only reflects its current
 // state into whichever run screen is active.
+function setRunScreenState(kind, status, message = "") {
+  const name = {
+    procurement: "Procurement",
+    audio: "Audio processing",
+    face: "Native Face processing",
+    text: "Text processing",
+    analysis: "Analysis",
+  }[kind];
+  const root = document.querySelector(kind === "procurement" ? "#runProgressView" : `#${kind}RunScreen`);
+  if (!name || !root) return;
+  const running = status === "running";
+  root.querySelector(".spinner").classList.toggle("hidden", !running);
+  root.querySelector('button[id^="stop"]').disabled = !running;
+  root.querySelector("h2").textContent = running
+    ? `Running ${name.toLowerCase()}`
+    : `${name} ${status === "complete" ? "complete" : status === "stopped" ? "stopped" : "failed"}`;
+  const subtitle = root.querySelector(".run-center > p, :scope > p");
+  if (subtitle) subtitle.textContent = message || (running
+    ? "The selected run is in progress."
+    : status === "complete"
+      ? "The selected run completed successfully."
+      : status === "stopped"
+        ? "The run was stopped. Review any partial outputs before starting again."
+        : "The run could not complete. Review the error below before starting again.");
+}
+
 async function pollState() {
   try {
     const payload = await api(state.settingsLoaded ? "/api/state" : "/api/state?configuration=1");
@@ -3928,6 +3961,7 @@ async function pollState() {
             ? audioProgressLabel
             : progressLabel;
     if (payload.running) {
+      setRunScreenState(runKind, "running");
       const total = Number(progress.total || 0);
       const current = Number(progress.current || 0);
       const percent = total > 0 ? Math.max(3, Math.min(100, Math.round((current / total) * 100))) : 15;
@@ -3938,6 +3972,7 @@ async function pollState() {
       state.handledRunIds.add(runId);
       activeBar.style.width = "100%";
       activeLabel.textContent = "Complete";
+      setRunScreenState(runKind, "complete");
       setStatus("Complete");
       if (runKind === "procurement") {
         const plan = state.workflow.active ? state.workflow.plan : null;
@@ -4007,6 +4042,7 @@ async function pollState() {
       }
       const failureMessage = payload.status === "stopped" ? "Stopped." : analysisFailureMessage(progress);
       activeLabel.textContent = failureMessage;
+      setRunScreenState(runKind, payload.status, failureMessage);
       setStatus(payload.status === "stopped" ? "Stopped" : failureMessage);
       if (runKind === "analysis") {
         state.activeRunIds.analysis = null;

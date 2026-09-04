@@ -1041,6 +1041,7 @@ def _validate_transcription_manifest(
         output_root=paths["whisper"],
         model=settings.whisper_model,
         requested_device=settings.whisper_device,
+        requested_language=settings.whisper_language or None,
     )
 
 

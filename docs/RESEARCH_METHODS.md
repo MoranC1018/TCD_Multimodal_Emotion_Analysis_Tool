@@ -328,6 +328,14 @@ Linear histograms remain the primary output.
 count, mean, sample standard deviation, min, max, interpolated quartiles,
 median, excess kurtosis, non-zero count, and non-zero percentage.
 
+Machine-readable descriptive statistics retain floating-point precision until
+aggregation; workbook presentation rounds to two decimals. Releases before
+2026-09-04 rounded per-recording statistics before weighting them. Reproducing
+those historical files and regenerating corrected estimates are distinct tasks.
+Audio dimensional bounds are nominal regression ranges, so finite values outside
+them must retain the same declared scaling and be accounted for when comparing
+histogram totals with descriptive-statistic counts.
+
 For `n > 1`, sample standard deviation uses:
 
 ```text

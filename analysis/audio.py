@@ -532,9 +532,9 @@ def valence_to_signed_score(value: str | None) -> str:
     number = to_float(value)
     if number is None:
         return ""
-    if 0 <= number <= 1:
-        number = (number * 200) - 100
-    return format_number(number)
+    # This adapter consumes raw model output. Regression estimates may exceed
+    # their nominal 0..1 range; inferring units from each value mixes two scales.
+    return format_number((number * 200) - 100)
 
 
 def clean_integer(value: str | None) -> str:
