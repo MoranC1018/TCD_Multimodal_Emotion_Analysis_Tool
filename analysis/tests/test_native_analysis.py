@@ -261,7 +261,7 @@ def test_native_face_emotion_report_keeps_arousal_as_arousal(tmp_path: Path) -> 
     assert "Engagement" not in section_names
     arousal_index = next(index for index, row in enumerate(rows) if row == ["Arousal"])
     arousal_mean = next(row for row in rows[arousal_index + 1 :] if row and row[0] == "mean")
-    assert arousal_mean[1:] == ["75"]
+    assert [float(value) for value in arousal_mean[1:]] == [75.0]
     assert {
         path.relative_to(tmp_path).as_posix(): path.read_bytes()
         for path in tmp_path.rglob("*")

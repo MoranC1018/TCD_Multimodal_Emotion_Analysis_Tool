@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "stage": "procurement",
+  "options": {
+    "mode": "clean-speaker-beta",
+    "source_path": "C:/Research/TrinityStudy/sources.docx",
+    "beta_output_mode": "clean",
+    "beta_min_clean_seconds": 10.0,
+    "beta_gap_seconds": 0.5,
+    "beta_identity_stills": 20,
+    "beta_scan_fps": 1.0,
+    "beta_validation_fps": 4.0,
+    "beta_face_confidence": 0.65,
+    "beta_speaker_confidence": 0.65,
+    "beta_worker_count": 1,
+    "beta_device": "cpu",
+    "beta_keep_debug": false,
+    "beta_resource_guard_percent": 15.0,
+    "beta_resource_poll_seconds": 15.0,
+    "beta_resource_guard_timeout_seconds": 900.0,
+    "beta_parallel_detector_streams": false,
+    "beta_max_download_height": 720,
+    "beta_random_one": false,
+    "beta_isolated_video_processes": true,
+    "beta_skip_completed_outputs": true,
+    "beta_video_cooldown_seconds": 60.0,
+    "beta_max_affinity_cores": 2,
+    "beta_native_threads": 1
+  },
+  "timeout_seconds": 43200
+}

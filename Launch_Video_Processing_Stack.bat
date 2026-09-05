@@ -49,7 +49,7 @@ exit /b 1
 :try_python
 if not exist "%~1" exit /b 0
 "%~1" -c "import sys, webview; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>nul
-if errorlevel 1 exit /b 0
+if not "!errorlevel!"=="0" exit /b 0
 set "launcher_attempted=1"
 "%~1" -m application.launcher
 set "launcher_status=!errorlevel!"

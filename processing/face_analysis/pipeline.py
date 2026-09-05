@@ -576,8 +576,10 @@ def _analysis_config(settings: FaceProcessingConfig) -> dict[str, object]:
 
 
 def _analysis_config_from_mapping(config: Mapping[str, object]) -> dict[str, object]:
+    # Manifest JSON stores tuple settings such as source_ids as lists.
+    # Compare the same JSON representation for both saved and live settings.
     return {
-        str(key): value
+        str(key): _plain_json_value(value)
         for key, value in config.items()
         if key not in _RUN_POLICY_CONFIG_KEYS
     }

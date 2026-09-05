@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "stage": "procurement",
+  "options": {
+    "mode": "full",
+    "source_path": "C:/Research/TrinityStudy/sources.csv",
+    "selected_ids": [
+      "source-0001",
+      "source-0003"
+    ]
+  }
+}

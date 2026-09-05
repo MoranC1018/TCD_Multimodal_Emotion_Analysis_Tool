@@ -1153,6 +1153,12 @@ def build_descriptor_rows(
 
 
 def describe(values: Sequence[float]) -> dict[str, object]:
+    """Keep numeric precision for downstream aggregation of the generated CSV.
+
+    Presentation formatting belongs at the display boundary: combined workbooks
+    pool these per-video statistics and apply their own two-decimal cell format.
+    """
+
     finite = sorted(finite_values(values))
     count = len(finite)
     if count == 0:
@@ -1176,16 +1182,16 @@ def describe(values: Sequence[float]) -> dict[str, object]:
     kurtosis = excess_kurtosis(finite, mean)
     return {
         "count": count,
-        "mean": format_number(mean),
-        "stddev": format_number(stddev),
-        "min": format_number(finite[0]),
-        "q1": format_number(percentile(finite, 0.25)),
-        "median": format_number(percentile(finite, 0.50)),
-        "q3": format_number(percentile(finite, 0.75)),
-        "max": format_number(finite[-1]),
-        "kurtosis": format_number(kurtosis),
+        "mean": mean,
+        "stddev": stddev,
+        "min": finite[0],
+        "q1": percentile(finite, 0.25),
+        "median": percentile(finite, 0.50),
+        "q3": percentile(finite, 0.75),
+        "max": finite[-1],
+        "kurtosis": kurtosis,
         "nonzero_count": nonzero_count,
-        "nonzero_percent": format_number(nonzero_count / count * 100.0),
+        "nonzero_percent": nonzero_count / count * 100.0,
     }
 
 

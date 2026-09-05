@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import stat
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 
-from spreadsheet_safety import SpreadsheetSafeWriter
+from spreadsheet_safety import SpreadsheetSafeWriter, neutralize_spreadsheet_value
 from procurement.input_limits import count_json_items
 from .source_context import (
     MAX_SOURCE_CONTEXT_BYTES,
@@ -24,6 +26,151 @@ from .source_context import (
 
 AUDIO_ANALYSIS_FILENAME = "audio_analysis.csv"
 MAX_AUDIO_MANIFEST_BYTES = 1024 * 1024
+BATCH_MANIFEST_FILENAME = "audio_analysis_manifest.csv"
+BATCH_STATE_FILENAME = ".audio_analysis_run.json"
+MAX_BATCH_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_BATCH_MANIFEST_ROWS = 10_000
+
+
+def current_batch_audio_inputs(root: Path) -> tuple[list[Path], list[Path]] | None:
+    """Select a complete batch by its manifest; None means an unmanifested legacy tree.
+
+    Absolute producer paths are checked for internal consistency, then remapped
+    through video_folder. This lets an intact run be copied to another machine.
+    No producer absolute path is opened and no invalid manifest falls back to glob.
+    """
+
+    manifest = root / BATCH_MANIFEST_FILENAME
+    state_path = root / BATCH_STATE_FILENAME
+    has_manifest = _lexically_exists(manifest)
+    if not has_manifest and not _lexically_exists(state_path):
+        return None
+    try:
+        state = None
+        if _lexically_exists(state_path):
+            state = json.loads(_control_snapshot(state_path, root, max_bytes=65536, label="batch state"))
+            if (
+                not isinstance(state, dict) or state.get("version") != 1
+                or state.get("status") != "complete"
+                or type(state.get("expected_count")) is not int
+                or not 0 < state["expected_count"] <= MAX_BATCH_MANIFEST_ROWS
+            ):
+                raise ValueError("Incomplete or invalid audio batch state; rerun extraction to completion.")
+        if not has_manifest:
+            raise ValueError("Incomplete audio batch: its manifest is missing.")
+        content = _control_snapshot(manifest, root, max_bytes=MAX_BATCH_MANIFEST_BYTES, label="batch manifest")
+        if state is not None and state.get("manifest_sha256") != hashlib.sha256(content).hexdigest():
+            raise ValueError("Audio batch manifest does not match its completed run state.")
+        reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig")), strict=True)
+        required = {
+            "status", "video_folder", "output_folder", "audio_analysis_csv",
+            "opensmile_features_csv", "per_video_manifest", "window_count",
+        }
+        if (
+            not reader.fieldnames or len(reader.fieldnames) != len(set(reader.fieldnames))
+            or not required.issubset(reader.fieldnames)
+        ):
+            raise ValueError("Invalid audio batch manifest columns.")
+        analysis_paths: list[Path] = []
+        feature_paths: list[Path] = []
+        seen: set[str] = set()
+        producer_root = None
+        for row in reader:
+            if len(analysis_paths) >= MAX_BATCH_MANIFEST_ROWS:
+                raise ValueError("Audio batch manifest exceeds the row limit.")
+            if None in row or any(value is None for value in row.values()) or row["status"] != "ok":
+                raise ValueError("Incomplete or malformed audio batch manifest row.")
+            raw_folder = row["video_folder"]
+            producer_folder = _manifest_path(row["output_folder"])
+            # Spreadsheet escaping is reversible only when the declared output
+            # path confirms the unescaped folder; preserve literal apostrophes.
+            if raw_folder.startswith("'") and neutralize_spreadsheet_value(raw_folder[1:]) == raw_folder:
+                candidate = _manifest_path(raw_folder[1:])
+                if producer_folder.parts[-len(candidate.parts):] == candidate.parts:
+                    raw_folder = raw_folder[1:]
+            folder = _manifest_path(raw_folder)
+            if folder.is_absolute() or PureWindowsPath(raw_folder).drive:
+                raise ValueError("Audio batch manifest video_folder must be relative.")
+            key = str(folder).casefold()
+            if key in seen:
+                raise ValueError("Duplicate video_folder in audio batch manifest.")
+            seen.add(key)
+            folder_parts = tuple(part.casefold() for part in folder.parts)
+            producer_parts = tuple(part.casefold() for part in producer_folder.parts)
+            if folder_parts and producer_parts[-len(folder_parts):] != folder_parts:
+                raise ValueError("Audio batch manifest output_folder does not match video_folder.")
+            base = producer_parts[:-len(folder_parts)] if folder_parts else producer_parts
+            if producer_root is not None and base != producer_root:
+                raise ValueError("Audio batch manifest contains inconsistent output roots.")
+            producer_root = base
+            count = row["window_count"]
+            if not count.isdecimal() or not 0 < int(count) <= 10_000:
+                raise ValueError("Invalid window_count in audio batch manifest.")
+            selected = []
+            for field, filename in (
+                ("audio_analysis_csv", AUDIO_ANALYSIS_FILENAME),
+                ("opensmile_features_csv", "opensmile_features.csv"),
+                ("per_video_manifest", "audio_analysis_manifest.json"),
+            ):
+                declared = _manifest_path(row[field])
+                expected = producer_folder / filename
+                if str(declared).casefold() != str(expected).casefold():
+                    raise ValueError(f"Audio batch manifest {field} disagrees with output_folder.")
+                local_path = root.joinpath(*folder.parts, filename)
+                _preflight_regular_source(local_path, root, "batch manifest output")
+                selected.append(local_path)
+            per_video = json.loads(_control_snapshot(
+                selected[2], root, max_bytes=MAX_AUDIO_MANIFEST_BYTES, label="per-video manifest"
+            ))
+            if not isinstance(per_video, dict) or per_video.get("window_count", int(count)) != int(count):
+                raise ValueError("Per-video manifest disagrees with audio batch window_count.")
+            analysis_paths.append(selected[0])
+            feature_paths.append(selected[1])
+        if not analysis_paths or (state is not None and len(analysis_paths) != state["expected_count"]):
+            raise ValueError("Incomplete audio batch manifest: unexpected result count.")
+        return analysis_paths, feature_paths
+    except (OSError, UnicodeError, json.JSONDecodeError, csv.Error) as exc:
+        raise ValueError(f"Invalid or incomplete audio batch manifest: {exc}") from exc
+
+
+def _manifest_path(value: str) -> PurePosixPath:
+    if not value or "\x00" in value:
+        raise ValueError("Audio batch manifest contains an empty or invalid path.")
+    path = PurePosixPath(value.replace("\\", "/"))
+    if ".." in path.parts:
+        raise ValueError("Audio batch manifest paths must not contain parent traversal.")
+    return path
+
+
+def discover_audio_output_files(root: Path) -> tuple[list[Path], list[Path], set[Path]]:
+    """Honor the nearest batch manifest, including runs below a legacy parent."""
+
+    current = current_batch_audio_inputs(root)
+    if current is not None:
+        return current[0], current[1], {root}
+    managed_roots: set[Path] = set()
+    analysis_paths: list[Path] = []
+    feature_paths: list[Path] = []
+    candidates = {
+        path.parent for name in (BATCH_MANIFEST_FILENAME, BATCH_STATE_FILENAME)
+        for path in root.rglob(name)
+    }
+    for directory in sorted(candidates, key=lambda path: (len(path.parts), str(path).casefold())):
+        if any(parent in managed_roots for parent in directory.parents):
+            continue
+        selected = current_batch_audio_inputs(directory)
+        if selected is None:
+            raise ValueError("Audio batch manifest disappeared during discovery.")
+        analysis_paths.extend(selected[0])
+        feature_paths.extend(selected[1])
+        managed_roots.add(directory)
+    for filename, paths in ((AUDIO_ANALYSIS_FILENAME, analysis_paths), ("opensmile_features.csv", feature_paths)):
+        paths.extend(
+            path for path in root.rglob(filename)
+            if not any(parent in managed_roots for parent in path.parents)
+        )
+        paths.sort(key=lambda path: str(path).casefold())
+    return analysis_paths, feature_paths, managed_roots
 
 
 def export_batch_to_analysis_audio_outputs(
@@ -45,9 +192,12 @@ def export_batch_to_analysis_audio_outputs(
     _preflight_destination_path(resolved_repo_root, audio_outputs_root, destination_root)
     _preflight_destination_tree(destination_root)
 
-    source_csvs = sorted(audio_output_root.rglob(AUDIO_ANALYSIS_FILENAME), key=lambda item: str(item).casefold())
-    context_paths = sorted(audio_output_root.rglob("source_context.json"), key=lambda item: str(item).casefold())
+    source_csvs, _feature_csvs, managed_roots = discover_audio_output_files(audio_output_root)
     expected_context_paths = {source_csv.parent / "source_context.json" for source_csv in source_csvs}
+    context_paths = [
+        path for path in audio_output_root.rglob("source_context.json")
+        if path in expected_context_paths or not any(parent in managed_roots for parent in path.parents)
+    ]
     orphan_contexts = [path for path in context_paths if path not in expected_context_paths]
     if orphan_contexts:
         raise ValueError(f"Orphan audio source context has no audio analysis CSV: {orphan_contexts[0]}")

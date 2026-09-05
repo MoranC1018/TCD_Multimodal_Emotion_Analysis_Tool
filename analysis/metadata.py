@@ -19,6 +19,7 @@ from processing.audio_analysis.audio_pipeline.source_context import (
     MAX_SOURCE_MANIFEST_ITEMS,
     MAX_SOURCE_METADATA_BYTES,
 )
+from processing.io_utils import assert_local_filesystem_path_syntax, assert_no_output_path_aliases
 from spreadsheet_safety import neutralize_spreadsheet_value
 
 
@@ -91,7 +92,20 @@ def load_source_metadata(
 ) -> SourceMetadata:
     """Load the manifest snapshot and validate its paired metadata sidecar."""
 
-    path = Path(manifest_path).expanduser().resolve()
+    metadata, _manifest_raw, _metadata_raw = _load_source_metadata_snapshot(
+        manifest_path, expected_sha256=expected_sha256,
+    )
+    return metadata
+
+
+def _load_source_metadata_snapshot(
+    manifest_path: Path | str,
+    *,
+    expected_sha256: str = "",
+) -> tuple[SourceMetadata, bytes, bytes]:
+    """Validate one pair and retain the exact bytes used for that validation."""
+
+    path = _safe_source_path(manifest_path, "Source manifest").resolve()
     raw = _read_regular_bounded(path, MAX_SOURCE_MANIFEST_BYTES, "Source manifest")
     digest = hashlib.sha256(raw).hexdigest()
     if expected_sha256 and digest != str(expected_sha256).strip().casefold():
@@ -167,7 +181,7 @@ def load_source_metadata(
             )
         )
     _validate_metadata_sidecar(metadata_path, metadata_raw, catalog, tuple(fields), tuple(sources))
-    return SourceMetadata(path, digest, metadata_path, tuple(fields), tuple(sources))
+    return SourceMetadata(path, digest, metadata_path, tuple(fields), tuple(sources)), raw, metadata_raw
 
 
 def _validate_metadata_sidecar(
@@ -358,18 +372,21 @@ def map_report_source_ids(
 
 
 def find_source_manifest(paths: Sequence[Path | str]) -> Path:
-    """Find the one procurement sidecar pair available beside selected paths."""
+    """Find one validated snapshot, allowing exact copies beside native outputs."""
 
-    candidates: set[Path] = set()
+    candidates: list[Path] = []
     for raw_path in paths:
         associated_manifest = _associated_source_manifest(raw_path)
-        if associated_manifest is not None:
-            candidates.add(associated_manifest)
+        if associated_manifest is not None and associated_manifest not in candidates:
+            candidates.append(associated_manifest)
     if not candidates:
         raise ValueError("No paired source_manifest.json and source_metadata.csv were found for the selected run.")
-    if len(candidates) != 1:
-        raise ValueError("Selected Analysis sources refer to more than one source manifest.")
-    return next(iter(candidates))
+    _metadata, manifest_raw, metadata_raw = _load_source_metadata_snapshot(candidates[0])
+    for candidate in candidates[1:]:
+        _copied_metadata, copied_manifest_raw, copied_metadata_raw = _load_source_metadata_snapshot(candidate)
+        if (copied_manifest_raw, copied_metadata_raw) != (manifest_raw, metadata_raw):
+            raise ValueError("Selected Analysis sources refer to more than one source manifest snapshot.")
+    return candidates[0]
 
 
 def validate_source_manifest_associations(
@@ -379,33 +396,31 @@ def validate_source_manifest_associations(
 ) -> None:
     """Reject conflicting sidecars while allowing ordinary sidecarless exports."""
 
-    expected_path = Path(expected_manifest).expanduser().resolve()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None:
+        raise ValueError("Analysis source associations require an expected source manifest SHA-256.")
+    _metadata, expected_raw, expected_metadata_raw = _load_source_metadata_snapshot(
+        expected_manifest, expected_sha256=expected_sha256,
+    )
     for raw_path in paths:
         associated = _associated_source_manifest(raw_path)
         if associated is None:
             continue
-        if associated != expected_path:
-            raise ValueError(
-                f"Selected Analysis source {Path(raw_path).expanduser()} refers to a different source manifest."
-            )
-        raw = _read_regular_bounded(
-            associated,
-            MAX_SOURCE_MANIFEST_BYTES,
-            "Source manifest",
+        _copied_metadata, raw, metadata_raw = _load_source_metadata_snapshot(
+            associated, expected_sha256=expected_sha256,
         )
-        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        if (raw, metadata_raw) != (expected_raw, expected_metadata_raw):
             raise ValueError(
-                f"Selected Analysis source {Path(raw_path).expanduser()} refers to a changed source manifest."
+                f"Selected Analysis source {Path(raw_path).expanduser()} refers to a different source manifest snapshot."
             )
 
 
 def _associated_source_manifest(path: Path | str) -> Path | None:
-    current = Path(path).expanduser().resolve()
+    current = _safe_source_path(path, "Analysis source").resolve()
     if current.is_file():
         current = current.parent
     for directory in (current, *tuple(current.parents)[:6]):
-        manifest = directory / "source_manifest.json"
-        metadata = directory / "source_metadata.csv"
+        manifest = _safe_source_path(directory / "source_manifest.json", "Source manifest")
+        metadata = _safe_source_path(directory / "source_metadata.csv", "Source metadata")
         has_manifest = manifest.exists()
         has_metadata = metadata.exists()
         if has_manifest != has_metadata:
@@ -416,7 +431,7 @@ def _associated_source_manifest(path: Path | str) -> Path | None:
         if has_manifest:
             if not manifest.is_file() or not metadata.is_file():
                 raise ValueError(f"Procurement sidecars must be regular files: {directory}")
-            return manifest.resolve()
+            return manifest
     return None
 
 
@@ -444,9 +459,45 @@ def validate_text_profile_grouping(
             "Text is speaker-level, so every visible source for a speaker must stay in "
             f"the same output group: {', '.join(split)}."
         )
+    validate_speaker_text_source_selection(
+        metadata,
+        tuple(source_id for group in resolved.groups for source_id in group.source_ids),
+    )
+
+
+def validate_speaker_text_source_selection(
+    metadata: SourceMetadata,
+    visible_source_ids: Sequence[str],
+) -> None:
+    """A speaker aggregate cannot be filtered to only some of its source videos."""
+
+    selected_by_speaker: dict[str, set[str]] = {}
+    display_by_speaker: dict[str, str] = {}
+    for source in metadata.sources:
+        if source.selected:
+            selected_by_speaker.setdefault(source.speaker_key, set()).add(source.source_id)
+            display_by_speaker.setdefault(source.speaker_key, source.speaker)
+    visible = set(visible_source_ids)
+    partial = [
+        display_by_speaker[speaker_key]
+        for speaker_key, selected in selected_by_speaker.items()
+        if selected & visible and not selected.issubset(visible)
+    ]
+    if partial:
+        raise ValueError(
+            "Cannot apply a partial source selection to speaker-level Text for "
+            f"{', '.join(partial)}. Include every selected source for each speaker, "
+            "or import per-source Text results."
+        )
+
+
+def _safe_source_path(path: Path | str, label: str) -> Path:
+    lexical = assert_local_filesystem_path_syntax(path, description=label)
+    return assert_no_output_path_aliases(lexical, description=label)
 
 
 def _read_regular_bounded(path: Path, max_bytes: int, label: str) -> bytes:
+    path = _safe_source_path(path, label)
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"{label} must be a regular file: {path}")
     with path.open("rb") as handle:

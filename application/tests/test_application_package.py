@@ -157,10 +157,11 @@ class ApplicationPackageTests(unittest.TestCase):
             shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
             venv_python = root / ".venv" / "Scripts" / "python.exe"
             venv_python.parent.mkdir(parents=True)
+            # A venv redirector cannot be relocated without its pyvenv.cfg.
             try:
-                os.link(sys.executable, venv_python)
+                os.link(sys._base_executable, venv_python)
             except OSError:
-                shutil.copy2(sys.executable, venv_python)
+                shutil.copy2(sys._base_executable, venv_python)
 
             record = root / "launcher-invocation.txt"
             py_record = root / "py-invocation.txt"
@@ -194,6 +195,7 @@ class ApplicationPackageTests(unittest.TestCase):
                 (
                     str(command_dir),
                     str(Path(sys.executable).parent),
+                    str(Path(sys._base_executable).parent),
                     str(Path(os.environ["SystemRoot"]) / "System32"),
                 )
             )
@@ -229,9 +231,9 @@ class ApplicationPackageTests(unittest.TestCase):
             for target in (registered_313, registered_312):
                 target.parent.mkdir(parents=True)
                 try:
-                    os.link(sys.executable, target)
+                    os.link(sys._base_executable, target)
                 except OSError:
-                    shutil.copy2(sys.executable, target)
+                    shutil.copy2(sys._base_executable, target)
 
             record = root / "launcher-invocation.txt"
             py_record = root / "py-invocation.txt"
@@ -268,6 +270,7 @@ class ApplicationPackageTests(unittest.TestCase):
                 (
                     str(command_dir),
                     str(Path(sys.executable).parent),
+                    str(Path(sys._base_executable).parent),
                     str(Path(os.environ["SystemRoot"]) / "System32"),
                 )
             )
@@ -292,6 +295,70 @@ class ApplicationPackageTests(unittest.TestCase):
             self.assertEqual(Path(selected).resolve(), registered_312.resolve())
             self.assertEqual(automatic_install, "false")
             self.assertEqual(py_record.read_text(encoding="utf-8").strip(), "-0p;false")
+
+    def test_primary_launcher_skips_crashed_project_python_for_healthy_path_runtime(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="emotion-tool-crashed-python-") as raw_root:
+            root = Path(raw_root)
+            launcher = root / "Launch_Video_Processing_Stack.bat"
+            shutil.copy2(REPOSITORY_ROOT / launcher.name, launcher)
+            venv_python = root / ".venv" / "Scripts" / "python.exe"
+            venv_python.parent.mkdir(parents=True)
+            try:
+                os.link(sys._base_executable, venv_python)
+            except OSError:
+                shutil.copy2(sys._base_executable, venv_python)
+
+            record = root / "launcher-invocation.txt"
+            (root / "sitecustomize.py").write_text(
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                f"if Path(sys.executable).resolve() == Path({str(venv_python)!r}).resolve():\n"
+                "    os._exit(-1073741515)\n",
+                encoding="utf-8",
+            )
+            (root / "webview.py").write_text("", encoding="utf-8")
+            controlled_application = root / "application"
+            controlled_application.mkdir()
+            (controlled_application / "__init__.py").write_text("", encoding="utf-8")
+            (controlled_application / "launcher.py").write_text(
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['LAUNCHER_TEST_RECORD']).write_text(sys.executable, encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            command_dir = root / "commands"
+            command_dir.mkdir()
+            (command_dir / "py.cmd").write_text("@echo off\nexit /b 97\n", encoding="utf-8")
+            environment = dict(os.environ)
+            environment.update(
+                LOCALAPPDATA=str(root / "no-local-python"),
+                ProgramFiles=str(root / "no-program-files"),
+                PATH=os.pathsep.join((
+                    str(command_dir),
+                    str(Path(sys.executable).parent),
+                    str(Path(sys._base_executable).parent),
+                    str(Path(os.environ["SystemRoot"]) / "System32"),
+                )),
+                PATHEXT=".COM;.EXE;.BAT;.CMD",
+                PYTHONHOME=sys.base_prefix,
+                PYTHONPATH=str(root),
+                PYTHONDONTWRITEBYTECODE="1",
+                LAUNCHER_TEST_RECORD=str(record),
+            )
+            crashed_probe = subprocess.run(
+                [str(venv_python), "-c", "import sys, webview"],
+                cwd=root, env=environment, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(crashed_probe.returncode, 0xC0000135)
+
+            completed = subprocess.run(
+                [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(launcher)],
+                cwd=root, env=environment, input="\n",
+                capture_output=True, text=True, timeout=10,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(Path(record.read_text(encoding="utf-8")).resolve(), Path(sys.executable).resolve())
 
     def test_application_modules_are_importable(self) -> None:
         for module_name in (

@@ -84,13 +84,14 @@ def validate_transcription_settings(
     output_root: Path,
     model: str,
     requested_device: str,
+    requested_language: str | None = None,
 ) -> None:
     """Bind a resumed transcription inventory to the current Whisper request."""
 
     _require_same_path(payload.get("input_path"), input_path, "transcription input")
     _require_same_path(payload.get("output_root"), output_root, "transcription output")
     config = _require_mapping(payload.get("config"), "transcription config")
-    expected = {"task": "bilingual", "model": model, "language": None}
+    expected = {"task": "bilingual", "model": model, "language": requested_language}
     for key, value in expected.items():
         if config.get(key) != value:
             raise RuntimeError(

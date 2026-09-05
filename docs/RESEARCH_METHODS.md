@@ -228,8 +228,10 @@ action; only that child may receive a Hugging Face token.
 Text uses Whisper followed by RockSteady. Language precedence is the catalog
 row's YouTube-reported language, then explicit Whisper language, then blank;
 researcher `Language` remains ordinary metadata. RockSteady 0.4, its
-dictionaries, and a JDK/Javac are separately installed/licensed external
-requirements and are not downloaded by repository setup. SourceID and context
+dictionaries, and a JDK/Javac are separately licensed requirements. The supported
+Windows setup materializes and validates the tracked Git LFS JAR and locates or
+installs a complete JDK. See [Installation and validation](INSTALLATION_VALIDATION.md)
+for acquisition and readiness scope. SourceID and context
 identity pass through every stage and resume fingerprint.
 
 iMotions face CSVs are parsed after the `#DATA` marker or a detected
@@ -327,6 +329,14 @@ Linear histograms remain the primary output.
 `other_findings/descriptive_statistics.csv` records finite count, missing
 count, mean, sample standard deviation, min, max, interpolated quartiles,
 median, excess kurtosis, non-zero count, and non-zero percentage.
+
+Machine-readable descriptive statistics retain floating-point precision until
+aggregation; workbook presentation rounds to two decimals. Releases before
+2026-09-04 rounded per-recording statistics before weighting them. Reproducing
+those historical files and regenerating corrected estimates are distinct tasks.
+Audio dimensional bounds are nominal regression ranges, so finite values outside
+them must retain the same declared scaling and be accounted for when comparing
+histogram totals with descriptive-statistic counts.
 
 For `n > 1`, sample standard deviation uses:
 

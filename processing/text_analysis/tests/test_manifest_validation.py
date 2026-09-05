@@ -17,7 +17,7 @@ from processing.text_analysis.manifest_validation import (
 from processing.text_analysis.transcribe.provenance import build_output_provenance
 
 
-def _whisper_provenance(model: str = "small") -> dict[str, dict[str, object]]:
+def _whisper_provenance(model: str = "small", language: str | None = None) -> dict[str, dict[str, object]]:
     return build_output_provenance(
         {
             "engine": {"distribution": "openai-whisper", "version": "test"},
@@ -31,7 +31,7 @@ def _whisper_provenance(model: str = "small") -> dict[str, dict[str, object]]:
         },
         requested_task="bilingual",
         device="cpu",
-        requested_language=None,
+        requested_language=language,
     )
 
 
@@ -87,6 +87,23 @@ def test_transcription_resume_rejects_changed_model(tmp_path: Path) -> None:
             model="large-v3",
             requested_device="auto",
         )
+
+
+@pytest.mark.parametrize("language", ["en", "fr", ""])
+def test_pipeline_accepts_the_requested_transcription_language(tmp_path: Path, language: str) -> None:
+    from processing.text_analysis.pipeline import TextProcessingConfig, _validate_transcription_manifest
+
+    payload = _transcription_manifest(tmp_path)
+    payload["config"]["language"] = language or None
+    payload["whisper_provenance"] = _whisper_provenance(language=language or None)
+    paths = {"input": tmp_path / "input", "whisper": tmp_path / "whisper"}
+    settings = TextProcessingConfig(whisper_language=language)
+
+    _validate_transcription_manifest(payload, settings, paths)
+
+    payload["config"]["language"] = "de"
+    with pytest.raises(RuntimeError, match="language"):
+        _validate_transcription_manifest(payload, settings, paths)
 
 
 def test_selection_resume_rejects_changed_language_policy(tmp_path: Path) -> None:

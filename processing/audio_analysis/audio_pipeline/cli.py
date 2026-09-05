@@ -112,7 +112,7 @@ def print_console(message: str, stream=sys.stdout) -> None:
 
 
 def add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--window-seconds", type=float, default=10.0, help="OpenSMILE window size in seconds.")
+    parser.add_argument("--window-seconds", type=float, default=10.0, help="Analysis window size in seconds; at most 15 with emotion models enabled.")
     parser.add_argument("--stride-seconds", type=float, default=5.0, help="Seconds between analysis windows.")
     parser.add_argument(
         "--opensmile-feature-set",

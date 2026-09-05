@@ -87,7 +87,9 @@ CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
         "JAVA_HOME",
         "LANG",
         "LC_ALL",
+        "LNAME",
         "LOCALAPPDATA",
+        "LOGNAME",
         "MULTIMODAL_EMOTION_ROCKSTEADY_HOME",
         "NUMBER_OF_PROCESSORS",
         "OS",
@@ -113,6 +115,8 @@ CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
         "TORCH_HOME",
         "TRANSFORMERS_CACHE",
         "TRANSFORMERS_OFFLINE",
+        "USER",
+        "USERNAME",
         "USERPROFILE",
         "VOX_PROFILE_RELEASE_DIR",
         "WINDIR",
@@ -1435,9 +1439,11 @@ def validate_segment_manifest(
     *,
     selected_speakers: list[str] | None = None,
     require_scanned_source: bool = False,
+    scan_state: LauncherState | None = None,
 ) -> list[dict[str, object]]:
     """Normalize Focus intervals and reject invalid or overlapping selections."""
 
+    state = APP_STATE if scan_state is None else scan_state
     selected_segments = manifest.get("selected_segments")
     if not isinstance(selected_segments, list) or not selected_segments:
         raise ValueError("Focus mode needs at least one selected segment.")
@@ -1465,7 +1471,7 @@ def validate_segment_manifest(
             raise ValueError(f"Focus segment {index} has an invalid source identity: {exc}") from exc
         if allowed_speakers and backend.run_docx_extractions.speaker_match_key(raw_segment.get("speaker")) not in allowed_speakers:
             raise ValueError(f"Focus segment {index} belongs to an unchecked speaker.")
-        if require_scanned_source and not APP_STATE.is_allowed_segment_reference(raw_segment):
+        if require_scanned_source and not state.is_allowed_segment_reference(raw_segment):
             raise ValueError(f"Focus segment {index} is not one of the videos in the current scan.")
         try:
             start = float(raw_segment.get("start_seconds"))
@@ -1475,7 +1481,7 @@ def validate_segment_manifest(
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end - start < 0.5:
             raise ValueError(f"Focus segment {index} must be at least 0.5 seconds and start at or after zero.")
         if require_scanned_source:
-            duration = APP_STATE.allowed_duration_for_segment(raw_segment)
+            duration = state.allowed_duration_for_segment(raw_segment)
             if duration is None and identity.kind in {"file", "folder"}:
                 source_path = str(raw_segment.get("source_path") or "").strip()
                 if source_path and Path(source_path).expanduser().is_file():
@@ -1488,7 +1494,7 @@ def validate_segment_manifest(
                 raise ValueError(
                     f"Focus segment {index} ends at {end:.3f}s, after the video duration of {duration:.3f}s."
                 )
-        catalog_record = APP_STATE.catalog_record_for_segment(raw_segment, identity)
+        catalog_record = state.catalog_record_for_segment(raw_segment, identity)
         if catalog_record is not None:
             overlap_key = ("source-id", catalog_record.source_id or catalog_record.id)
         else:
@@ -2251,16 +2257,19 @@ def ram_limit_status(
 def configure_process_resources(
     process: subprocess.Popen[str],
     settings: dict[str, object],
+    *,
+    logger=None,
 ) -> None:
     """Apply the release resource policy to a new pipeline process."""
 
+    log = APP_STATE.log if logger is None else logger
     if not bool(settings.get("resourceLimitsEnabled", True)):
-        APP_STATE.log("Resource controls are disabled in Settings.")
+        log("Resource controls are disabled in Settings.")
         return
     try:
         import psutil
     except ImportError:
-        APP_STATE.log("Resource controls unavailable: install psutil.")
+        log("Resource controls unavailable: install psutil.")
         return
 
     try:
@@ -2271,13 +2280,14 @@ def configure_process_resources(
             int(settings.get("maxCpuCores") or 0),
         )
         managed.cpu_affinity(affinity)
-        APP_STATE.log(f"Resource control: CPU affinity limited to {len(affinity)}/{os.cpu_count() or 1} logical cores.")
+        log(f"Resource control: CPU affinity limited to {len(affinity)}/{os.cpu_count() or 1} logical cores.")
     except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError, OSError, ValueError) as exc:
-        APP_STATE.log(f"Resource control: CPU affinity could not be applied ({exc}).")
+        log(f"Resource control: CPU affinity could not be applied ({exc}).")
 
     monitor = threading.Thread(
         target=monitor_process_resources,
         args=(process, dict(settings)),
+        kwargs={"logger": log},
         daemon=True,
         name=f"resource-monitor-{process.pid}",
     )
@@ -2287,9 +2297,12 @@ def configure_process_resources(
 def monitor_process_resources(
     process: subprocess.Popen[str],
     settings: dict[str, object],
+    *,
+    logger=None,
 ) -> None:
     """Pause resource-heavy work and hard-stop sustained RAM pressure."""
 
+    log = APP_STATE.log if logger is None else logger
     try:
         import psutil
     except ImportError:
@@ -2327,11 +2340,11 @@ def monitor_process_resources(
                     reasons.append(f"GPU {gpu_percent:.1f}/{max_gpu_percent:.1f}%")
                 if set_process_tree_suspended(processes, psutil, suspended=True):
                     suspended = True
-                    APP_STATE.log(f"Resource control paused the tool: {', '.join(reasons)}.")
+                    log(f"Resource control paused the tool: {', '.join(reasons)}.")
                 else:
-                    APP_STATE.log("Resource control could not pause the process tree; it will retry.")
+                    log("Resource control could not pause the process tree; it will retry.")
             if ram_high and ram_pressure_started is not None and time.monotonic() - ram_pressure_started >= 30.0:
-                APP_STATE.log(
+                log(
                     "Resource control stopped the pipeline after RAM remained above its limit for 30 seconds."
                 )
                 terminate_process_tree(process)
@@ -2347,7 +2360,7 @@ def monitor_process_resources(
             ):
                 if set_process_tree_suspended(processes, psutil, suspended=False):
                     suspended = False
-                    APP_STATE.log("Resource control resumed the tool.")
+                    log("Resource control resumed the tool.")
         time.sleep(max(0.5, poll_seconds))
 
 

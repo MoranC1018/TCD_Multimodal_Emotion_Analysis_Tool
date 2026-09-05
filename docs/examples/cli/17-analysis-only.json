@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "stage": "analysis",
+  "options": {
+    "modalities": [
+      {
+        "name": "video",
+        "source_method": "run",
+        "source_path": "C:/Research/TrinityStudy/processed/face"
+      },
+      {
+        "name": "audio",
+        "source_method": "run",
+        "source_path": "C:/Research/TrinityStudy/processed/audio"
+      }
+    ],
+    "write_combined_workbook": false,
+    "write_graphs": true,
+    "include_logscale": false
+  }
+}

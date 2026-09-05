@@ -588,8 +588,10 @@ def _write_json_set(outputs, paths):
 def _read_saved_whisper_pass(path, expected_task):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"Cannot reuse saved Whisper output {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Cannot reuse saved Whisper output {path}: expected a JSON object.")
     if data.get("task") != expected_task or not isinstance(data.get("segments"), list):
         raise ValueError(
             f"Cannot reuse saved Whisper output {path}: expected task={expected_task!r} "

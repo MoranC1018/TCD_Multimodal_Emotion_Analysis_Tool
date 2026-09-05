@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "timeout_seconds": 43200,
+  "resources": {
+    "resourceLimitsEnabled": true,
+    "maxCpuPercent": 90.0,
+    "maxCpuCores": 0,
+    "maxGpuPercent": 95.0,
+    "ramLimitMode": "percent",
+    "maxRamPercent": 90.0,
+    "maxRamGb": 16.0,
+    "nativeThreads": 1,
+    "resourcePollSeconds": 2.0
+  },
+  "steps": [
+    {
+      "id": "procure",
+      "stage": "procurement",
+      "options": {
+        "mode": "full",
+        "source_path": "C:/Research/TrinityStudy/sources.csv"
+      }
+    },
+    {
+      "id": "face",
+      "stage": "face",
+      "options": {
+        "source_path": {
+          "from_step": "procure",
+          "output": "output_root"
+        },
+        "device": "cpu",
+        "sample_fps": 5.0
+      }
+    },
+    {
+      "id": "audio",
+      "stage": "audio",
+      "options": {
+        "source_path": {
+          "from_step": "procure",
+          "output": "output_root"
+        },
+        "device": "cpu",
+        "window_seconds": 10.0,
+        "stride_seconds": 5.0,
+        "include_emotions": true,
+        "stop_on_error": true
+      }
+    },
+    {
+      "id": "text",
+      "stage": "text",
+      "options": {
+        "source_path": {
+          "from_step": "procure",
+          "output": "output_root"
+        },
+        "whisper_model": "small",
+        "whisper_device": "cpu",
+        "default_language_variant": "eng",
+        "threads": 1
+      }
+    },
+    {
+      "id": "analysis",
+      "stage": "analysis",
+      "options": {
+        "modalities": [
+          {
+            "name": "video",
+            "source_method": "run",
+            "source_path": {
+              "from_step": "face",
+              "output": "output_root"
+            }
+          },
+          {
+            "name": "audio",
+            "source_method": "run",
+            "source_path": {
+              "from_step": "audio",
+              "output": "output_root"
+            }
+          },
+          {
+            "name": "text",
+            "source_method": "import",
+            "source_path": {
+              "from_step": "text",
+              "output": "output_root"
+            }
+          }
+        ],
+        "write_combined_workbook": true,
+        "write_graphs": true,
+        "confidence_level": 0.95,
+        "headline_policy": "weighted"
+      },
+      "native_options": {
+        "profile_options": {
+          "automatic_group_field": "Country",
+          "sort_fields": [
+            "Country"
+          ],
+          "manual_groups": [],
+          "metadata_filters": {}
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "stage": "native.text",
+  "options": {
+    "output_root": "C:/Research/TrinityStudy/native-text",
+    "args": [
+      "C:/Research/TrinityStudy/media",
+      "--output-root",
+      "C:/Research/TrinityStudy/native-text",
+      "--config",
+      "native-text-config.json",
+      "--from-stage",
+      "transcribe",
+      "--to-stage",
+      "postprocess"
+    ]
+  }
+}

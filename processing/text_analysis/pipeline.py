@@ -26,7 +26,12 @@ from analysis.text_pipeline.ownership import (
 )
 from procurement.external_tools import credential_free_media_environment
 from processing.io_utils import atomic_write_json, exclusive_process_lock, lexical_absolute_path
-from processing.catalog_context import discover_catalog_jobs, publish_catalog_run_context
+from processing.catalog_context import (
+    CatalogDiscoveryResult,
+    catalog_text_language,
+    discover_catalog_jobs,
+    publish_catalog_run_context,
+)
 
 from .contracts import TEXT_SCHEMA_VERSION, file_sha256, inventory_digest
 from .derived_views import DERIVED_MANIFEST, derive_category_view
@@ -63,6 +68,7 @@ from .rocksteady_adapter.runner import (
 from .rocksteady_transaction import rocksteady_pair_transaction
 from .transcribe.integrity import validate_transcription_artifact_set
 from .transcribe.provenance import collect_whisper_execution_identity
+from .transcribe.transcribe import _catalog_binding
 
 
 CORE_CATEGORIES = ("Active", "Negativ", "Passive", "Positiv", "Strong", "Weak")
@@ -358,6 +364,12 @@ def _run_text_pipeline_locked(
     paths = _pipeline_paths(settings, root)
     _validate_pipeline_paths(paths)
     _preflight_stage_targets(paths, STAGES[start_index : stop_index + 1])
+    if start_index:
+        # A completed historical inventory is not authority for a new cohort.
+        # Check the current catalog before replacing any sidecars or stage output.
+        transcription = _read_completed_manifest(paths["transcription_manifest"], "transcription")
+        _validate_transcription_manifest(transcription, settings, paths)
+        _validate_transcription_catalog_binding(transcription, settings, catalog_discovery)
     current_run_id = _validated_run_id(run_id)
     manifest_root = root / "processing" / "text_analysis" / "output"
     manifest_path = manifest_root / "runs" / current_run_id / "pipeline_manifest.json"
@@ -422,6 +434,7 @@ def _run_text_pipeline_locked(
                 _run(command, root)
                 payload = _read_completed_manifest(paths["transcription_manifest"], "transcription")
                 _validate_transcription_manifest(payload, settings, paths)
+                _validate_transcription_catalog_binding(payload, settings, catalog_discovery)
                 inventory_items = _inventory_from_transcription(payload, paths["whisper"])
                 _validate_source_provenance(inventory_items)
                 artifacts["transcribe"] = {
@@ -1041,7 +1054,45 @@ def _validate_transcription_manifest(
         output_root=paths["whisper"],
         model=settings.whisper_model,
         requested_device=settings.whisper_device,
+        requested_language=settings.whisper_language or None,
     )
+
+
+def _validate_transcription_catalog_binding(
+    payload: Mapping[str, object],
+    settings: TextProcessingConfig,
+    discovery: CatalogDiscoveryResult | None,
+) -> None:
+    """Require the saved cohort and each source binding to match this request."""
+
+    records = payload.get("videos")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        raise RuntimeError("Transcription catalog inventory is malformed")
+    if discovery is None:
+        if settings.source_ids or settings.catalog_sha256 or any(
+            row.get("source_id") or row.get("catalog_binding") for row in records
+        ):
+            raise RuntimeError("Transcription catalog binding has no current catalog evidence")
+        return
+    expected = {job.source_id: job for job in discovery.jobs}
+    actual = {str(row.get("source_id") or ""): row for row in records}
+    if len(actual) != len(records) or set(actual) != set(expected):
+        raise RuntimeError(
+            "Transcription catalog cohort does not match the current SourceID selection; "
+            "rerun from transcribe for the requested cohort"
+        )
+    for source_id, job in expected.items():
+        row = actual[source_id]
+        if (
+            row.get("catalog_binding") != _catalog_binding(job)
+            or row.get("identity") != job.relative_output.as_posix()
+            or Path(str(row.get("source_path") or "")).resolve() != job.media_path.resolve()
+            or str(row.get("requested_language") or "")
+            != catalog_text_language(job, settings.whisper_language)
+        ):
+            raise RuntimeError(
+                f"Transcription catalog binding changed for {source_id}; rerun from transcribe"
+            )
 
 
 def _validate_selection_manifest(

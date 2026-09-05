@@ -58,6 +58,25 @@ def write_opensmile_features_csv(path: Path) -> None:
 
 
 class AudioAnalysisTests(unittest.TestCase):
+    def test_raw_valence_uses_one_affine_scale_including_regression_overshoot(self) -> None:
+        # Regression models can overshoot their nominal 0..1 training range.
+        # The same documented transform must apply on either side of 0 and 1.
+        raw_values = ("-0.01", "0", "0.5", "1", "1.075053")
+        expected = ("-102", "-100", "0", "100", "115.0106")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "audio_analysis.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerows([
+                    ["#INFO"], ["#FormatVersion", "2"],
+                    ["#ModelDimensionalName", "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"],
+                    ["#DATA"], ["WindowIndex", "StartSeconds", "Valence"],
+                ])
+                for index, value in enumerate(raw_values, 1):
+                    writer.writerow([index, index * 5, value])
+            export = read_audio_analysis_export(path)
+            self.assertEqual(tuple(row["Valence"] for row in export.rows), expected)
+
     def test_audio_analysis_csv_is_converted_to_imotions_shaped_export(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "Speaker_A" / "Video_One_[abc123]" / "audio_analysis.csv"

@@ -2,11 +2,19 @@
 
 Date: 2026-08-21
 
+This is a historical report, not the current release gate. See
+[September release validation](RELEASE_VALIDATION_2026-09-04.md) for current
+software results and unresolved paper-release requirements, and
+[Installation and validation](INSTALLATION_VALIDATION.md) for current setup
+and verification instructions. Counts and timings below describe the August
+run and do not estimate installation reliability across machines.
+
 ## Outcome
 
-The implemented Procurement, native Face/Audio/Text Processing, import, and
-Analysis workflows are ready for local Windows research use when their
-structured dependency checks pass. Clean speaker segments remains labelled
+The August checks exercised implemented Procurement, native Face/Audio/Text
+Processing, import, and Analysis workflows for local Windows research use.
+Structured dependency checks are prerequisites; successful representative
+processing and output inspection are also required. Clean speaker segments remains labelled
 Beta. The launcher is a local desktop application backed by a loopback HTTP
 service; media paths are passed to local tools rather than uploaded into the
 interface.
@@ -84,7 +92,7 @@ is not a diagnostic system.
 | Focus preview | YouTube, MP4, WebM | Most reliable embedded playback. Browser codec support controls local preview. |
 | Audio Processing | MP4 file or recursive MP4 folder | Existing audio outputs can instead be imported. |
 | Native Face Processing | One supported video, recursive folder, authorized catalog subset, or verified result import | Requires cached/offline Detectorv2 and the pinned native stack. |
-| Native Text Processing | One supported video, recursive folder, authorized catalog subset, or verified result import | Requires Whisper plus an externally installed JDK/RockSteady 0.4 runtime. |
+| Native Text Processing | One supported video, recursive folder, authorized catalog subset, or verified result import | Requires Whisper, a complete JDK and the validated Git LFS-managed RockSteady 0.4 runtime. Current setup obtains/checks those prerequisites. |
 | Analysis | iMotions exports, native Face, audio processing, native SourceID-grain Text, or legacy speaker-grain Text | Produces per-source, per-speaker, provider-specific, and combined reports. |
 
 Unsupported local files, missing paths, empty folders, and DOCX files without
@@ -174,8 +182,12 @@ failures, or memory allocated outside observable process accounting.
 
 ## Verification Commands
 
-The post-commit release sweep completed 275 tests plus 25 parameterized
-subtests in 11.99 seconds. Run the same root-level collection with:
+The August post-commit release sweep completed 275 tests plus 25 parameterized
+subtests in 11.99 seconds. That historical collection is not the September
+release gate. Use the current commands in
+[Installation and validation](INSTALLATION_VALIDATION.md) for the full
+collection, strict browser contracts and separate real pipeline E2E suite.
+The following historical development commands are retained for context:
 
 ```powershell
 python -m pip install -r requirements-dev.txt
@@ -186,9 +198,11 @@ python processing/audio_analysis/run_audio_analysis.py doctor
 python tools/benchmark_launcher_limits.py --scales 100,1000,5000
 ```
 
-`pytest.ini` scopes collection to the desktop application and three source stages, excludes ignored
-local/recovery/vendor folders, and exposes the audio package to root-level
-tests. This avoids environment-specific collection failures.
+`pytest.ini` scopes default collection to the desktop application and three
+source stages, excludes listed local/recovery/vendor folders, and exposes the
+audio package to root-level tests. The full release command also explicitly
+includes `tools`; collection configuration does not guarantee that every
+environment-specific failure has been covered.
 
 Rendered desktop and narrow-window checks cover Home, Procurement source,
 review, Focus, and Settings. Assertions include no horizontal overflow, one
@@ -202,9 +216,11 @@ playhead, and long-segment acceptance.
   than inheriting arbitrary parent variables. Normal Face/Text children receive
   no secrets; a Hugging Face token may flow only to the explicit Face
   model-preparation child.
-- Repository setup does not download the separately licensed RockSteady 0.4
-  JAR/dictionaries or a JDK. Researchers must supply, license, and validate
-  that external runtime.
+- Current repository setup materializes and validates the separately licensed
+  RockSteady 0.4 Git LFS JAR, including its embedded default dictionary, and
+  locates or installs a complete JDK. Git LFS/object access is required when
+  the JAR is absent or a pointer; `-TextMode Require` makes Text readiness
+  mandatory. See the current installation guide for managed-machine options.
 - Py-Feat native Face estimates remain a separate provider from
   iMotions/AFFDEX. Primary-face selection is not speaker identification;
   unsupported/no-face values remain missing.

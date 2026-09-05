@@ -1,5 +1,6 @@
 import csv
 import re
+import statistics
 import tempfile
 import unittest
 from pathlib import Path
@@ -406,7 +407,14 @@ class IMotionsAnalysisTests(unittest.TestCase):
             self.assertIn("metric,001_First,002_Second", descriptor_text)
             self.assertIn("mean,", descriptor_text)
             self.assertIn("kurtosis,", descriptor_text)
-            self.assert_no_long_decimal_values(descriptor_text)
+            descriptor_rows = list(csv.reader(descriptor_text.splitlines()))
+            anger_index = descriptor_rows.index(["Anger"])
+            anger_stddev = next(
+                row for row in descriptor_rows[anger_index + 1 :] if row and row[0] == "stddev"
+            )
+            self.assertAlmostEqual(
+                float(anger_stddev[1]), statistics.stdev([0, 4.9, 5, 99.9, 100]), places=12
+            )
 
             raw_descriptor_text = (raw_output_dir / "combined" / "other_findings" / "descriptive_statistics.csv").read_text(encoding="utf-8")
             self.assertIn("Brow Furrow", raw_descriptor_text)

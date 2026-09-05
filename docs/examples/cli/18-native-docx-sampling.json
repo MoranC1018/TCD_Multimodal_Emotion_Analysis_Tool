@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "stage": "native.docx-sampling",
+  "options": {
+    "output_root": "C:/Research/TrinityStudy/docx-sampling",
+    "args": [
+      "C:/Research/TrinityStudy/sources.docx",
+      "--speaker-output-root",
+      "C:/Research/TrinityStudy/docx-sampling",
+      "--output",
+      "C:/Research/TrinityStudy/docx-sampling/sources-with-links.docx",
+      "--limit",
+      "1"
+    ]
+  }
+}
