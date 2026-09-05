@@ -633,6 +633,7 @@ Further technical documents:
 - [Research Methods and Reproducibility](docs/RESEARCH_METHODS.md)
 - [Installation and validation](docs/INSTALLATION_VALIDATION.md)
 - [Current software release review and defect register](docs/RELEASE_REVIEW_2026-09-04.md)
+- [CLI and Audio optimization validation](docs/CLI_RELEASE_VALIDATION_2026-09-05.md)
 - [September release validation and remaining gates](docs/RELEASE_VALIDATION_2026-09-04.md)
 - [Historical August readiness report](docs/RELEASE_READINESS.md)
 - [Analysis Calculations](analysis/CALCULATIONS.md)

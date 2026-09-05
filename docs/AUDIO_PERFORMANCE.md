@@ -9,7 +9,7 @@ unchanged. Video/Face and Text performance were outside this assessment.
 
 ## Measured result
 
-Two sequential ABBA comparisons used a 60-second synthetic repeated speech/video
+Three sequential ABBA comparisons used a 60-second synthetic repeated speech/video
 fixture, 10-second windows, 5-second stride, 11 windows, Windows CPU execution and
 four native threads. Each comparison loaded the actual SUPERB categorical
 fallback and audEERING dimensional models once and reused them for its four
@@ -20,12 +20,27 @@ comparison; this was actual inference, not mocked predictions.
 | --- | --- | --- | --- |
 | Prototype | 21.66 s | 19.11 s | 11.8% |
 | Implemented fast path | 23.51 s | 21.34 s | 9.3% |
+| Final code `9eba2c3`, four affinity cores and resource guard | 29.06 s | 27.92 s | 3.9% |
 
 These timings exclude the one-time model load (9.34 seconds in the first
-comparison), include extraction/OpenSMILE/inference/report writing, and are
+comparison and 7.65 seconds in the final comparison), include
+extraction/OpenSMILE/inference/report writing, and are
 observations on one host and one fixture. The ABBA order reduces simple warm-up
 bias; it does not eliminate machine load, filesystem/cache variation or provide
-a population estimate. Do not promise a 9–12% improvement on other recordings.
+a population estimate. Do not promise a fixed improvement on other recordings
+or compare absolute times across rows with different execution conditions.
+
+The final comparison used the public benchmark on unchanged Python sources from
+commit `9eba2c377686c39dd28805684a5d35c5d3fb27d8`, offline cached models, four
+affinity cores and four native threads, with the application's resource guard.
+The system RAM limit was 94%; the highest of 61 independent samples was 91.3%,
+and the execution log recorded no resource pauses. All four trials produced 11
+model rows and 11 acoustic rows, exactly equal across variants. Input and Python
+source hashes were unchanged. The latest observed reduction is **3.9%**; the
+earlier results show why the benefit should be measured on the intended workload.
+The fixture's audio is 60 seconds; its video/container lasts 60.139453 seconds.
+Full command, dependency, resource and CSV-comparison evidence is retained with
+the [CLI release validation](CLI_RELEASE_VALIDATION_2026-09-05.md).
 
 The first baseline spent about 18.37 of 22.91 seconds in emotion processing,
 including 1.29 seconds in its 11 FFmpeg window exports. Model inference remains the

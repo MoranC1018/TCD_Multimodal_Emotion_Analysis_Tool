@@ -22,7 +22,7 @@ New-Item -ItemType Directory -Force 'C:\Research\TrinityStudy\jobs' | Out-Null
 Copy-Item '.\docs\examples\cli\01-full-local.json' 'C:\Research\TrinityStudy\jobs\full.json'
 # Edit full.json to point at your media before continuing.
 $job = 'C:\Research\TrinityStudy\jobs\full.json'
-$run = 'C:\Research\TrinityStudy\runs\full-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+$run = 'C:\Research\TrinityStudy\runs\full-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
 & $python -m application.cli validate --job $job --run-dir $run
 if ($LASTEXITCODE -ne 0) { throw 'Job validation failed.' }
 & $python -m application.cli run --job $job --run-dir $run --timeout 7200
@@ -53,6 +53,7 @@ The run directory **must not exist**, including as an empty directory. `validate
 Except for `--help`, commands write one UTF-8 JSON result to stdout. Diagnostics and live child output go to stderr. Save or parse stdout separately:
 
 ```powershell
+$run = 'C:\Research\TrinityStudy\runs\parsed-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
 $resultText = & $python -m application.cli run --job $job --run-dir $run 2> 'C:\Research\TrinityStudy\workflow-stderr.log'
 $exitCode = $LASTEXITCODE
 $result = $resultText | ConvertFrom-Json
@@ -262,7 +263,11 @@ RUN/
   cancel.request.json      present if cancellation was requested
 ```
 
-The engines write their own manifests/provenance beneath output roots. Preserve those together with run evidence. `submitted.json` retains the submitted job, while `effective.json`, status and final results record an effective `--timeout` override. `submitted.json` and logs can contain study paths and identifiers; review them before sharing. A crash can leave no final `result.json`.
+Preserve stage outputs and their provenance together with the CLI run evidence. Text has additional shared workspace files described below. `submitted.json` retains the submitted job, while `effective.json`, status and final results record an effective `--timeout` override. `submitted.json` and logs can contain study paths and identifiers; review them before sharing. A crash can leave no final `result.json`.
+
+The native Text pipeline stores its aggregate ledger under `<repo>/processing/text_analysis/output/runs/<run_id>/pipeline_manifest.json`, and replaces `<repo>/processing/text_analysis/output/pipeline_manifest.json` with the latest run. Its stage artifacts and per-stage provenance still use the requested `output_root`. The native CLI has no aggregate-ledger-root override. Give every invocation a unique `native_options.run_id` (or retain its automatically generated ID); explicitly reusing an ID replaces that run's aggregate ledger. The Text step log prints the ledger path, while the public output map identifies the stage output root. Copy the per-run ledger into your evidence collection after completion instead of relying on the mutable latest pointer.
+
+Text also uses a shared process lock beneath that repository output directory. Overlapping Text pipeline calls in the same checkout are rejected even when their stage output roots differ. Serialize them in the scheduler, or use separate writable repository checkouts for concurrent Text work. Other stage artifacts and model caches have their own documented locations; an automation run directory is not a filesystem sandbox.
 
 From another terminal:
 

@@ -105,7 +105,15 @@ production defect requires a new output directory and a fresh relevant run.
 During Windows integration on 5 September 2026, the normal 90% RAM guard paused
 Audio at 91.8% and stopped it after 30 seconds, correctly preserving fail-stop
 behavior. The host subsequently had 23.914 GiB total and 3.803 GiB available.
-The planned final acceptance budget is explicitly 94%, retaining approximately
+The final acceptance budget was explicitly 94%, retaining approximately
 1.43 GiB reserve at the threshold, with enforcement and four CPU/native threads.
 Whisper registry inspection runs in a short-lived preflight process so the
 harness does not retain Torch in memory during child inference.
+
+The final all-phase run passed 15/15 cases at code commit
+`9eba2c377686c39dd28805684a5d35c5d3fb27d8`, with all 231 Python source hashes
+unchanged. See the [recorded CLI release validation](../../docs/CLI_RELEASE_VALIDATION_2026-09-05.md)
+for counts, raw-result comparisons and validation limits. The native Text
+aggregate ledger lives in the repository Text workspace, so its exact per-run
+file was copied into the private acceptance evidence with its hash and original
+location. Stage artifacts remain beneath their requested output roots.
