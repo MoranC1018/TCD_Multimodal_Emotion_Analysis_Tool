@@ -31,7 +31,8 @@ describes the supported user-facing installation.
 7. Compare every tracked source file before/after. Normal files use raw SHA-256;
    Git LFS files use their clean-filter Git identity so exact pointer hydration
    is allowed. A changed LFS payload changes that identity. Setup additionally
-   verifies the expected RockSteady size and SHA-256.
+   verifies the expected RockSteady size and SHA-256. The identity check supplies
+   its LFS filter configuration per command, without changing saved Git settings.
 
 The common harness is [test_windows_install.ps1](../scripts/test_windows_install.ps1).
 It refuses an existing `.venv` and requires a new evidence directory outside the

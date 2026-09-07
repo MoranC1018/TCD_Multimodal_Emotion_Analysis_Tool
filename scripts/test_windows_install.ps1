@@ -122,7 +122,9 @@ function Get-InstallTestSource {
         if ($file -cin $lfsFiles) {
             # The installer intentionally hydrates the tracked RockSteady pointer.
             # Its clean-filter Git identity stays equal only for the same LFS content.
-            $blob = & git -C $Repository hash-object "--path=$file" -- $path
+            # Explicit per-command configuration also works when a clean guest
+            # excludes global/system Git settings. It changes no saved config.
+            $blob = & git -C $Repository -c 'filter.lfs.process=git-lfs filter-process' -c 'filter.lfs.required=true' hash-object "--path=$file" -- $path
             if ($LASTEXITCODE -ne 0) { throw "Cannot verify the LFS identity of $file." }
             $hashes[$file] = "git-clean-blob:$blob"
         }

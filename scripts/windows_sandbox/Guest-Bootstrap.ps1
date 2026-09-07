@@ -74,6 +74,10 @@ try {
     New-Item -ItemType Directory -Path 'C:\InstallTest' | Out-Null
     $clone = 'C:\InstallTest\source'
     Invoke-SandboxNative -Executable $git -Arguments @('clone', '--filter=blob:none', '--no-checkout', $repository.Url, $clone) -TimeoutSeconds 900 -LogDirectory (Join-Path $attempt 'git-clone-process') | Out-Host
+    # Global/system configuration is deliberately excluded above. Register LFS
+    # only in this new guest clone so setup's lfs pull can hydrate RockSteady.
+    # Keep the initial checkout as pointers to exercise that installer path.
+    Invoke-SandboxNative -Executable $git -Arguments @('-C', $clone, 'lfs', 'install', '--local', '--skip-smudge') -LogDirectory (Join-Path $attempt 'git-lfs-configuration-process') | Out-Host
     Invoke-SandboxNative -Executable $git -Arguments @('-C', $clone, 'fetch', '--depth=1', 'origin', $repository.Commit) -TimeoutSeconds 600 -LogDirectory (Join-Path $attempt 'git-fetch-process') | Out-Host
     Invoke-SandboxNative -Executable $git -Arguments @('-C', $clone, 'checkout', '--detach', $repository.Commit) -TimeoutSeconds 900 -LogDirectory (Join-Path $attempt 'git-checkout-process') | Out-Host
     $actualCommit = (@(Invoke-SandboxNative -Executable $git -Arguments @('-C', $clone, 'rev-parse', 'HEAD')) -join '').Trim()

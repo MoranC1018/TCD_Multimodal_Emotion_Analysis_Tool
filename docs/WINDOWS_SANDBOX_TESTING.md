@@ -99,7 +99,11 @@ Start-Process -FilePath $configuration
 The guest downloads prerequisites, verifies their hashes, installs them, creates
 `C:\InstallTest\source` with a fresh clone, fetches and checks out the requested
 commit, and confirms the checkout is clean. Git LFS smudging is disabled for the
-clone so the setup script's own RockSteady materialization is exercised. It then
+clone so the setup script's own RockSteady materialization is exercised. LFS
+filters are registered with `git lfs install --local --skip-smudge` in the guest
+clone because global/system Git configuration is excluded. This preserves the
+initial pointers and allows the setup script's later `git lfs pull` to check out
+the actual JAR. It then
 runs from the clone:
 
 ```powershell

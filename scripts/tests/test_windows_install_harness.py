@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -144,6 +145,48 @@ class InstallEvidenceTests(unittest.TestCase):
             modified = json.loads(after.stdout)['hashes']
             for name in original:
                 self.assertNotEqual(original[name], modified[name])
+
+    def test_lfs_hydration_identity_without_global_or_system_git_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            payload = b'Exact installation fixture payload\x00\xff'
+            pointer = (
+                'version https://git-lfs.github.com/spec/v1\n'
+                f'oid sha256:{hashlib.sha256(payload).hexdigest()}\n'
+                f'size {len(payload)}\n'
+            )
+            (directory / '.gitattributes').write_text(
+                '*.bin filter=lfs diff=lfs merge=lfs -text\n', encoding='utf-8'
+            )
+            target = directory / 'weights.bin'
+            target.write_bytes(pointer.encode('utf-8'))
+            environment = os.environ.copy()
+            environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='NUL',
+                               GIT_LFS_SKIP_SMUDGE='1')
+            for arguments in (
+                ['init', '-q', root], ['-C', root, 'add', '.'],
+                ['-C', root, '-c', 'user.name=Install test', '-c',
+                 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'],
+            ):
+                subprocess.run(['git', *arguments], env=environment,
+                               check=True, capture_output=True)
+            command = (
+                "$env:GIT_CONFIG_NOSYSTEM='1'; $env:GIT_CONFIG_GLOBAL='NUL'; "
+                "$env:GIT_LFS_SKIP_SMUDGE='1'; Get-InstallTestSource -Repository "
+                + quote(root) + ' | ConvertTo-Json -Depth 8'
+            )
+
+            def snapshot():
+                result = self.run_ps(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout)['hashes']['weights.bin']
+
+            original = snapshot()
+            self.assertTrue(original.startswith('git-clean-blob:'))
+            target.write_bytes(payload)
+            self.assertEqual(original, snapshot())
+            target.write_bytes(payload + b'changed')
+            self.assertNotEqual(original, snapshot())
 
 
 if __name__ == "__main__":
