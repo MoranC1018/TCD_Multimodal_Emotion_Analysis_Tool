@@ -1,0 +1,100 @@
+name: Windows installation and acceptance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: Fresh environment on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    env:
+      PYTHONUTF8: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      OMP_NUM_THREADS: '4'
+      MKL_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '4'
+    steps:
+      - name: Check out the candidate without warmed project dependencies
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          lfs: false
+
+      - name: Record the hosted image baseline
+        shell: powershell
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'mea-install-evidence'
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          "PIP_CACHE_DIR=$(Join-Path $env:RUNNER_TEMP 'mea-pip-cache')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HF_HOME=$(Join-Path $env:RUNNER_TEMP 'mea-model-cache')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, OSArchitecture, TotalVisibleMemorySize, FreePhysicalMemory |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'hosted-os.json') -Encoding UTF8
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, Used, Free |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'hosted-disks.json') -Encoding UTF8
+          Get-Command python.exe, py.exe, java.exe, javac.exe, winget.exe, git.exe, node.exe -All -ErrorAction SilentlyContinue |
+            Select-Object Name, Source | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'pre-bootstrap-tools.json') -Encoding UTF8
+          [ordered]@{image_os=$env:ImageOS; image_version=$env:ImageVersion; commit=$env:GITHUB_SHA; run_id=$env:GITHUB_RUN_ID; run_attempt=$env:GITHUB_RUN_ATTEMPT; image_inventory='See Set up job / Runner Image / Included Software in this Actions run.'} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'hosted-image.json') -Encoding UTF8
+
+      - name: Select the documented Python prerequisite
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+
+      - name: Select Node for test automation
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
+      - name: Bootstrap and record WinGet prerequisite
+        shell: powershell
+        run: |
+          & scripts/windows_sandbox/install_winget.ps1 -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'mea-install-evidence\bootstrap-evidence')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare strict browser testing tools
+        shell: powershell
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'mea-browser-tools'
+          npm.cmd install --prefix $tools --no-audit --no-fund playwright@1.62.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $browser = @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe') |
+            Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $browser) { throw 'The hosted image has no Edge executable.' }
+          "MEAP_TEST_NODE=$((Get-Command node.exe).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "MEAP_TEST_PLAYWRIGHT=$(Join-Path $tools 'node_modules\playwright')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "MEAP_TEST_BROWSER_EXECUTABLE=$browser" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install, rerun setup and exercise the installed application
+        shell: powershell
+        run: |
+          & scripts/test_windows_install.ps1 -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'mea-install-evidence\validation') -EnvironmentKind GitHubHosted -RunRegression -RunBrowser
+          exit $LASTEXITCODE
+
+      - name: Retain installation and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-install-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mea-install-evidence
+            !${{ runner.temp }}/mea-install-evidence/**/downloads/**
+            !${{ runner.temp }}/mea-install-evidence/**/pytest-temp/**
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,21 @@
+{
+  "SchemaVersion": 1,
+  "VerifiedAtUtc": "2026-09-07",
+  "Git": {
+    "Version": "2.55.0.5",
+    "FileName": "Git-2.55.0.5-64-bit.exe",
+    "Url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/Git-2.55.0.5-64-bit.exe",
+    "Sha256": "d065a4e23c3d9a6b5073d609b5be0830227ec3ca053c083ba385061ddfaf94c6"
+  },
+  "WinGet": {
+    "Version": "1.29.290",
+    "FileName": "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+    "Url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.290/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+    "Sha256": "6824b6e9484ab24687d99a0c829d2bcbcc7849a70a4d0f596fc43c89d20dff15"
+  },
+  "WinGetDependencies": {
+    "FileName": "DesktopAppInstaller_Dependencies.zip",
+    "Url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.290/DesktopAppInstaller_Dependencies.zip",
+    "Sha256": "50c377516749002dcdda9c8e52f26e8e2ea73d52131ce96ffd082dcf60ca6677"
+  }
+}
