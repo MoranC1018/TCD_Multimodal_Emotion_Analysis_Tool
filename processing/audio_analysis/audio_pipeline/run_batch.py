@@ -40,6 +40,7 @@ def main() -> None:
             opensmile_feature_set=args.opensmile_feature_set,
             continue_on_error=not args.stop_on_error,
             skip_emotion_models=args.skip_emotion_models,
+            require_preferred_categorical=args.require_preferred_categorical,
             device=args.device,
             keep_temp_audio=args.keep_temp_audio,
             debug=args.debug,

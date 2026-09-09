@@ -120,10 +120,16 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         default="egemaps",
         help="OpenSMILE feature set. Use egemaps for the standard research pipeline.",
     )
-    parser.add_argument(
+    model_policy = parser.add_mutually_exclusive_group()
+    model_policy.add_argument(
         "--skip-emotion-models",
         action="store_true",
         help="Run only OpenSMILE extraction and leave model-output columns blank.",
+    )
+    model_policy.add_argument(
+        "--require-preferred-categorical",
+        action="store_true",
+        help="Require the pinned nine-class Vox-Profile checkpoint; fail if its configured wrapper cannot load.",
     )
     parser.add_argument(
         "--device",
@@ -156,6 +162,7 @@ def main() -> None:
                 stride_seconds=args.stride_seconds,
                 opensmile_feature_set=args.opensmile_feature_set,
                 skip_emotion_models=args.skip_emotion_models,
+                require_preferred_categorical=args.require_preferred_categorical,
                 device=args.device,
                 keep_temp_audio=args.keep_temp_audio,
                 debug=args.debug,
@@ -178,6 +185,7 @@ def main() -> None:
                 opensmile_feature_set=args.opensmile_feature_set,
                 continue_on_error=not args.stop_on_error,
                 skip_emotion_models=args.skip_emotion_models,
+                require_preferred_categorical=args.require_preferred_categorical,
                 device=args.device,
                 keep_temp_audio=args.keep_temp_audio,
                 debug=args.debug,

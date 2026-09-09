@@ -29,6 +29,8 @@ from .config import (
     resolve_opensmile_config,
 )
 from .emotion_models import (
+    CATEGORICAL_MODEL_NAME,
+    CATEGORICAL_MODEL_REVISION,
     MAX_CATEGORICAL_WINDOW_SECONDS,
     EmotionModelBundle,
     EmotionModelResult,
@@ -53,9 +55,12 @@ def validate_audio_options(
     *,
     skip_emotion_models: bool,
     device: str,
+    require_preferred_categorical: bool = False,
 ) -> None:
     """Reject invalid settings before loading models or replacing prior results."""
 
+    if skip_emotion_models and require_preferred_categorical:
+        raise ValueError("Cannot require the preferred categorical model and skip emotion models.")
     for name, value in (("window_seconds", window_seconds), ("stride_seconds", stride_seconds)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be a positive finite number")
@@ -70,7 +75,19 @@ def validate_audio_options(
         raise ValueError("Emotion model device must be one of: auto, cpu, cuda")
 
 
-def validate_requested_emotion_models(emotion_models: EmotionModels) -> None:
+def validate_requested_emotion_models(
+    emotion_models: EmotionModels, *, require_preferred_categorical: bool = False
+) -> None:
+    if require_preferred_categorical and (
+        getattr(emotion_models, "skipped", False)
+        or not getattr(emotion_models, "categorical_available", False)
+        or getattr(emotion_models, "categorical_model_name", "") != CATEGORICAL_MODEL_NAME
+        or getattr(emotion_models, "categorical_model_version", "") != CATEGORICAL_MODEL_REVISION
+    ):
+        raise RuntimeError(
+            f"The preferred categorical model {CATEGORICAL_MODEL_NAME}@{CATEGORICAL_MODEL_REVISION} "
+            "was required, but the supplied model bundle does not use that checkpoint."
+        )
     if getattr(emotion_models, "skipped", False):
         return
     unavailable = [
@@ -106,6 +123,7 @@ def run_single_video(
     opensmile_feature_set: str = "egemaps",
     emotion_models: EmotionModels | None = None,
     skip_emotion_models: bool = False,
+    require_preferred_categorical: bool = False,
     device: str = "auto",
     keep_temp_audio: bool = False,
     debug: bool = False,
@@ -120,6 +138,7 @@ def run_single_video(
         window_seconds, stride_seconds, opensmile_feature_set,
         skip_emotion_models=skip_emotion_models or bool(getattr(emotion_models, "skipped", False)),
         device=device,
+        require_preferred_categorical=require_preferred_categorical,
     )
     input_video = assert_confined_input_file(
         input_video, Path(input_video).expanduser().parent, description="Audio input"
@@ -153,8 +172,10 @@ def run_single_video(
     emit_progress(progress, f"Output folder: {output_dir}")
     if emotion_models is None:
         emit_progress(progress, "Loading emotion models.")
-        emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
-    validate_requested_emotion_models(emotion_models)
+        emotion_models = EmotionModelBundle.load(
+            skip=skip_emotion_models, device=device, require_preferred_categorical=require_preferred_categorical
+        )
+    validate_requested_emotion_models(emotion_models, require_preferred_categorical=require_preferred_categorical)
     output_dir.mkdir(parents=True, exist_ok=True)
     emit_progress(progress, "Preparing output files.")
     clean_single_video_outputs(output_dir)

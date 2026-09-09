@@ -278,7 +278,7 @@ class RunRequest:
 
 @dataclass(frozen=True)
 class AudioRunRequest:
-    """Audio processing options sent from the UI."""
+    """Audio processing options sent from the UI or typed automation jobs."""
 
     mode: str
     source_path: Path
@@ -293,6 +293,7 @@ class AudioRunRequest:
     stop_on_error: bool = False
     selected_source_ids: tuple[str, ...] = ()
     catalog_sha256: str = ""
+    require_preferred_categorical: bool = False
 
 
 @dataclass(frozen=True)
@@ -2789,6 +2790,8 @@ def build_audio_command(
     mode = str(request.mode or "").casefold()
     if mode not in {"batch", "single"}:
         raise ValueError(f"Unsupported audio mode: {request.mode}")
+    if request.require_preferred_categorical and not request.include_emotions:
+        raise ValueError("Requiring the preferred categorical model requires emotion models to be enabled.")
     if not 0.5 <= float(request.window_seconds) <= 120:
         raise ValueError("Audio window length must be between 0.5 and 120 seconds.")
     if request.include_emotions and float(request.window_seconds) > 15:
@@ -2835,6 +2838,8 @@ def build_audio_command(
     ]
     if not request.include_emotions:
         command.append("--skip-emotion-models")
+    if request.require_preferred_categorical:
+        command.append("--require-preferred-categorical")
     if request.keep_temp_audio:
         command.append("--keep-temp-audio")
     if request.debug:

@@ -167,7 +167,7 @@ class EmotionModelNormalisationTests(unittest.TestCase):
             ],
         )
 
-    def test_categorical_model_uses_standard_transformers_pipeline(self):
+    def test_fallback_model_uses_standard_transformers_pipeline(self):
         fake_classifier = FakeAudioClassificationPipeline()
         pipeline_calls = []
 
@@ -180,12 +180,12 @@ class EmotionModelNormalisationTests(unittest.TestCase):
             patch("audio_pipeline.emotion_models.import_transformers_pipeline", return_value=fake_pipeline),
             patch("audio_pipeline.emotion_models.load_audio_array", return_value=np.array([0.1, 0.2], dtype="float32")),
         ):
-            model = CategoricalWhisperEmotionModel.load(FakeTorch, "cpu")
+            model = FallbackCategoricalEmotionModel.load(FakeTorch, "cpu")
             probabilities = model.predict(Path("window.wav"))
 
         self.assertEqual(pipeline_calls[0][1]["task"], "audio-classification")
-        self.assertEqual(pipeline_calls[0][1]["model"], CATEGORICAL_MODEL_NAME)
-        self.assertEqual(pipeline_calls[0][1]["revision"], "b92dab65151206a603810ec8b72eb528b9dd983c")
+        self.assertEqual(pipeline_calls[0][1]["model"], FALLBACK_CATEGORICAL_MODEL_NAME)
+        self.assertEqual(pipeline_calls[0][1]["revision"], "441a7599c3b22107314dcbd9166621c5c83f2cc5")
         self.assertEqual(pipeline_calls[0][1]["device"], -1)
         self.assertEqual(fake_classifier.calls[0][1], None)
         self.assertEqual(probabilities["Happiness"], 0.7)
@@ -292,6 +292,8 @@ class EmotionModelNormalisationTests(unittest.TestCase):
                 patch("audio_pipeline.emotion_models.suppress_transformers_torchvision", side_effect=fake_suppress),
                 patch("audio_pipeline.emotion_models.importlib.util.spec_from_file_location", return_value=SimpleNamespace(loader=FakeLoader())),
                 patch("audio_pipeline.emotion_models.importlib.util.module_from_spec", return_value=SimpleNamespace()),
+                patch("audio_pipeline.emotion_models.prepare_vox_profile_model"),
+                patch("audio_pipeline.emotion_models.validate_vox_profile_checkpoint"),
             ):
                 VoxProfileWhisperEmotionModel.load(FakeTorch, "cpu", checkout)
 
@@ -315,7 +317,7 @@ class EmotionModelNormalisationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 CategoricalWhisperEmotionModel.load(FakeTorch, "cpu")
 
-        self.assertEqual(attempted_models, [CATEGORICAL_MODEL_NAME])
+        self.assertEqual(attempted_models, [])
 
 
 if __name__ == "__main__":

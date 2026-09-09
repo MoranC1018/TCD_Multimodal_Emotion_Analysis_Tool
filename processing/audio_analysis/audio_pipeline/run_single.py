@@ -28,6 +28,7 @@ def main() -> None:
             stride_seconds=args.stride_seconds,
             opensmile_feature_set=args.opensmile_feature_set,
             skip_emotion_models=args.skip_emotion_models,
+            require_preferred_categorical=args.require_preferred_categorical,
             device=args.device,
             keep_temp_audio=args.keep_temp_audio,
             debug=args.debug,

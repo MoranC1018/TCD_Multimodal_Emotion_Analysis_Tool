@@ -193,6 +193,7 @@ def run_batch(
     opensmile_feature_set: str = "egemaps",
     continue_on_error: bool = True,
     skip_emotion_models: bool = False,
+    require_preferred_categorical: bool = False,
     device: str = "auto",
     keep_temp_audio: bool = False,
     debug: bool = False,
@@ -205,6 +206,7 @@ def run_batch(
     validate_audio_options(
         window_seconds, stride_seconds, opensmile_feature_set,
         skip_emotion_models=skip_emotion_models, device=device,
+        require_preferred_categorical=require_preferred_categorical,
     )
     input_path = assert_no_output_path_aliases(
         input_path, description="Audio input"
@@ -252,8 +254,10 @@ def run_batch(
     if sidecar_pair is not None:
         preflight_run_sidecars(output_root, sidecar_pair)
     emit_progress(progress, "Loading shared emotion model bundle.")
-    emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
-    validate_requested_emotion_models(emotion_models)
+    emotion_models = EmotionModelBundle.load(
+        skip=skip_emotion_models, device=device, require_preferred_categorical=require_preferred_categorical
+    )
+    validate_requested_emotion_models(emotion_models, require_preferred_categorical=require_preferred_categorical)
     # Publish an incomplete marker before any sidecar or per-video output can
     # change. It deliberately survives errors and process interruption; an old
     # successful manifest must never describe a new partial run.
@@ -313,6 +317,7 @@ def run_batch(
                 opensmile_feature_set=opensmile_feature_set,
                 emotion_models=emotion_models,
                 skip_emotion_models=skip_emotion_models,
+                require_preferred_categorical=require_preferred_categorical,
                 keep_temp_audio=keep_temp_audio,
                 debug=debug,
                 debug_fallback_emotion_models=debug_fallback_models,

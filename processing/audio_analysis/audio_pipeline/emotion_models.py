@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import sys
@@ -157,7 +158,11 @@ class EmotionModelBundle:
         self.skipped = False
 
     @classmethod
-    def load(cls, *, skip: bool = False, device: str = "auto") -> EmotionModels:
+    def load(
+        cls, *, skip: bool = False, device: str = "auto", require_preferred_categorical: bool = False
+    ) -> EmotionModels:
+        if skip and require_preferred_categorical:
+            raise ValueError("Cannot require the preferred categorical model and skip emotion models.")
         if skip:
             return SkippedEmotionModels()
 
@@ -168,6 +173,8 @@ class EmotionModelBundle:
         try:
             categorical_model = CategoricalWhisperEmotionModel.load(torch, resolved_device)
         except Exception as exc:
+            if require_preferred_categorical:
+                raise RuntimeError(f"Required preferred categorical model could not load: {exc}") from exc
             preferred_error = exc
             try:
                 categorical_model = FallbackCategoricalEmotionModel.load(torch, resolved_device, purpose="main-fallback")
@@ -370,45 +377,18 @@ class CategoricalWhisperEmotionModel:
     @classmethod
     def load(cls, torch_module, device: str) -> "CategoricalWhisperEmotionModel":
         vox_profile_checkout = configured_vox_profile_checkout()
-        vox_profile_error = ""
-        if vox_profile_checkout is not None:
-            try:
-                return VoxProfileWhisperEmotionModel.load(torch_module, device, vox_profile_checkout)
-            except Exception as exc:
-                vox_profile_error = compact_error(exc)
-
-        suppress_transformers_torchvision()
-        pipeline = import_transformers_pipeline()
-        pipeline_device = 0 if device == "cuda" else -1
+        if vox_profile_checkout is None:
+            raise RuntimeError(
+                "The preferred categorical checkpoint requires the author's vox-profile-release wrapper. "
+                f"Set {VOX_PROFILE_DIR_ENV} to a local checkout containing src/model/emotion/whisper_emotion.py. "
+                "That checkout is not bundled with this tool."
+            )
         try:
-            classifier = pipeline(
-                task="audio-classification",
-                model=CATEGORICAL_MODEL_NAME,
-                revision=CATEGORICAL_MODEL_REVISION,
-                device=pipeline_device,
-            )
+            return VoxProfileWhisperEmotionModel.load(torch_module, device, vox_profile_checkout)
         except Exception as exc:
-            details = compact_error(exc)
-            if vox_profile_error:
-                details = (
-                    "configured vox-profile-release categorical backend unavailable: "
-                    f"{vox_profile_error}; Transformers load failed: {details}"
-                )
-            raise RuntimeError(details) from exc
-
-        warnings = []
-        if vox_profile_error:
-            warnings.append(
-                "configured vox-profile-release categorical backend unavailable; "
-                f"using Transformers backend: {vox_profile_error}"
-            )
-        return cls(
-            classifier=classifier,
-            device=device,
-            model_name=CATEGORICAL_MODEL_NAME,
-            model_version=CATEGORICAL_MODEL_REVISION,
-            load_warnings=warnings,
-        )
+            # This custom Hub-mixin checkpoint cannot use the generic Transformers
+            # audio-classification loader. Retain the actionable vendor failure.
+            raise RuntimeError(f"Configured vox-profile-release backend unavailable: {exc}") from exc
 
     def predict(self, window_wav: Path) -> dict[str, float | str]:
         samples = load_audio_array(window_wav)
@@ -454,6 +434,7 @@ class VoxProfileWhisperEmotionModel(CategoricalWhisperEmotionModel):
         module_path = checkout / "src" / "model" / "emotion" / "whisper_emotion.py"
         if not module_path.exists():
             raise RuntimeError(f"vox-profile-release wrapper not found: {module_path}")
+        validate_vox_profile_device_source(module_path, device)
 
         src_path = checkout / "src"
         emotion_path = src_path / "model" / "emotion"
@@ -472,8 +453,10 @@ class VoxProfileWhisperEmotionModel(CategoricalWhisperEmotionModel):
         model = wrapper_class.from_pretrained(
             CATEGORICAL_MODEL_NAME,
             revision=CATEGORICAL_MODEL_REVISION,
-        ).to(device)
-        model.eval()
+            map_location="cpu",
+        )
+        validate_vox_profile_checkpoint(model)
+        prepare_vox_profile_model(model, torch_module, device)
         return cls(
             classifier=model,
             device=device,
@@ -489,8 +472,110 @@ class VoxProfileWhisperEmotionModel(CategoricalWhisperEmotionModel):
         with torch.no_grad():
             outputs = self.classifier(tensor, return_feature=True)
         logits = outputs[0]
-        probabilities = torch.nn.functional.softmax(logits, dim=1).detach().cpu().numpy()[0]
+        if not isinstance(logits, torch.Tensor) or tuple(logits.shape) != (1, len(EMOTION_COLUMNS)):
+            raise RuntimeError("Preferred categorical logits must have shape (1, 9).")
+        if not torch.isfinite(logits).all().item():
+            raise RuntimeError("Preferred categorical logits contain non-finite values.")
+        probabilities = torch.nn.functional.softmax(logits.float(), dim=1)
+        if (
+            not torch.isfinite(probabilities).all().item()
+            or not ((probabilities >= 0) & (probabilities <= 1)).all().item()
+            or not torch.allclose(probabilities.sum(dim=1), probabilities.new_ones(1), rtol=1e-5, atol=1e-6)
+        ):
+            raise RuntimeError("Preferred categorical probabilities must be finite, within [0, 1], and sum to one.")
+        probabilities = probabilities.detach().cpu().numpy()[0]
         return {emotion: float(probabilities[index]) for index, emotion in enumerate(EMOTION_COLUMNS)}
+
+
+def validate_vox_profile_device_source(module_path: Path, device: str) -> None:
+    """Reject the known upstream CUDA-only implementation before model loading.
+
+    This targeted compatibility check is not validation of arbitrary vendor code.
+    Parsing ignores comments/docstrings and does not execute the external source.
+    """
+    if device != "cpu":
+        return
+    source = ast.parse(module_path.read_text(encoding="utf-8-sig"), filename=str(module_path))
+    if any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "cuda"
+        for node in ast.walk(source)
+    ):
+        raise RuntimeError(
+            "The configured Vox-Profile wrapper contains hard-coded CUDA calls and cannot run on CPU. "
+            "Use --device cuda on a supported CUDA runtime, or configure a reviewed device-portable "
+            "wrapper whose feature tensors follow x.device. The external source is not patched automatically."
+        )
+
+
+def validate_vox_profile_checkpoint(model) -> None:
+    """Check every saved key/shape without allocating a second checkpoint copy."""
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    checkpoint_path = hf_hub_download(
+        repo_id=CATEGORICAL_MODEL_NAME, filename="model.safetensors", revision=CATEGORICAL_MODEL_REVISION
+    )
+    # HubMixin uses strict=False. Only the explicitly saved positional alias may
+    # be absent; other missing weights must never leave constructor values active.
+    expected = model.state_dict()
+    alias = "embed_positions"
+    target = "backbone_model.encoder.embed_positions.weight"
+    with safe_open(checkpoint_path, framework="pt", device="cpu") as checkpoint:
+        saved_keys = set(checkpoint.keys())
+        has_alias = (
+            alias not in saved_keys
+            and (checkpoint.metadata() or {}).get(alias) == target
+            and target in saved_keys
+        )
+        missing = set(expected) - saved_keys - ({alias} if has_alias else set())
+        unexpected = saved_keys - set(expected)
+        if missing or unexpected:
+            raise RuntimeError(
+                "Vox-Profile checkpoint keys do not match the wrapper: "
+                f"missing {sorted(missing)[:8]}; unexpected {sorted(unexpected)[:8]}."
+            )
+        for name, tensor in expected.items():
+            saved_name = target if name == alias and has_alias else name
+            if tuple(checkpoint.get_slice(saved_name).get_shape()) != tuple(tensor.shape):
+                kind = "positional embedding" if "embed_positions" in name else "tensor"
+                raise RuntimeError(f"Vox-Profile checkpoint {kind} shape mismatch: {name}.")
+
+
+def prepare_vox_profile_model(model, torch_module, device: str) -> None:
+    """Adapt the author's wrapper without editing its external source checkout."""
+
+    # The checkpoint saves these as a shared tensor, but the vendor constructor
+    # makes a deepcopy. Forward replaces encoder positions with the standalone
+    # parameter, so restore it from the checkpoint-loaded encoder before use.
+    checkpoint_positions = model.backbone_model.encoder.embed_positions.weight
+    if model.embed_positions.shape != checkpoint_positions.shape:
+        raise RuntimeError("Vox-Profile positional embedding shapes do not match the loaded checkpoint.")
+    if not torch_module.isfinite(checkpoint_positions).all().item():
+        raise RuntimeError("Vox-Profile checkpoint positional embeddings contain non-finite values.")
+    with torch_module.no_grad():
+        model.embed_positions.copy_(checkpoint_positions)
+
+    # The vendor creates WhisperAttention without config. Transformers 4.53.3
+    # dereferences it in forward. Eager matches the author's 4.46.3 attention
+    # implementation; choosing SDPA would be a separate numerical backend change.
+    model.model_config._attn_implementation = "eager"
+    for layer in model.backbone_model.encoder.layers:
+        layer.self_attn.config = model.model_config
+
+    # CPU loading and eval (including LoRA merging) happen before CUDA placement.
+    # Forward uses only the encoder; transferring the unused ~3.63 GB FP32 decoder
+    # with the whole wrapper can exhaust an 8 GB GPU even at batch size one.
+    model.cpu().float().eval()
+    model.backbone_model.encoder.to(device=device, dtype=torch_module.float32)
+    model.embed_positions = torch_module.nn.Parameter(
+        model.embed_positions.detach().to(device=device, dtype=torch_module.float32),
+        requires_grad=False,
+    )
+    for name in (
+        "model_seq", "emotion_layer", "detailed_out_layer",
+        "arousal_layer", "valence_layer", "dominance_layer",
+    ):
+        getattr(model, name).to(device=device, dtype=torch_module.float32)
 
 
 def configured_vox_profile_checkout() -> Path | None:
