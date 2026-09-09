@@ -170,6 +170,21 @@ Native Face requires constant-frame-rate timing. Every input receives a streamed
 
 Audio defaults to 10-second windows and 5-second strides. Emotion-model windows must be at most **15 seconds**, following the categorical model input contract. For longer windows, set `include_emotions: false`; the ordinary interface permits windows/strides from 0.5 to 120 seconds. Missing, unsupported, or deliberately skipped emotion classes remain unavailable values, not measured zeros. Read the output model/provenance fields and [Audio documentation](../processing/audio_analysis/README.md).
 
+Set `require_preferred_categorical: true` when an Audio job must use the pinned nine-class Vox-Profile categorical model. The job then fails if that model cannot load instead of accepting a fallback categorical model. The default is `false`, preserving the existing fallback policy. This option requires `include_emotions: true`; validation and planning reject a job that also disables emotion models. For example:
+
+```json
+{
+  "schema_version": 1,
+  "stage": "audio",
+  "options": {
+    "source_path": "C:/Research/TrinityStudy/media",
+    "output_root": "C:/Research/TrinityStudy/processed/audio",
+    "include_emotions": true,
+    "require_preferred_categorical": true
+  }
+}
+```
+
 Text has five ordered stages: `transcribe`, `select`, `prepare`, `rocksteady`, `postprocess`. Ordinary jobs run all five unless `native_options.from_stage` or `to_stage` changes the range. Set both to the same stage to run that stage only. A later stage requires the earlier manifests and artifacts with matching source/configuration provenance.
 
 For a staged run, first set `to_stage` to `prepare` and choose an explicit `output_root`, such as `C:/Research/TrinityStudy/processed/text`. For the next invocation, use a **new CLI run directory** and the same Text output root, source, dictionaries, category and language choices; set `from_stage` to `rocksteady`. Example 09 does this. `force_rocksteady` explicitly requests regeneration; it is not a way to make stale upstream data valid. There is no general workflow resume command and no reuse of an existing CLI evidence directory.
@@ -499,6 +514,7 @@ $schema.'x-native-options' | ConvertTo-Json -Depth 30
 | `stride_seconds` | number | `5.0` | Window advance: 0.5–120 seconds. |
 | `opensmile_feature_set` | string | `"egemaps"` | egemaps, compare, or compare16. |
 | `include_emotions` | boolean | `true` | Run categorical/dimensional models in addition to acoustic extraction. |
+| `require_preferred_categorical` | boolean | `false` | Require the pinned nine-class Vox-Profile categorical model; fail if it cannot load. Requires `include_emotions: true`. |
 | `device` | string | `"auto"` | Face: auto/cpu/cuda/mps. Audio: auto/cpu/cuda. |
 | `keep_temp_audio` | boolean | `false` | Preserve intermediate converted audio. |
 | `debug` | boolean | `false` | Enable engine diagnostic detail. |

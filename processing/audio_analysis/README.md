@@ -153,21 +153,63 @@ acceptance run. Already-running batch jobs do not pick up newly installed
 packages. See [Installation and validation](../../docs/INSTALLATION_VALIDATION.md)
 for runtime choices, logs and troubleshooting.
 
-Optional Vox-Profile backend:
+Preferred categorical backend:
 
 The pipeline can use the model author's local `vox-profile-release` wrapper for
 the preferred categorical Whisper emotion model when it is explicitly
-configured. Keep that checkout outside git, install its extra dependency if
-needed, and set:
+configured. The checkout is not bundled or downloaded by the installer. Obtain
+the [author's wrapper](https://github.com/tiantiaf0627/vox-profile-release), keep
+it outside this repository, and set its actual local path:
 
 ```powershell
 $env:VOX_PROFILE_RELEASE_DIR="C:\path\to\vox-profile-release"
 ```
 
-If that variable is not set, the tool first uses the standard Transformers
-route for the preferred model. If the preferred adapter cannot load, the main
-output uses `superb/wav2vec2-base-superb-er` so categorical columns remain
-available. The manifest records the exact model and fallback warning.
+The preferred checkpoint is a custom `PyTorchModelHubMixin` model, not a generic
+Transformers audio-classification checkpoint. The adapter loads the emotion
+checkpoint at revision `b92dab65151206a603810ec8b72eb528b9dd983c`; missing or failed
+wrapper loads report that cause directly. `loralib==0.1.2` is included in this
+project's requirements. Do not install the vendor's entire older requirements
+over the supported environment; they include a different Torch/Transformers
+family and platform-specific dependencies.
+
+The reviewed upstream wrapper hard-codes `.cuda()` for extracted features in
+both forward branches. That source requires CUDA. A CPU request now rejects
+those calls during startup, before loading weights or replacing prior outputs.
+With default policy it may select the documented fallback; strict preferred mode
+fails clearly. CPU validation used an independently reviewed local wrapper with
+exactly those two calls changed to `.to(x.device)`. The adapter does not apply
+that external patch, and a generic unmodified vendor checkout is not verified
+CPU support. See [preferred-backend validation](../../docs/AUDIO_PREFERRED_VALIDATION_2026-09-09.md)
+for the tested environments and numerical reproducibility limits.
+
+By default, an unavailable preferred adapter still selects
+`superb/wav2vec2-base-superb-er`. The manifest records the selected checkpoint
+and fallback warning. For a run that must use all nine preferred classes, add
+`--require-preferred-categorical`:
+
+```powershell
+.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py single "C:\data\clip.mp4" --output "C:\data\preferred_check" --require-preferred-categorical --device cuda
+```
+
+Strict mode stops on preferred-load failure before replacing prior results.
+It is available for single and batch commands and cannot be combined with
+`--skip-emotion-models`. Python callers can pass `require_preferred_categorical=True`;
+injected bundles must report the preferred model ID and exact pinned revision.
+
+The adapter checks every checkpoint key and tensor shape, permitting only the
+explicitly declared saved positional-embedding alias. It supplies the attention
+configuration required by Transformers 4.53.3, uses eager attention, restores
+the positional values after validating they are finite, and keeps active modules in FP32.
+Each preferred prediction must contain nine finite probabilities in [0, 1]
+that sum to one; malformed outputs fail instead of being written as scores.
+On CUDA it leaves the unused Whisper decoder on CPU to avoid transferring
+approximately 3.63 GB of unused FP32 weights. CPU RAM and GPU activation memory
+are still required. The vendor source is not edited. This is not a claim that a
+checkpoint can run on every GPU: verify a short real input and its manifest
+before starting a large batch. The wrapper itself also loads base Whisper
+artifacts; checkpoint access/cache availability is required.
+
 Vox-Profile is not bundled or covered by this project's MIT License. Researchers
 must review its current source, licence, model terms, and ethics implications
 before configuring it.
@@ -260,6 +302,7 @@ option reference, not a standalone PowerShell script:
 --opensmile-feature-set egemaps
 --device auto
 --skip-emotion-models
+--require-preferred-categorical
 --keep-temp-audio
 --debug
 --catalog-sha256 <sha256>  # binds selected SourceIDs to this batch folder
@@ -294,15 +337,20 @@ Categorical model:
 tiantiaf/whisper-large-v3-msp-podcast-emotion
 ```
 
-If the preferred categorical model is unavailable, the main output uses:
+If the preferred categorical model is unavailable and strict preferred mode
+was not requested, the main output uses:
 
 ```text
 superb/wav2vec2-base-superb-er
 ```
 
 The manifest records the selected model and the preferred-model error. The
-categorical columns are blank only when neither categorical model can load, or
-when `--skip-emotion-models` is selected.
+fallback supports only Anger, Happiness, Neutral and Sadness; its other five
+categorical columns remain blank because those classes are unsupported.
+With emotion analysis enabled, preflight requires available categorical and
+dimensional layers and stops if either is unavailable. Selecting
+`--skip-emotion-models` deliberately leaves all categorical and dimensional
+model columns blank.
 
 `audio_analysis.csv` includes probability columns for:
 
@@ -327,3 +375,25 @@ Arousal, Dominance, Valence
 
 These model outputs are estimates. They must be validated later against
 manually labelled samples before being treated as research conclusions.
+
+Categorical scores are a softmax distribution over the selected model's own
+classes. Multiplying Happiness by 100 changes its displayed unit; it does not
+make it equivalent to an AFFDEX Joy score or percentage of time feeling happy.
+A four-class model and a nine-class model have different taxonomies, training
+data and score distributions. Keep their model identities with the results.
+
+The dimensional audEering model is separate from the categorical model. A
+signed display commonly maps its Valence as `200 * raw_valence - 100`, while
+native AFFDEX Valence is already signed. The audEering linear regression head
+is not strictly bounded to [0, 1]; preserve and disclose out-of-range estimates
+instead of silently clipping them. Auxiliary heads returned by the categorical
+Vox-Profile checkpoint are not used as a replacement dimensional model.
+
+For cross-modal diagnostics, average finite Face samples inside the same
+half-open Audio intervals and retain missing samples and coverage. Confirm
+that the measured face and voice belong to the intended target before making
+speaker claims. Pooled min-max, peak scaling and z-scores can change display
+ranges, but cannot establish a common emotional intensity or fix wrong-target
+measurements. Fit any prospective scaler on the training reference cohort;
+do not fit it on held-out speakers or select a transform to maximize apparent
+agreement.
