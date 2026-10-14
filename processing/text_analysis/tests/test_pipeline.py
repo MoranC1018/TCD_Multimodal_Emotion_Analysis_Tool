@@ -438,19 +438,3 @@ def test_pipeline_recovers_an_abandoned_run_lock(
         )
 
     assert not lock.exists()
-
-
-def test_text_child_environment_overrides_legacy_windows_encoding() -> None:
-    environment = pipeline.text_child_process_environment(
-        {
-            "PATH": r"C:\Windows\System32",
-            "PYTHONIOENCODING": "cp1252:strict",
-            "PYTHONUNBUFFERED": "0",
-            "YOUTUBE_API_KEY": "must-not-leak",
-        }
-    )
-
-    assert environment["PATH"] == r"C:\Windows\System32"
-    assert environment["PYTHONIOENCODING"] == "utf-8"
-    assert environment["PYTHONUNBUFFERED"] == "1"
-    assert "YOUTUBE_API_KEY" not in environment

@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from procurement.console import configure_utf8_stdio
 from procurement.external_tools import credential_free_media_environment
 
 from processing.io_utils import (
@@ -1761,7 +1760,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    configure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

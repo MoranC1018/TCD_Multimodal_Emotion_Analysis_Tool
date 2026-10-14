@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-from procurement.console import configure_utf8_stdio
 from processing.io_utils import lexical_absolute_path
 
 from .pipeline import (
@@ -20,7 +19,6 @@ from .pipeline import (
 
 
 def main(argv: list[str] | None = None) -> int:
-    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Run the complete modular text-processing workflow.")
     parser.add_argument("input", nargs="?", default=None)
     parser.add_argument("--config", type=Path, help="Optional JSON object overriding pipeline defaults")

@@ -1360,8 +1360,6 @@ class LauncherProgressTests(unittest.TestCase):
     def test_child_credentials_are_scoped_to_the_command_that_needs_them(self) -> None:
         inherited = {
             "PATH": r"C:\Windows\System32",
-            "PYTHONIOENCODING": "cp1252:strict",
-            "PYTHONUNBUFFERED": "0",
             "YOUTUBE_API_KEY": "inherited-youtube",
             "HF_TOKEN": "inherited-hf",
             "HUGGINGFACE_TOKEN": "alias-hf",
@@ -1401,9 +1399,6 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertNotIn("HF_TOKEN", catalog_standard)
         self.assertEqual(catalog_clean["YOUTUBE_API_KEY"], "stored-youtube")
         self.assertEqual(catalog_clean["HF_TOKEN"], "stored-hf")
-        for environment in (manual, pipeline, clean_speaker, catalog_standard, catalog_clean):
-            self.assertEqual(environment["PYTHONIOENCODING"], "utf-8")
-            self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
 
     def test_stop_requested_while_starting_terminates_child_on_attach(self) -> None:
         state = launcher.LauncherState()

@@ -30,7 +30,6 @@ from pathlib import Path
 from statistics import mean
 from typing import Iterable, Mapping, Sequence
 
-from procurement.console import configure_utf8_stdio
 from analysis.histograms import default_output_root, student_t_two_tailed_p
 from analysis.text_pipeline.contracts import CATEGORIES, Category, discover_categories
 from analysis.text_pipeline.provenance import (
@@ -2921,7 +2920,6 @@ def build_pair_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    configure_utf8_stdio()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "analyse-pair":
         from analysis.text_pipeline.batch import analyse_text_segment_pair

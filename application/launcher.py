@@ -30,7 +30,6 @@ from typing import Iterable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from procurement.procurement_beta.readiness import build_readiness_report
-from procurement.console import configure_utf8_stdio
 from procurement.external_tools import credential_free_media_environment, resolve_nvidia_smi
 from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from analysis.profile import profile_from_payload
@@ -2104,6 +2103,7 @@ def start_process(command: list[str], *, mode: str, total: int) -> int | None:
         return None
     APP_STATE.log(f"PS> {subprocess.list2cmdline(command)}")
     env = child_process_environment(command)
+    env["PYTHONUNBUFFERED"] = "1"
     settings = backend.load_ui_settings(REPO_ROOT)
     if bool(settings.get("resourceLimitsEnabled", True)):
         native_threads = str(int(settings.get("nativeThreads") or 1))
@@ -2203,10 +2203,6 @@ def child_process_environment(
             huggingface_token = backend.load_huggingface_token()
             if huggingface_token:
                 env["HF_TOKEN"] = huggingface_token
-    # The launcher decodes child output as UTF-8. Override locale-dependent
-    # Windows encodings so multilingual logs cannot crash or become mojibake.
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUNBUFFERED"] = "1"
     return env
 
 
@@ -3004,7 +3000,6 @@ def run_launcher(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    configure_utf8_stdio()
     args = parse_args()
     instance_lock = acquire_single_instance_lock(REPO_ROOT)
     if instance_lock is None:

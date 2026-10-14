@@ -5,20 +5,6 @@ import json
 from processing.text_analysis import __main__ as text_cli
 
 
-def test_cli_configures_utf8_stdio(monkeypatch, capsys) -> None:
-    calls = []
-    monkeypatch.setattr(text_cli, "configure_utf8_stdio", lambda: calls.append("configured"))
-    monkeypatch.setattr(
-        text_cli,
-        "check_text_processing_readiness",
-        lambda _config: {"status": "ready"},
-    )
-
-    assert text_cli.main(["--check"]) == 0
-    assert calls == ["configured"]
-    assert json.loads(capsys.readouterr().out)["status"] == "ready"
-
-
 def test_check_cli_is_json_and_needs_no_input(monkeypatch, capsys) -> None:
     captured = {}
 
