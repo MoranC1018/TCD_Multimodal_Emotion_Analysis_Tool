@@ -960,12 +960,25 @@ def _postprocess_command(
     return command
 
 
+def text_child_process_environment(
+    base_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a credential-free UTF-8 environment for Text stage children."""
+
+    environment = credential_free_media_environment(
+        None if base_environment is None else dict(base_environment)
+    )
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUNBUFFERED"] = "1"
+    return environment
+
+
 def _run(command: Sequence[str], cwd: Path) -> None:
     process = subprocess.Popen(
         list(command), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         shell=False,
-        env=credential_free_media_environment(),
+        env=text_child_process_environment(),
     )
     tail: deque[str] = deque(maxlen=50)
     assert process.stdout is not None
