@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from procurement.console import configure_utf8_stdio
 from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from processing.io_utils import (
     assert_confined_input_file,
@@ -1472,6 +1473,7 @@ def _interrupt_manifest(path: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run one standalone transcription batch under its output-set lock."""
 
+    configure_utf8_stdio()
     arguments = list(sys.argv[1:] if argv is None else argv)
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--output-dir", default="output")
