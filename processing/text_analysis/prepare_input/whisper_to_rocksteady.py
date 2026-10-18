@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from procurement.console import configure_utf8_stdio
 from processing.io_utils import (
     atomic_write_json,
     exclusive_process_lock,
@@ -511,6 +512,7 @@ def _interrupt_manifest(path: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run one standalone prepare snapshot under its output-set lock."""
 
+    configure_utf8_stdio()
     arguments = list(sys.argv[1:] if argv is None else argv)
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("input", nargs="?")
