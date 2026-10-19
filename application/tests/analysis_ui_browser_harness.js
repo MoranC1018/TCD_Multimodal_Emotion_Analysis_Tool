@@ -243,12 +243,16 @@ async function createTestPage(browser, origin, viewport) {
       });
     }
     if (pathname === "/api/run-face" || pathname === "/api/run-text") {
-      backend.nativeRunBodies.push({ pathname, body: request.postDataJSON() });
+      const body = request.postDataJSON();
+      backend.nativeRunBodies.push({ pathname, body });
       backend.running = true;
       backend.status = "running";
       backend.runId = ++backend.nextRunId;
       backend.progress = { mode: pathname.endsWith("face") ? "face-native" : "text-native", label: "Running" };
-      return responseJson(route, { runId: backend.runId });
+      return responseJson(route, {
+        runId: backend.runId,
+        ...(pathname.endsWith("text") ? { outputRoot: body.outputRoot || "C:\\output\\text" } : {}),
+      });
     }
     if (pathname === "/api/face-readiness") {
       return responseJson(route, { kind: "face-processing-readiness", ready: false, device: "cpu", detail: "cached weights missing" });
@@ -550,14 +554,67 @@ async function nativeProcessingScreens(browser, origin) {
     assert.strictEqual(await page.locator("#textCategorySuggestions option").count(), 2);
     await page.check("#textAllCategoriesToggle");
     assert.strictEqual(await page.locator("#textCategorySearchInput").isDisabled(), true);
+    await page.fill("#textOutputRootInput", "");
     await page.click("#runTextButton");
     await waitFor(() => backend.nativeRunBodies.length === 2, "Native Text request was not sent.");
     assert.strictEqual(backend.nativeRunBodies[1].body.allCategories, true);
     assert.deepStrictEqual(backend.nativeRunBodies[1].body.categories, []);
     assert.strictEqual(backend.nativeRunBodies[1].body.defaultLanguageVariant, "eng");
     assert.strictEqual(await page.locator("#textRunScreen").getAttribute("class"), "screen active");
+    assert.strictEqual(await page.locator("#textOutputRootInput").inputValue(), "C:\\output\\text");
+    assert.strictEqual(await page.evaluate(() => state.pendingTextOutput), "C:\\output\\text");
     await page.setViewportSize({ width: 700, height: 1200 });
     assert.strictEqual(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  } finally {
+    await page.close();
+  }
+}
+
+async function textWorkflowHandoffs(browser, origin) {
+  const { page } = await createTestPage(browser, origin, { width: 1280, height: 900 });
+  try {
+    await page.evaluate(async () => {
+      state.workflow.active = true;
+      state.workflow.plan = {
+        processing: true,
+        analysis: true,
+        runProcesses: ["text"],
+        textRun: true,
+      };
+      state.workflow.completedProcesses = new Set();
+      state.pendingProcurementSource = "C:\\procurement\\exact-run";
+      await advanceGuidedWorkflow("procurement");
+    });
+    assert.strictEqual(await page.locator("#textInputScreen").getAttribute("class"), "screen active");
+    assert.strictEqual(await page.locator("#textSourcePathInput").inputValue(), "C:\\procurement\\exact-run");
+    assert.strictEqual(await page.locator("#textCatalogSourceList input:checked").count(), 2);
+
+    await page.evaluate(() => {
+      state.workflow.active = false;
+      state.pendingTextOutput = "C:\\text\\old-run";
+      state.workflow.imports.text = "C:\\text\\old-run";
+      analysisTextSourcePath.value = "C:\\text\\old-run";
+      textImportToggle.checked = true;
+      textImportPathInput.value = "C:\\text\\new-import";
+      hydrateAnalysisModalitiesFromImports();
+    });
+    assert.strictEqual(await page.locator("#analysisTextSourcePath").inputValue(), "C:\\text\\new-import");
+
+    const resetState = await page.evaluate(() => {
+      resetAnalysisForNewWorkflow();
+      return {
+        pendingTextOutput: state.pendingTextOutput,
+        pendingProcurementSource: state.pendingProcurementSource,
+        workflowTextOutput: state.workflow.imports.text,
+        textSource: textSourcePathInput.value,
+      };
+    });
+    assert.deepStrictEqual(resetState, {
+      pendingTextOutput: "",
+      pendingProcurementSource: "",
+      workflowTextOutput: "",
+      textSource: "",
+    });
   } finally {
     await page.close();
   }
@@ -965,6 +1022,7 @@ async function main() {
     ["workflow failure detail", workflowFailureDetail],
     ["responsive rendering", responsiveSmoke],
     ["native processing screens", nativeProcessingScreens],
+    ["Text workflow handoffs", textWorkflowHandoffs],
     ["text grouping preflight", textGroupingPreflight],
     ["sidecarless manifest selection", sidecarlessManifestSelection],
   ]) {

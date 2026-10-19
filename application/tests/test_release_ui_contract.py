@@ -559,6 +559,26 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn('api("/api/validate-path"', self.javascript)
         self.assertIn("runMatchesUi", self.javascript)
 
+    def test_guided_workflow_can_run_text_from_the_procurement_handoff(self) -> None:
+        text_method = self.html.split('id="workflowTextMethod"', 1)[1].split("</select>", 1)[0]
+        self.assertIn('<option value="run">Run in app</option>', text_method)
+        self.assertIn("pendingProcurementSource", self.javascript)
+        self.assertIn("prepareTextProcessingSourceFromProcurement", self.javascript)
+        self.assertIn('nextProcess === "text"', self.javascript)
+        self.assertIn('await advanceGuidedWorkflow("text")', self.javascript)
+
+    def test_new_workflow_clears_stale_text_handoffs_and_explicit_import_wins(self) -> None:
+        start = self.javascript.index("function hydrateAnalysisModalitiesFromImports()")
+        end = self.javascript.index("function showAudioAnalysis()", start)
+        hydration = self.javascript[start:end]
+        self.assertIn("explicitTextImport", hydration)
+        self.assertIn("state.workflow.imports.text || state.pendingTextOutput", hydration)
+        reset_start = self.javascript.index("function resetAnalysisForNewWorkflow()")
+        reset = self.javascript[reset_start:end]
+        self.assertIn('state.pendingTextOutput = ""', reset)
+        self.assertIn('state.pendingProcurementSource = ""', reset)
+        self.assertIn('state.workflow.imports.text = ""', reset)
+
     def test_analysis_has_exactly_video_audio_and_text_cards(self) -> None:
         self.assertEqual(self.html.count('class="analysis-modality-card"'), 3)
         self.assertEqual(

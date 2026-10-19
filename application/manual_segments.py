@@ -52,6 +52,7 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     run_folder = output_root / f"focus_segments_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_folder.mkdir(parents=True, exist_ok=True)
+    print(f"Procurement result root: {run_folder}", flush=True)
     copied_manifest = run_folder / "focus_segments_manifest.json"
     copied_manifest.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     results = process_local_segments(source, run_folder, payload)
