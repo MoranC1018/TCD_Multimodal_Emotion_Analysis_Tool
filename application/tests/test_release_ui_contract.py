@@ -568,6 +568,10 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn('api("/api/validate-path"', self.javascript)
         self.assertIn("runMatchesUi", self.javascript)
 
+    def test_text_completion_surfaces_bilingual_alignment_warnings(self) -> None:
+        self.assertIn("progress.bilingualAlignmentWarning", self.javascript)
+        self.assertIn("Complete with bilingual alignment warning", self.javascript)
+
     def test_analysis_has_exactly_video_audio_and_text_cards(self) -> None:
         self.assertEqual(self.html.count('class="analysis-modality-card"'), 3)
         self.assertEqual(

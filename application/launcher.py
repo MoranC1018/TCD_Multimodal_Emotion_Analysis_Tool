@@ -1990,6 +1990,17 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
     text = str(line or "").strip()
     if not text:
         return None
+    bilingual_warning = re.fullmatch(
+        r"WARNING: Bilingual alignment unavailable;.+continuing:\s*(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if bilingual_warning:
+        warning = bilingual_warning.group(1).strip()[:1000]
+        return {
+            "bilingualAlignmentWarning": warning,
+            "label": "Bilingual alignment warning; continuing with English transcript",
+        }
     workflow_failure = re.fullmatch(r"WorkflowError(?: \[([^\]]+)\])?:\s*(.+)", text, flags=re.IGNORECASE)
     if workflow_failure:
         failed_stage = (workflow_failure.group(1) or "workflow").strip()

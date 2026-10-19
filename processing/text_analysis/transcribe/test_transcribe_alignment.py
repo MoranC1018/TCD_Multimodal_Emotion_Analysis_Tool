@@ -69,7 +69,7 @@ def fake_provenance(task: str) -> dict[str, dict[str, object]]:
 
 
 class BilingualAlignmentTests(unittest.TestCase):
-    def test_alignment_failure_preserves_both_expensive_passes(self) -> None:
+    def test_alignment_failure_becomes_a_warning_and_preserves_all_outputs(self) -> None:
         class FakeModel:
             calls = []
 
@@ -83,19 +83,29 @@ class BilingualAlignmentTests(unittest.TestCase):
             root = Path(temp_dir)
             paths = {kind: root / kind / "video.json" for kind in ("original", "eng", "bilingual")}
 
-            with self.assertRaisesRegex(ValueError, "No English time overlap"):
-                transcribe_bilingual_to_paths(
-                    Path("video.mp4"),
-                    FakeModel(),
-                    "cpu",
-                    paths,
-                    model_name="small",
-                    provenance_by_kind=fake_provenance("bilingual"),
-                )
+            outputs = transcribe_bilingual_to_paths(
+                Path("video.mp4"),
+                FakeModel(),
+                "cpu",
+                paths,
+                model_name="small",
+                provenance_by_kind=fake_provenance("bilingual"),
+            )
 
             self.assertTrue(paths["original"].is_file())
             self.assertTrue(paths["eng"].is_file())
-            self.assertFalse(paths["bilingual"].exists())
+            self.assertTrue(paths["bilingual"].is_file())
+            audit = outputs["bilingual"]["bilingual_alignment"]
+            self.assertEqual(audit["status"], "warning")
+            self.assertEqual(audit["aligned_output_segments"], 0)
+            self.assertEqual(
+                audit["warning"]["code"], "bilingual_alignment_unavailable"
+            )
+            fallback = outputs["bilingual"]["segments"]
+            self.assertEqual(len(fallback), 1)
+            self.assertEqual(fallback[0]["alignment_status"], "unaligned_warning")
+            self.assertEqual(fallback[0]["text_original"], "Original")
+            self.assertEqual(fallback[0]["text_en"], "English")
 
     def test_saved_passes_can_retry_alignment_without_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -467,6 +477,107 @@ class BilingualAlignmentTests(unittest.TestCase):
             self.assertEqual(failed["source_relative"], second.name)
             self.assertEqual(len(completed["source_sha256"]), 64)
             self.assertEqual(len(completed["artifacts"]["transcribe"]["sha256"]), 64)
+
+    def test_bilingual_alignment_warning_keeps_batch_completed(self) -> None:
+        class FakeModel:
+            dims = SimpleNamespace(n_audio_ctx=1)
+
+            def transcribe(self, _path, *, task, **_kwargs):
+                timing = (0, 5) if task == "transcribe" else (10, 15)
+                text = "Original" if task == "transcribe" else "English"
+                return {
+                    "language": "fr",
+                    "segments": [{"id": 0, **segment(*timing, text)}],
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            video = root / "001_FR_Test_Speaker_20250101.mp4"
+            video.write_bytes(b"media")
+            output = root / "output"
+            manifest = root / "transcription_manifest.json"
+            execution = {
+                "engine": {"distribution": "openai-whisper", "version": "test"},
+                "checkpoint": {
+                    "requested_name": "tiny",
+                    "filename": "tiny.pt",
+                    "expected_sha256": "a" * 64,
+                    "hash_source": "openai_whisper_model_registry",
+                },
+                "runtime": {"torch_version": "test", "ffmpeg_version": "test"},
+            }
+
+            with patch(
+                "processing.text_analysis.transcribe.transcribe.configure_ffmpeg_shared_libraries"
+            ), patch(
+                "processing.text_analysis.transcribe.transcribe._load_whisper_model",
+                return_value=FakeModel(),
+            ), patch(
+                "processing.text_analysis.transcribe.transcribe.collect_whisper_execution_identity",
+                return_value=execution,
+            ):
+                return_code = transcribe_main(
+                    [
+                        str(video), "--task", "bilingual", "--model", "tiny",
+                        "--output-dir", str(output), "--canonical-layout",
+                        "--batch-manifest", str(manifest),
+                    ]
+                )
+
+            self.assertEqual(return_code, 0)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(payload["summary"]["completed"], 1)
+            self.assertEqual(payload["summary"]["failed"], 0)
+            self.assertEqual(payload["summary"]["warnings"], 1)
+            record = payload["videos"][0]
+            self.assertEqual(record["status"], "completed")
+            self.assertEqual(
+                record["warnings"][0]["code"],
+                "bilingual_alignment_unavailable",
+            )
+            self.assertEqual(set(record["artifacts"]), {"original", "eng", "bilingual"})
+            self.assertTrue(all("sha256" in item for item in record["artifacts"].values()))
+            artifact_paths = {
+                kind: output / item["path"]
+                for kind, item in record["artifacts"].items()
+            }
+            self.assertTrue(
+                transcription_artifact_set_is_reusable(
+                    artifact_paths,
+                    model_name="tiny",
+                    video_path=video,
+                    provenance_by_kind=payload["whisper_provenance"],
+                    source_sha256_value=record["source_sha256"],
+                )
+            )
+
+            with patch(
+                "processing.text_analysis.transcribe.transcribe.configure_ffmpeg_shared_libraries"
+            ), patch(
+                "processing.text_analysis.transcribe.transcribe._load_whisper_model",
+                side_effect=AssertionError("warning artifact set should be reused"),
+            ), patch(
+                "processing.text_analysis.transcribe.transcribe.collect_whisper_execution_identity",
+                return_value=execution,
+            ):
+                resumed_code = transcribe_main(
+                    [
+                        str(video), "--task", "bilingual", "--model", "tiny",
+                        "--output-dir", str(output), "--canonical-layout",
+                        "--batch-manifest", str(manifest), "--skip-existing",
+                    ]
+                )
+
+            self.assertEqual(resumed_code, 0)
+            resumed = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(resumed["summary"]["skipped"], 1)
+            self.assertEqual(resumed["summary"]["warnings"], 1)
+            self.assertEqual(resumed["videos"][0]["status"], "skipped")
+            self.assertEqual(
+                resumed["videos"][0]["warnings"][0]["code"],
+                "bilingual_alignment_unavailable",
+            )
 
     def test_bilingual_reuse_requires_all_companions_to_match_batch_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

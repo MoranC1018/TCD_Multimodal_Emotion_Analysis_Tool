@@ -156,9 +156,12 @@ tree can be converted directly for the matching RockSteady dictionary.
 Equal segment counts are not assumed to mean
 equal boundaries. One-to-many and many-to-one matches are merged into a single
 aligned segment, and each source segment is used exactly once. Alignments with
-no overlap or less than 25% interval overlap are rejected instead of silently
-pairing unrelated text. The audit records every source segment ID and hashes of
-both standalone segment lists; any duplicate or omitted ID aborts the output.
+no overlap or less than 25% interval overlap are not silently paired. Instead,
+the bilingual audit is marked with a warning and preserves the two complete
+passes in one explicitly unaligned full-transcript record. The independent
+`original` and `eng` outputs remain usable by the automated pipeline. The audit
+records every source segment ID and hashes of both standalone segment lists;
+any duplicate or omitted ID still aborts the output.
 Each merged segment contains `text_original` and `text_en`; the top-level
 `language` field records what language `text_original` is, such as `fr`, `it`,
 or `pl`. Useful for manually checking translation quality or feeding into tools
@@ -192,12 +195,13 @@ comparison and alignment auditing, not as a third RockSteady input.
   reuse an unrelated transcript. Legacy
   output is not reusable by default; `--trust-legacy` is an explicit unsafe
   migration option.
-- Each expensive Whisper pass is saved immediately. If bilingual alignment
-  fails, `original` and `eng` remain usable and can be reused on the next
-  `--skip-existing` run. One output-set lock prevents concurrent standalone and
-  full-pipeline writers. Ctrl-C changes a running batch manifest to
-  `interrupted`; temporary JSON files are removed, and automation never treats
-  a partial state as complete.
+- Each expensive Whisper pass is saved immediately. If safe segment-level
+  bilingual alignment is unavailable, the batch manifest records a warning,
+  the audit file is explicitly marked as unaligned, and processing continues
+  with the usable `original` and `eng` outputs. One output-set lock prevents
+  concurrent standalone and full-pipeline writers. Ctrl-C changes a running
+  batch manifest to `interrupted`; temporary JSON files are removed, and
+  automation never treats a partial state as complete.
 - The reported overlap is calculated for each merged alignment group. A high
   group overlap can still contain coarse local matching, so the merged file is
   suitable for comparison but not guaranteed sentence-level alignment.
