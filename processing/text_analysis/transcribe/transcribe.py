@@ -42,6 +42,7 @@ Author: Jiaming Liu
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -128,6 +129,21 @@ def _overlap(s1, e1, s2, e2):
     return max(0.0, min(e1, e2) - max(s1, s2))
 
 
+class BilingualAlignmentError(ValueError):
+    """The two valid Whisper passes cannot be safely aligned by timestamp."""
+
+
+def print_bilingual_alignment_warning(message: str) -> None:
+    """Emit the detailed warning understood by launcher progress on any run."""
+
+    print(
+        "  WARNING: Bilingual alignment unavailable; preserving both Whisper "
+        f"passes without segment-level pairing and continuing: {message}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _validate_alignment_segments(segments, label):
     if not segments:
         raise ValueError(f"Cannot align bilingual transcription: {label} has no segments.")
@@ -138,7 +154,10 @@ def _validate_alignment_segments(segments, label):
             end = float(segment["end"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid {label} segment timing at index {index}: {segment!r}") from exc
-        if start < 0 or end <= start or start < previous_start:
+        if (
+            not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start or start < previous_start
+        ):
             raise ValueError(f"Invalid or unsorted {label} segment timing at index {index}: {start}-{end}")
         previous_start = start
 
@@ -160,7 +179,7 @@ def _alignment_components(segs_original, segs_en):
     for original_index, segment in enumerate(segs_original):
         english_index, overlap = _best_overlap_index(segment, segs_en)
         if overlap <= 0:
-            raise ValueError(
+            raise BilingualAlignmentError(
                 f"No English time overlap for original segment {original_index + 1} "
                 f"({segment['start']}-{segment['end']}s)."
             )
@@ -171,7 +190,7 @@ def _alignment_components(segs_original, segs_en):
     for english_index, segment in enumerate(segs_en):
         original_index, overlap = _best_overlap_index(segment, segs_original)
         if overlap <= 0:
-            raise ValueError(
+            raise BilingualAlignmentError(
                 f"No original-language time overlap for English segment {english_index + 1} "
                 f"({segment['start']}-{segment['end']}s)."
             )
@@ -211,7 +230,9 @@ def _align_segments(segs_original, segs_en, original_language="original", min_ov
     previous_english_index = -1
     for output_index, (original_indexes, english_indexes) in enumerate(components):
         if english_indexes[0] <= previous_english_index:
-            raise ValueError("Bilingual time alignment is not monotonic across the two Whisper passes.")
+            raise BilingualAlignmentError(
+                "Bilingual time alignment is not monotonic across the two Whisper passes."
+            )
         previous_english_index = english_indexes[-1]
         original_group = [segs_original[index] for index in original_indexes]
         english_group = [segs_en[index] for index in english_indexes]
@@ -223,7 +244,7 @@ def _align_segments(segs_original, segs_en, original_language="original", min_ov
         union = max(original_end, english_end) - min(original_start, english_start)
         overlap_ratio = intersection / union if union > 0 else 0.0
         if overlap_ratio < min_overlap_ratio:
-            raise ValueError(
+            raise BilingualAlignmentError(
                 f"Low bilingual alignment overlap for output segment {output_index + 1}: "
                 f"ratio={overlap_ratio:.3f}, original={original_start}-{original_end}s, "
                 f"English={english_start}-{english_end}s."
@@ -251,6 +272,40 @@ def _align_segments(segs_original, segs_en, original_language="original", min_ov
         print(f"  [{original_start:6.1f}s] {original_language.upper()}: {text_original[:60]}")
         print(f"           EN: {text_en[:60]}  (overlap={overlap_ratio:.1%})")
     return segments
+
+
+def _unaligned_bilingual_audit_segment(segs_original, segs_en, warning):
+    """Preserve both passes without inventing a segment-level correspondence."""
+
+    text_original = " ".join(
+        segment.get("text", "").strip() for segment in segs_original
+    ).strip()
+    text_en = " ".join(segment.get("text", "").strip() for segment in segs_en).strip()
+    if not text_original or not text_en:
+        raise ValueError(
+            "Cannot preserve a bilingual alignment warning because one Whisper pass has no text."
+        )
+    all_segments = [*segs_original, *segs_en]
+    return {
+        "id": 0,
+        "start": round(min(float(segment["start"]) for segment in all_segments), 2),
+        "end": round(max(float(segment["end"]) for segment in all_segments), 2),
+        "text_original": text_original,
+        "text_en": text_en,
+        "alignment_original_segments": len(segs_original),
+        "alignment_en_segments": len(segs_en),
+        "alignment_overlap_ratio": 0.0,
+        "alignment_status": "unaligned_warning",
+        "alignment_warning": str(warning),
+        "source_original_segment_indexes": list(range(len(segs_original))),
+        "source_en_segment_indexes": list(range(len(segs_en))),
+        "source_original_segment_ids": [
+            segment.get("id", index) for index, segment in enumerate(segs_original)
+        ],
+        "source_en_segment_ids": [
+            segment.get("id", index) for index, segment in enumerate(segs_en)
+        ],
+    }
 
 
 def _plain_segments(segments):
@@ -421,9 +476,19 @@ def _build_bilingual_outputs(
     """Build usable original/English files plus a time-aligned audit file."""
     original_segments = _plain_segments(result_original["segments"])
     english_segments = _plain_segments(result_en["segments"])
-    aligned_segments = _align_segments(
-        original_segments, english_segments, detected_lang
-    )
+    alignment_warning = None
+    try:
+        aligned_segments = _align_segments(
+            original_segments, english_segments, detected_lang
+        )
+    except BilingualAlignmentError as exc:
+        alignment_warning = str(exc)
+        aligned_segments = [
+            _unaligned_bilingual_audit_segment(
+                original_segments, english_segments, alignment_warning
+            )
+        ]
+        print_bilingual_alignment_warning(alignment_warning)
     used_original = [item for segment in aligned_segments for item in segment["source_original_segment_indexes"]]
     used_english = [item for segment in aligned_segments for item in segment["source_en_segment_indexes"]]
     expected_original = list(range(len(original_segments)))
@@ -450,10 +515,16 @@ def _build_bilingual_outputs(
     )
     ratios = [segment["alignment_overlap_ratio"] for segment in aligned_segments]
     audit = {
-        "method": "mutual_best_time_overlap_components",
+        "status": "warning" if alignment_warning else "aligned",
+        "method": (
+            "unaligned_full_transcript_fallback"
+            if alignment_warning
+            else "mutual_best_time_overlap_components"
+        ),
         "original_input_segments": len(original_segments),
         "english_input_segments": len(english_segments),
-        "aligned_output_segments": len(aligned_segments),
+        "aligned_output_segments": 0 if alignment_warning else len(aligned_segments),
+        "audit_output_segments": len(aligned_segments),
         "original_segments_used_once": True,
         "english_segments_used_once": True,
         "minimum_overlap_ratio": min(ratios),
@@ -461,6 +532,12 @@ def _build_bilingual_outputs(
         "original_segments_sha256": _segments_sha256(original_segments),
         "english_segments_sha256": _segments_sha256(english_segments),
     }
+    if alignment_warning:
+        audit["warning"] = {
+            "code": "bilingual_alignment_unavailable",
+            "message": alignment_warning,
+            "downstream_variant_outputs_usable": True,
+        }
     original["bilingual_companion"] = {"kind": "original", **audit}
     english["bilingual_companion"] = {"kind": "eng", **audit}
     bilingual["bilingual_alignment"] = audit
@@ -1064,6 +1141,20 @@ def _catalog_binding(job) -> dict[str, object]:
     }
 
 
+def _bilingual_warnings(output: object) -> list[dict[str, str]]:
+    if not isinstance(output, dict):
+        return []
+    alignment = output.get("bilingual_alignment")
+    if not isinstance(alignment, dict) or alignment.get("status") != "warning":
+        return []
+    warning = alignment.get("warning")
+    if not isinstance(warning, dict):
+        return []
+    code = str(warning.get("code") or "bilingual_alignment_warning").strip()
+    message = str(warning.get("message") or "Bilingual alignment is unavailable.").strip()
+    return [{"code": code, "message": message}]
+
+
 def _transcription_record(
     job: TranscriptionJob,
     paths: dict[str, Path],
@@ -1072,6 +1163,7 @@ def _transcription_record(
     status: str,
     segment_count: int | None = None,
     error: str | None = None,
+    warnings: list[dict[str, str]] | None = None,
     source_sha256_value: str | None = None,
     provenance_by_kind: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -1100,6 +1192,8 @@ def _transcription_record(
         record["segment_count"] = segment_count
     if error is not None:
         record["error"] = error
+    if warnings:
+        record["warnings"] = list(warnings)
     return record
 
 
@@ -1124,6 +1218,7 @@ def _write_transcription_manifest(
         "skipped": sum(record.get("status") == "skipped" for record in records),
         "failed": sum(record.get("status") == "failed" for record in records),
         "planned": sum(record.get("status") == "planned" for record in records),
+        "warnings": sum(bool(record.get("warnings")) for record in records),
     }
     atomic_write_json(
         path,
@@ -1355,12 +1450,22 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
         if is_complete:
             representative = next(iter(paths.values()))
             saved = _read_saved_whisper_pass(representative, _expected_task(next(iter(paths))))
+            saved_warnings = (
+                _bilingual_warnings(
+                    _read_saved_whisper_pass(paths["bilingual"], "bilingual")
+                )
+                if "bilingual" in paths
+                else []
+            )
             records[record_index] = _transcription_record(
                 job, paths, output_root, status="skipped", segment_count=len(saved["segments"]),
+                warnings=saved_warnings,
                 source_sha256_value=source_hash,
                 provenance_by_kind=job_provenance,
             )
             print(f"  SKIP (verified complete set): {', '.join(str(path) for path in paths.values())}")
+            for warning in saved_warnings:
+                print_bilingual_alignment_warning(warning["message"])
         else:
             snapshot_owner: tempfile.TemporaryDirectory[str] | None = None
             try:
@@ -1410,6 +1515,7 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                 _write_json_set(outputs, paths)
                 records[record_index] = _transcription_record(
                     job, paths, output_root, status="completed", segment_count=segment_count,
+                    warnings=_bilingual_warnings(outputs.get("bilingual")),
                     source_sha256_value=source_hash,
                     provenance_by_kind=job_provenance,
                 )
@@ -1448,6 +1554,13 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
     )
     succeeded = len(records) - failed
     print(f"\nDone. {succeeded}/{len(records)} video(s) completed or safely skipped.")
+    warning_count = sum(bool(record.get("warnings")) for record in records)
+    if warning_count:
+        print(
+            f"WARNING: {warning_count} video(s) completed with bilingual alignment warnings; "
+            "original/English outputs remain usable.",
+            file=sys.stderr,
+        )
     if failed:
         print(f"Batch manifest: {manifest_path}", file=sys.stderr)
         return 1

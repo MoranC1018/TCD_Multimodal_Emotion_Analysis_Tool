@@ -292,6 +292,22 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(progress["label"], "Processing Speaker B/April 2022.mp4")
         self.assertIsNone(progress["current"])
 
+    def test_progress_preserves_nonfatal_bilingual_alignment_warning(self) -> None:
+        progress = launcher.parse_progress_line(
+            "WARNING: Bilingual alignment unavailable; preserving both Whisper passes "
+            "without segment-level pairing and continuing: No English time overlap "
+            "for original segment 17 (188.0-190.0s)."
+        )
+
+        self.assertEqual(
+            progress["bilingualAlignmentWarning"],
+            "No English time overlap for original segment 17 (188.0-190.0s).",
+        )
+        self.assertEqual(
+            progress["label"],
+            "Bilingual alignment warning; continuing with English transcript",
+        )
+
     def test_progress_reads_audio_batch_summary_lines(self) -> None:
         progress = launcher.parse_progress_line("Processed videos: 12")
 

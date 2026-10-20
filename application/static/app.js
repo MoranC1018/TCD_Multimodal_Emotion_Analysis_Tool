@@ -3971,9 +3971,13 @@ async function pollState() {
     } else if (payload.status === "complete" && runMatchesUi && !state.handledRunIds.has(runId)) {
       state.handledRunIds.add(runId);
       activeBar.style.width = "100%";
-      activeLabel.textContent = "Complete";
+      const completedWithTextWarning = runKind === "text" && Boolean(progress.bilingualAlignmentWarning);
+      const completionLabel = completedWithTextWarning
+        ? "Complete with bilingual alignment warning"
+        : "Complete";
+      activeLabel.textContent = completionLabel;
       setRunScreenState(runKind, "complete");
-      setStatus("Complete");
+      setStatus(completionLabel);
       if (runKind === "procurement") {
         const plan = state.workflow.active ? state.workflow.plan : null;
         const destination = plan && !plan.processing && plan.analysis
