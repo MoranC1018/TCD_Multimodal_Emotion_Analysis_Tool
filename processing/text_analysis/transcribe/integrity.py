@@ -8,6 +8,7 @@ loading Whisper or a model checkpoint.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -47,7 +48,10 @@ def transcript_segments_are_valid(payload: object, expected_task: str) -> bool:
             start, end = float(segment["start"]), float(segment["end"])
         except (KeyError, TypeError, ValueError):
             return False
-        if start < 0 or end <= start or start < previous_start:
+        if (
+            not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start or start < previous_start
+        ):
             return False
         previous_start = start
         required_text = (

@@ -42,6 +42,7 @@ Author: Jiaming Liu
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -132,6 +133,17 @@ class BilingualAlignmentError(ValueError):
     """The two valid Whisper passes cannot be safely aligned by timestamp."""
 
 
+def print_bilingual_alignment_warning(message: str) -> None:
+    """Emit the detailed warning understood by launcher progress on any run."""
+
+    print(
+        "  WARNING: Bilingual alignment unavailable; preserving both Whisper "
+        f"passes without segment-level pairing and continuing: {message}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _validate_alignment_segments(segments, label):
     if not segments:
         raise ValueError(f"Cannot align bilingual transcription: {label} has no segments.")
@@ -142,7 +154,10 @@ def _validate_alignment_segments(segments, label):
             end = float(segment["end"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid {label} segment timing at index {index}: {segment!r}") from exc
-        if start < 0 or end <= start or start < previous_start:
+        if (
+            not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start or start < previous_start
+        ):
             raise ValueError(f"Invalid or unsorted {label} segment timing at index {index}: {start}-{end}")
         previous_start = start
 
@@ -473,12 +488,7 @@ def _build_bilingual_outputs(
                 original_segments, english_segments, alignment_warning
             )
         ]
-        print(
-            "  WARNING: Bilingual alignment unavailable; preserving both Whisper "
-            f"passes without segment-level pairing and continuing: {alignment_warning}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print_bilingual_alignment_warning(alignment_warning)
     used_original = [item for segment in aligned_segments for item in segment["source_original_segment_indexes"]]
     used_english = [item for segment in aligned_segments for item in segment["source_en_segment_indexes"]]
     expected_original = list(range(len(original_segments)))
@@ -1454,6 +1464,8 @@ def _main_unlocked(argv: list[str] | None = None) -> int:
                 provenance_by_kind=job_provenance,
             )
             print(f"  SKIP (verified complete set): {', '.join(str(path) for path in paths.values())}")
+            for warning in saved_warnings:
+                print_bilingual_alignment_warning(warning["message"])
         else:
             snapshot_owner: tempfile.TemporaryDirectory[str] | None = None
             try:

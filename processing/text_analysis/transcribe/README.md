@@ -202,6 +202,8 @@ comparison and alignment auditing, not as a third RockSteady input.
   concurrent standalone and full-pipeline writers. Ctrl-C changes a running
   batch manifest to `interrupted`; temporary JSON files are removed, and
   automation never treats a partial state as complete.
+- Reusing completed transcripts or resuming after transcription re-emits saved
+  alignment warnings so the launcher still reports completion with a warning.
 - The reported overlap is calculated for each merged alignment group. A high
   group overlap can still contain coarse local matching, so the merged file is
   suitable for comparison but not guaranteed sentence-level alignment.

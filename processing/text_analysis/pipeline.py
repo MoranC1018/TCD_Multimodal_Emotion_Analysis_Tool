@@ -68,7 +68,7 @@ from .rocksteady_adapter.runner import (
 from .rocksteady_transaction import rocksteady_pair_transaction
 from .transcribe.integrity import validate_transcription_artifact_set
 from .transcribe.provenance import collect_whisper_execution_identity
-from .transcribe.transcribe import _catalog_binding
+from .transcribe.transcribe import _catalog_binding, print_bilingual_alignment_warning
 
 
 CORE_CATEGORIES = ("Active", "Negativ", "Passive", "Positiv", "Strong", "Weak")
@@ -405,6 +405,15 @@ def _run_text_pipeline_locked(
                     settings, paths, start_index
                 )
             artifacts.update(upstream_artifacts)
+            # Resuming after transcription still carries its research caveats.
+            for video in transcription["videos"]:
+                for warning in video.get("warnings", []):
+                    if (
+                        isinstance(warning, dict)
+                        and warning.get("code") == "bilingual_alignment_unavailable"
+                        and isinstance(warning.get("message"), str)
+                    ):
+                        print_bilingual_alignment_warning(warning["message"])
             _write_manifest(
                 manifest_targets, settings, current_run_id, started, stage_records,
                 inventory_items, artifacts, "running",

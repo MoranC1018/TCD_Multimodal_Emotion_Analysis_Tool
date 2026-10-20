@@ -968,6 +968,33 @@ async function workflowFailureDetail(browser, origin) {
   }
 }
 
+async function bilingualWarningCompletion(browser, origin) {
+  const { page, backend } = await createTestPage(browser, origin, { width: 1280, height: 1000 });
+  try {
+    // Fresh and reused runs receive the same persisted warning from the launcher.
+    for (const hasWarning of [true, true, false]) {
+      backend.runId = ++backend.nextRunId;
+      backend.running = false;
+      backend.status = "complete";
+      backend.progress = {
+        mode: "text-native",
+        ...(hasWarning ? { bilingualAlignmentWarning: "No English time overlap for original segment 17 (188.0-190.0s)." } : {}),
+      };
+      await page.evaluate(async (runId) => {
+        state.activeRunIds.text = runId;
+        await showScreen("text-run");
+        await pollState();
+      }, backend.runId);
+      assert.strictEqual(
+        await page.locator("#textProgressLabel").innerText(),
+        hasWarning ? "Complete with bilingual alignment warning" : "Complete",
+      );
+    }
+  } finally {
+    await page.close();
+  }
+}
+
 async function main() {
   const staticRoot = path.join(uiRoot, "static");
   const server = http.createServer((request, response) => {
@@ -986,6 +1013,7 @@ async function main() {
   const browser = await launchBrowser();
   const failures = [];
   for (const [name, scenario] of [
+    ["fresh and reused bilingual warning completion", bilingualWarningCompletion],
     ["home branding responsive", homeBrandingResponsive],
     ["invalid source error remains contained", invalidSourceErrorStaysContained],
     ["Analysis invalid source and status remain contained", analysisInvalidSourceAndStatusStayContained],
