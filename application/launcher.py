@@ -298,7 +298,14 @@ class LauncherState:
             )
         return snapshot
 
-    def reserve_process(self, command: list[str], *, mode: str, total: int) -> int | None:
+    def reserve_process(
+        self,
+        command: list[str],
+        *,
+        mode: str,
+        total: int,
+        progress_context: dict[str, object] | None = None,
+    ) -> int | None:
         """Atomically reserve the single subprocess slot before Popen runs."""
 
         with self.lock:
@@ -321,6 +328,8 @@ class LauncherState:
                 "error": "",
                 "completedOutputs": {},
             }
+            if progress_context:
+                self.progress.update(progress_context)
             return self.active_run_id
 
     def attach_process(self, process: subprocess.Popen[str], run_id: int | None = None) -> bool:
@@ -964,11 +973,29 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         APP_STATE.log(
             f"Starting {mode} procurement for {plural(video_count, 'video item')} into {output_root.expanduser().resolve()}."
         )
-        run_id = start_process(command, mode=mode, total=video_count)
+        resolved_output_root = output_root.expanduser().resolve()
+        run_id = start_process(
+            command,
+            mode=mode,
+            total=video_count,
+            progress_context={
+                # Every procurement CLI publishes the more specific run root
+                # through a structured progress line once it has created it.
+                # This base path is a safe fallback for older child versions.
+                "processingSourcePath": str(resolved_output_root),
+            },
+        )
         if run_id is None:
             self.send_error_json(HTTPStatus.CONFLICT, "A procurement run is already active.")
             return
-        self.send_json({"started": True, "runId": run_id, "command": command})
+        self.send_json(
+            {
+                "started": True,
+                "runId": run_id,
+                "command": command,
+                "processingSourcePath": str(resolved_output_root),
+            }
+        )
 
     def handle_run_audio(self, payload: dict[str, object]) -> None:
         """Start the audio processing pipeline with UI-selected options."""
@@ -1135,7 +1162,14 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         if run_id is None:
             self.send_error_json(HTTPStatus.CONFLICT, "A processing run is already active.")
             return
-        self.send_json({"started": True, "runId": run_id, "command": command})
+        self.send_json(
+            {
+                "started": True,
+                "runId": run_id,
+                "command": command,
+                "outputRoot": str(Path(os.path.abspath(request.output_root.expanduser()))),
+            }
+        )
 
     def handle_text_readiness(self, payload: dict[str, object]) -> None:
         """Start the structured Text dependency/readiness check."""
@@ -2010,6 +2044,14 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
             "error": error,
             "label": error,
         }
+    procurement_result = re.fullmatch(
+        r"Procurement result root:\s*(.+)", text, flags=re.IGNORECASE
+    )
+    if procurement_result:
+        return {
+            "processingSourcePath": procurement_result.group(1).strip(),
+            "label": "Procurement output ready",
+        }
     workflow_start = re.fullmatch(
         r"Starting (Video / iMotions|Py-Feat / Native Face|Audio) analysis",
         text,
@@ -2107,10 +2149,21 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
     return None
 
 
-def start_process(command: list[str], *, mode: str, total: int) -> int | None:
+def start_process(
+    command: list[str],
+    *,
+    mode: str,
+    total: int,
+    progress_context: dict[str, object] | None = None,
+) -> int | None:
     """Start a long-running tool and mirror its output into launcher state."""
 
-    run_id = APP_STATE.reserve_process(command, mode=mode, total=total)
+    run_id = APP_STATE.reserve_process(
+        command,
+        mode=mode,
+        total=total,
+        progress_context=progress_context,
+    )
     if run_id is None:
         return None
     APP_STATE.log(f"PS> {subprocess.list2cmdline(command)}")

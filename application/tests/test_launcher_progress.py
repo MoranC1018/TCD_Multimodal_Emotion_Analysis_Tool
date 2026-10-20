@@ -286,6 +286,19 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertEqual(progress["current"], 5)
         self.assertEqual(progress["label"], "4 processed, 1 failed")
 
+    def test_progress_captures_exact_procurement_result_root_for_processing_handoff(self) -> None:
+        progress = launcher.parse_progress_line(
+            r"Procurement result root: C:\outputs\catalog_standard_20261019"
+        )
+
+        self.assertEqual(
+            progress,
+            {
+                "processingSourcePath": r"C:\outputs\catalog_standard_20261019",
+                "label": "Procurement output ready",
+            },
+        )
+
     def test_progress_reads_processing_video_lines(self) -> None:
         progress = launcher.parse_progress_line("Processing Speaker B/April 2022.mp4")
 
@@ -1431,6 +1444,25 @@ class LauncherProgressTests(unittest.TestCase):
         self.assertTrue(requested)
         self.assertIsNone(attached_process)
         self.assertTrue(should_terminate)
+
+    def test_run_progress_context_is_replaced_by_exact_procurement_result_root(self) -> None:
+        state = launcher.LauncherState()
+        run_id = state.reserve_process(
+            ["python", "-V"],
+            mode="standard",
+            total=1,
+            progress_context={"processingSourcePath": r"C:\outputs"},
+        )
+
+        state.append_for_run(
+            r"Procurement result root: C:\outputs\exact-run",
+            run_id,
+        )
+
+        self.assertEqual(
+            state.snapshot()["progress"]["processingSourcePath"],
+            r"C:\outputs\exact-run",
+        )
 
     def test_stopped_process_is_finalized_once_even_if_reader_finishes_later(self) -> None:
         state = launcher.LauncherState()

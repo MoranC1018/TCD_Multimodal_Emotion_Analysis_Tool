@@ -1141,7 +1141,7 @@ def _default_local_metadata(source: CatalogSource) -> Mapping[str, object]:
 def main() -> int:
     args = build_parser().parse_args()
     options = _options_from_args(args)
-    run_catalog(
+    result = run_catalog(
         args.catalog,
         args.run_root,
         mode=args.mode,
@@ -1151,6 +1151,7 @@ def main() -> int:
         local_metadata_fetcher=_default_local_metadata,
         options=options,
     )
+    print(f"Procurement result root: {result.run_root}", flush=True)
     return 0
 
 

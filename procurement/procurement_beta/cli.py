@@ -204,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     cache_root = cache_root_from_output_root(output_root)
     run_root.mkdir(parents=True, exist_ok=True)
     cache_root.mkdir(parents=True, exist_ok=True)
+    print(f"Procurement result root: {run_root}", flush=True)
 
     if args.source_context is not None:
         catalog_video = catalog_video_from_context(

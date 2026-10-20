@@ -45,6 +45,7 @@ def main() -> int:
     source_label = source.stem if source.is_file() else source.name
     output_root = output_base / f"{source_label}_local_{args.mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_root.mkdir(parents=True, exist_ok=True)
+    print(f"Procurement result root: {output_root}", flush=True)
     rows: list[dict[str, object]] = []
     print(f"Source: {source}")
     print(f"Output folder: {output_root}")

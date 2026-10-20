@@ -981,6 +981,7 @@ const state = {
     enabled: false,
     active: false,
     plan: null,
+    completedProcesses: new Set(),
     imports: {
       face: "",
       audio: "",
@@ -999,6 +1000,7 @@ const state = {
   pendingAudioOutput: "",
   pendingFaceOutput: "",
   pendingTextOutput: "",
+  pendingProcurementSource: "",
   activeSpeaker: "",
   selectedSpeakers: new Set(),
   selectedSourceIds: new Set(),
@@ -1316,6 +1318,25 @@ async function showProcessingHub() {
   setStatus("Ready");
 }
 
+function setTextProcessingSourceFromProcurement(sourcePath) {
+  const cleanPath = String(sourcePath || "").trim();
+  if (!cleanPath) return false;
+  state.pendingProcurementSource = cleanPath;
+  if (textSourcePathInput.value.trim() !== cleanPath) {
+    textSourcePathInput.value = cleanPath;
+    clearNativeCatalogSelection("text");
+  }
+  return true;
+}
+
+async function prepareTextProcessingSourceFromProcurement() {
+  if (!setTextProcessingSourceFromProcurement(state.pendingProcurementSource)) {
+    return false;
+  }
+  await loadNativeCatalogSelection("text", { preserveSelection: true });
+  return true;
+}
+
 async function showAnalysis() {
   if (!(await recheckAccess())) {
     return;
@@ -1412,7 +1433,9 @@ function currentWorkflowPlan() {
     processing: workflowProcessingToggle.checked,
     analysis: workflowAnalysisToggle.checked,
     processes,
+    runProcesses: processes.filter((item) => item.method === "run").map((item) => item.key),
     audioRun: processes.some((item) => item.key === "audio" && item.method === "run"),
+    textRun: processes.some((item) => item.key === "text" && item.method === "run"),
   };
 }
 
@@ -1462,6 +1485,7 @@ async function startGuidedWorkflow() {
   });
   state.workflow.plan = plan;
   state.workflow.active = true;
+  state.workflow.completedProcesses = new Set();
   syncWorkflowImportsToProcessingHub();
   if (plan.procurement) {
     await showProcurement();
@@ -1476,11 +1500,24 @@ async function advanceGuidedWorkflow(completedStage) {
   if (!state.workflow.active || !plan) {
     return;
   }
-  if (completedStage !== "processing" && plan.processing && plan.audioRun) {
+  if (["audio", "text"].includes(completedStage)) {
+    state.workflow.completedProcesses.add(completedStage);
+  }
+  const nextProcess = (plan.runProcesses || []).find(
+    (process) => !state.workflow.completedProcesses.has(process),
+  );
+  if (plan.processing && nextProcess === "audio") {
     await showProcessingHub();
     await showScreen("audio-input");
     updateAudioMode();
     setStatus("Workflow: run audio processing");
+    return;
+  }
+  if (plan.processing && nextProcess === "text") {
+    await showProcessingHub();
+    await prepareTextProcessingSourceFromProcurement();
+    await showScreen("text-input");
+    setStatus("Workflow: run Text processing");
     return;
   }
   if (plan.analysis) {
@@ -1494,6 +1531,7 @@ async function advanceGuidedWorkflow(completedStage) {
 }
 
 async function continueAfterProcurement() {
+  await prepareTextProcessingSourceFromProcurement();
   if (state.workflow.active) {
     await advanceGuidedWorkflow("procurement");
     return;
@@ -1503,10 +1541,18 @@ async function continueAfterProcurement() {
 
 async function continueAfterAudio() {
   if (state.workflow.active) {
-    await advanceGuidedWorkflow("processing");
+    await advanceGuidedWorkflow("audio");
     return;
   }
   showAudioAnalysis();
+}
+
+async function continueAfterText() {
+  if (state.workflow.active) {
+    await advanceGuidedWorkflow("text");
+    return;
+  }
+  await importNativeTextIntoAnalysis();
 }
 
 function hydrateAnalysisModalitiesFromImports() {
@@ -1522,11 +1568,12 @@ function hydrateAnalysisModalitiesFromImports() {
     : workflowProcessingToggle.checked && workflowAudioToggle.checked && workflowAudioMethod.value === "import"
       ? workflowAudioImportPath.value.trim()
       : state.workflow.imports.audio || completedAudioPath;
-  const textPath = textImportToggle.checked
+  const explicitTextImport = textImportToggle.checked && Boolean(textImportPathInput.value.trim());
+  const textPath = explicitTextImport
     ? textImportPathInput.value.trim()
     : workflowProcessingToggle.checked && workflowTextToggle.checked && workflowTextMethod.value === "import"
       ? workflowTextImportPath.value.trim()
-      : "";
+      : state.workflow.imports.text || state.pendingTextOutput;
   const replaceExisting = Boolean(state.workflow.active && state.workflow.plan?.analysis);
   hydrateAnalysisModality(
     analysisVideoControls,
@@ -1534,7 +1581,7 @@ function hydrateAnalysisModalitiesFromImports() {
     replaceExisting,
   );
   hydrateAnalysisModality(analysisAudioControls, audioPath, replaceExisting);
-  hydrateAnalysisModality(analysisTextControls, state.pendingTextOutput || textPath, replaceExisting, "import");
+  hydrateAnalysisModality(analysisTextControls, textPath, replaceExisting || explicitTextImport, "import");
 }
 
 function hydrateAnalysisModality(controls, sourcePath, replaceExisting, sourceMethod = "run") {
@@ -1568,6 +1615,12 @@ function resetAnalysisForNewWorkflow() {
   analysisSourceManifestInput.value = "";
   state.nextAnalysisGroupId = 1;
   state.pendingAudioOutput = "";
+  state.pendingTextOutput = "";
+  state.pendingProcurementSource = "";
+  state.workflow.imports.text = "";
+  state.workflow.completedProcesses = new Set();
+  clearNativeCatalogSelection("text");
+  textSourcePathInput.value = "";
   invalidateAnalysisAsyncOperation(state.analysisDiscoveryOperation);
   invalidateAnalysisAsyncOperation(state.analysisSubmissionOperation);
   analysisSpeakerDiscoveryStatus.textContent = "Choose source folders, then discover speakers.";
@@ -2325,6 +2378,7 @@ async function runProcurement(segmentManifest) {
   progressBar.style.width = "0%";
   progressLabel.textContent = "Starting...";
   setStatus("Running");
+  state.pendingProcurementSource = "";
   const isCleanSpeakerBeta = mode === "clean-speaker-beta";
   const betaOutputMode = getSelectedBetaOutputMode();
   const betaUsesPercentage = isCleanSpeakerBeta && betaOutputMode === "percentage";
@@ -2396,6 +2450,7 @@ async function runProcurement(segmentManifest) {
       },
     });
     state.activeRunIds.procurement = Number(response.runId || 0) || null;
+    state.pendingProcurementSource = String(response.processingSourcePath || "").trim();
   } catch (error) {
     state.activeRunIds.procurement = null;
     setStatus(error.message);
@@ -3564,9 +3619,14 @@ async function runTextProcessing() {
   if (isCatalogScan(state.textCatalog) && !state.textSelectedSourceIds.size) {
     throw new Error("Select at least one catalog source for Text processing.");
   }
+  state.pendingTextOutput = "";
+  state.workflow.imports.text = "";
   const response = await api("/api/run-text", { method: "POST", body: textRequestBody() });
   state.activeRunIds.text = Number(response.runId || 0) || null;
-  state.pendingTextOutput = textOutputRootInput.value.trim();
+  state.pendingTextOutput = String(response.outputRoot || textOutputRootInput.value).trim();
+  state.workflow.imports.text = state.pendingTextOutput;
+  textOutputRootInput.value = state.pendingTextOutput;
+  textImportToggle.checked = false;
   textProgressBar.style.width = "0%";
   textProgressLabel.textContent = "Starting...";
   textNextStep.classList.add("hidden");
@@ -3979,6 +4039,7 @@ async function pollState() {
       setRunScreenState(runKind, "complete");
       setStatus(completionLabel);
       if (runKind === "procurement") {
+        setTextProcessingSourceFromProcurement(progress.processingSourcePath);
         const plan = state.workflow.active ? state.workflow.plan : null;
         const destination = plan && !plan.processing && plan.analysis
           ? "Analysis"
@@ -3995,12 +4056,21 @@ async function pollState() {
           state.workflow.imports.audio = state.pendingAudioOutput;
           state.pendingAudioOutput = "";
         }
+        const nextGuidedProcess = state.workflow.active
+          ? (state.workflow.plan?.runProcesses || []).find((process) => process !== "audio")
+          : "";
         const continueToAnalysis = !state.workflow.active || Boolean(state.workflow.plan?.analysis);
-        audioNextTitle.textContent = continueToAnalysis ? "Continue to Analysis" : "Finish workflow";
-        audioNextCopy.textContent = continueToAnalysis
-          ? "Audio outputs are ready. Continue to Analysis."
-          : "Audio outputs are ready and every selected workflow stage is complete.";
-        audioToAnalysisButton.textContent = continueToAnalysis ? "Open analysis" : "Finish workflow";
+        audioNextTitle.textContent = nextGuidedProcess === "text"
+          ? "Continue to Text Processing"
+          : continueToAnalysis ? "Continue to Analysis" : "Finish workflow";
+        audioNextCopy.textContent = nextGuidedProcess === "text"
+          ? "Audio outputs are ready. Continue with Text processing."
+          : continueToAnalysis
+            ? "Audio outputs are ready. Continue to Analysis."
+            : "Audio outputs are ready and every selected workflow stage is complete.";
+        audioToAnalysisButton.textContent = nextGuidedProcess === "text"
+          ? "Open Text processing"
+          : continueToAnalysis ? "Open analysis" : "Finish workflow";
         audioNextStep.classList.remove("hidden");
       }
       if (runKind === "face") {
@@ -4017,6 +4087,8 @@ async function pollState() {
       if (runKind === "text") {
         if (progressMode === "text-native") {
           state.workflow.imports.text = state.pendingTextOutput;
+          const continueToAnalysis = !state.workflow.active || Boolean(state.workflow.plan?.analysis);
+          textToAnalysisButton.textContent = continueToAnalysis ? "Open analysis" : "Finish workflow";
           textNextStep.classList.remove("hidden");
         } else {
           textReadinessStatus.textContent = "Text readiness check complete; see the run log for the structured result.";
@@ -4042,7 +4114,11 @@ async function pollState() {
       }
       if (runKind === "text") {
         state.pendingTextOutput = "";
+        state.workflow.imports.text = "";
         state.activeRunIds.text = null;
+      }
+      if (runKind === "procurement") {
+        state.pendingProcurementSource = "";
       }
       const failureMessage = payload.status === "stopped" ? "Stopped." : analysisFailureMessage(progress);
       activeLabel.textContent = failureMessage;
@@ -4583,7 +4659,11 @@ openAudioProcessingButton.addEventListener("click", () => {
   updateAudioMode();
 });
 openFaceProcessingButton.addEventListener("click", () => showScreen("face-input"));
-openTextProcessingButton.addEventListener("click", () => showScreen("text-input"));
+openTextProcessingButton.addEventListener("click", () => {
+  prepareTextProcessingSourceFromProcurement()
+    .then(() => showScreen("text-input"))
+    .catch((error) => setStatus(error.message));
+});
 browseFaceImportButton.addEventListener("click", () => browseInto("folder", faceImportPathInput).catch((error) => setStatus(error.message)));
 browseAudioImportHubButton.addEventListener("click", () => browseInto("folder", audioImportHubPathInput).catch((error) => setStatus(error.message)));
 browseTextImportButton.addEventListener("click", () => browseInto("folder", textImportPathInput).catch((error) => setStatus(error.message)));
@@ -4678,17 +4758,22 @@ faceToAnalysisButton.addEventListener("click", () => importNativeFaceIntoAnalysi
 backFromTextButton.addEventListener("click", showProcessingHub);
 backToTextInputButton.addEventListener("click", () => showScreen("text-input"));
 browseTextFolderButton.addEventListener("click", () => {
+  state.pendingProcurementSource = "";
   clearNativeCatalogSelection("text");
   browseInto("folder", textSourcePathInput)
     .then((selectedPath) => selectedPath && loadNativeCatalogSelection("text"))
     .catch((error) => setStatus(error.message));
 });
 browseTextVideoButton.addEventListener("click", () => {
+  state.pendingProcurementSource = "";
   clearNativeCatalogSelection("text");
   browseInto("video", textSourcePathInput).catch((error) => setStatus(error.message));
 });
 browseTextOutputButton.addEventListener("click", () => browseInto("output", textOutputRootInput).catch((error) => setStatus(error.message)));
-textSourcePathInput.addEventListener("input", () => clearNativeCatalogSelection("text"));
+textSourcePathInput.addEventListener("input", () => {
+  state.pendingProcurementSource = "";
+  clearNativeCatalogSelection("text");
+});
 textSourcePathInput.addEventListener("change", () => loadNativeCatalogSelection("text").catch((error) => setStatus(error.message)));
 textCatalogFilterText.addEventListener("input", () => renderNativeCatalogSelection("text"));
 textSelectVisibleSourcesButton.addEventListener("click", () => {
@@ -4706,7 +4791,7 @@ checkTextReadinessButton.addEventListener("click", () => checkTextReadiness().ca
 runTextButton.addEventListener("click", () => runTextProcessing().catch((error) => setStatus(error.message)));
 stopTextButton.addEventListener("click", () => api("/api/stop", { method: "POST" }).catch((error) => setStatus(error.message)));
 openTextOutputButton.addEventListener("click", () => openProcessingOutput(textOutputRootInput.value).catch((error) => setStatus(error.message)));
-textToAnalysisButton.addEventListener("click", () => importNativeTextIntoAnalysis().catch((error) => setStatus(error.message)));
+textToAnalysisButton.addEventListener("click", () => continueAfterText().catch((error) => setStatus(error.message)));
 analysisImplementedControls.forEach((controls) => {
   controls.enabled.addEventListener("change", updateAnalysisForm);
   controls.methodInputs.forEach((input) => input.addEventListener("change", updateAnalysisForm));

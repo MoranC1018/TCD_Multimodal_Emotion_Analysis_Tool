@@ -268,6 +268,46 @@ class NativeProcessingBackendTests(unittest.TestCase):
         self.assertEqual(responses[1]["kind"], "text-processing-readiness")
         start_process.assert_not_called()
 
+    def test_text_run_response_returns_backend_resolved_default_output_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir()
+            payload = {
+                "sourcePath": str(source),
+                "outputRoot": "",
+                "whisperModel": "small",
+                "whisperDevice": "cpu",
+                "whisperLanguage": "",
+                "defaultLanguageVariant": "eng",
+                "dictionaries": ["embedded:LIWC"],
+                "dictionaryCombination": "merge",
+                "categories": [],
+                "allCategories": True,
+                "threads": 1,
+                "forceRocksteady": False,
+                "writeGraphs": True,
+                "debug": False,
+                "selectedSourceIds": [],
+                "catalogSha256": "",
+            }
+            handler = object.__new__(launcher.VideoStackUiHandler)
+            responses: list[dict[str, object]] = []
+            handler.send_json = responses.append
+
+            with (
+                patch.object(launcher, "REPO_ROOT", root),
+                patch.object(backend, "build_text_processing_command", return_value=["python", "-V"]),
+                patch.object(launcher, "start_process", return_value=19),
+            ):
+                handler.handle_run_text(payload)
+
+            self.assertEqual(responses[0]["runId"], 19)
+            self.assertEqual(
+                responses[0]["outputRoot"],
+                str(backend.default_text_output_root(root).resolve()),
+            )
+
     @unittest.skipUnless(sys.platform == "win32", "Windows junction regression")
     def test_http_handlers_preserve_face_and_text_output_junctions_for_child_rejection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

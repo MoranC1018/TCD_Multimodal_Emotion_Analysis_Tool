@@ -605,6 +605,7 @@ def main() -> int:
     manifest_csv = run_dir / "procurement_manifest.csv"
 
     print(f"Pipeline run folder: {run_dir}", flush=True)
+    print(f"Procurement result root: {run_dir}", flush=True)
     print(f"Audited DOCX: {audited_docx}", flush=True)
     print(f"Download root: {download_root}", flush=True)
 

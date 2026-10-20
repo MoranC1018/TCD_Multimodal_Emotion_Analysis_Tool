@@ -1052,6 +1052,7 @@ def main() -> int:
 
     batch_logger.log(f"Reading DOCX: {docx_path}")
     batch_logger.log(f"Speaker output root: {speaker_output_root}")
+    batch_logger.log(f"Procurement result root: {speaker_output_root}")
     batch_logger.log(f"Stitching enabled: {not args.no_stitch}")
     document = open_docx_document(docx_path, logger=batch_logger.log)
 
