@@ -29,19 +29,20 @@ Optional packages:
 
 ## Windows Setup Steps
 
-1. Install `ffmpeg` and make sure both `ffmpeg` and `ffprobe` are on `PATH`.
-   Chocolatey example:
+1. From the repository root, use the same supported environment as Face,
+   Audio and Text:
 
    ```powershell
-   choco install ffmpeg
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cpu -TextMode Require
+   if ($LASTEXITCODE -ne 0) { throw 'Setup failed; inspect its log before continuing.' }
    ```
 
-2. Install or update Python dependencies in the environment that launches this
-   repository:
-
-   ```powershell
-   python -m pip install --upgrade yt-dlp opencv-python torch speechbrain psutil pyannote.audio
-   ```
+2. Keep the project's pinned dependency family together. Do not independently
+   upgrade `torch`, `pyannote.audio` or other packages in this environment.
+   The installer verifies FFmpeg 8.1.2 full-shared and prepares native Face
+   weights. Clean Speaker's own model caches are separate; see
+   [Installation and validation](../../docs/INSTALLATION_VALIDATION.md) for
+   managed-machine options, readiness boundaries and observed test coverage.
 
 3. Create a free Hugging Face account and access token if using gated Hugging
    Face models.
@@ -61,7 +62,7 @@ Optional packages:
 6. Start the launcher:
 
    ```powershell
-   python -m application.launcher
+   .\.venv\Scripts\python.exe -m application.launcher
    ```
 
 7. In Procurement, choose `Clean speaker segments`, then select either:
@@ -83,6 +84,13 @@ they are not already present. The cache lives outside the repository, normally:
 Those files must stay out of git. If a researcher cannot download models on a
 locked-down machine, they can place the official ONNX files in that cache
 manually.
+
+SpeechBrain and optional pyannote models can also require first-use downloads.
+The readiness screen reports local prerequisites; a token being present does
+not prove access to a gated model. Run a short representative input and inspect
+its selected backend and manifest before a study batch. The September CPU
+acceptance exercised the local face/voice path; it did not certify the gated
+pyannote fallback.
 
 ## Accuracy Rules
 

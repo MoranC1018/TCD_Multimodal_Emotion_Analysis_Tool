@@ -782,3 +782,68 @@ def test_profile_rejects_splitting_one_speaker_level_text_result_across_groups(
             analysis_profile=profile,
             text_summaries=(summary,),
         )
+
+
+def test_release_profile_rejects_partial_speaker_text_in_preflight_and_workbook(tmp_path: Path) -> None:
+    from application import backend
+    from analysis.metadata import resolve_analysis_profile, validate_text_profile_grouping
+    from analysis.text_results import discover_text_results
+
+    manifest = _write_manifest(tmp_path / "input", 2, speakers=["Speaker A", "Speaker A"])
+    metadata = load_source_metadata(manifest)
+    summary_path = manifest.parent / "multimodal" / "speaker_level_summary.csv"
+    summary_path.parent.mkdir()
+    with summary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Country", "Speaker", "Speaker ID", "Videos", "Valid segments",
+                         "RockSteady terms", "Positive Sentiment", "Negative Sentiment",
+                         "Arousal / Activation", "Dominance / Power", "Affiliation / Social orientation"])
+        writer.writerow(["mixed", "Speaker A", "speakera", 2, 20, 10, .5, .1, .3, .4, .2])
+    summaries = discover_text_results(manifest.parent).summaries
+    profile = AnalysisProfile(manifest, metadata.manifest_sha256,
+                              metadata_filters=(("Country", ("Ireland",)),))
+    match = "speaker-level Text.*partial|partial.*speaker-level Text"
+    with pytest.raises(ValueError, match=match):
+        validate_text_profile_grouping(metadata, resolve_analysis_profile(metadata, profile))
+    with pytest.raises(ValueError, match=match):
+        backend.build_analysis_workflow_command(
+            backend.AnalysisWorkflowRunRequest(
+                output_root=tmp_path / "gui-output",
+                modalities=(backend.AnalysisModalityRunRequest("text", "import", manifest.parent),),
+                analysis_profile=profile,
+            ),
+            repo_root=tmp_path,
+        )
+    with pytest.raises(InputError, match=match):
+        build_combined_workbook({}, tmp_path / "filtered.xlsx", analysis_profile=profile,
+                                text_summaries=summaries)
+    with pytest.raises(WorkflowError, match=match):
+        run_workflow(WorkflowRequest(
+            output_root=tmp_path / "workflow", modalities=(ModalityRequest("text", "import", manifest.parent),),
+            speaker_groups=(), analysis_profile=profile,
+        ))
+    assert not (tmp_path / "filtered.xlsx").exists()
+    assert not (tmp_path / "workflow").exists()
+
+
+def test_release_profile_still_filters_source_grain_text(tmp_path: Path) -> None:
+    manifest = _write_manifest(tmp_path / "input", 2, speakers=["Speaker A", "Speaker A"])
+    metadata = load_source_metadata(manifest)
+    summary_path = tmp_path / "video_level_summary.csv"
+    summary_path.write_text("summary\n", encoding="utf-8")
+    summaries = tuple(TextConstructSummary(
+        speaker_id=f"source-{index:04d}", display_name=f"Interview {index}", country="mixed",
+        constructs={"Positive Sentiment": value, "Negative Sentiment": .1,
+                    "Arousal / Activation": .3, "Dominance / Power": .4,
+                    "Affiliation / Social orientation": .2},
+        source_path=summary_path, grain="source", source_ids=(f"source-{index:04d}",),
+    ) for index, value in ((1, .2), (2, .8)))
+
+    result = build_combined_workbook({}, tmp_path / "source-filtered.xlsx",
+        analysis_profile=AnalysisProfile(manifest, metadata.manifest_sha256,
+                                         metadata_filters=(("Country", ("Ireland",)),)),
+        text_summaries=summaries)
+
+    text = openpyxl.load_workbook(result.workbook_path)["Text sentiment"]
+    assert text["D2"].value == 20.0
+    assert text["E2"].value is None

@@ -166,15 +166,16 @@ def build_output_tables(
 
 def expected_sampled_frames(metadata: VideoMetadata, sample_fps: float) -> list[int]:
     step = int(sampling_metadata(metadata, sample_fps)["frame_step"])
-    total = metadata.frame_count or max(1, round(metadata.duration_seconds * metadata.fps))
-    return list(range(0, total, step))
+    return list(range(0, metadata.frame_count, step))
 
 
 def sampling_metadata(metadata: VideoMetadata, sample_fps: float) -> dict[str, object]:
     """Describe the exact integer-frame sampling implemented by Py-Feat."""
 
+    if metadata.frame_count is None or metadata.frame_count <= 0:
+        raise RuntimeError("Face sampling requires an evidenced positive video frame count")
     step = max(1, round(metadata.fps / sample_fps))
-    total = metadata.frame_count or max(1, round(metadata.duration_seconds * metadata.fps))
+    total = metadata.frame_count
     return {
         "requested_sample_fps": sample_fps,
         "frame_step": step,

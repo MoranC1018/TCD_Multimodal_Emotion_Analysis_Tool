@@ -73,36 +73,42 @@ caches, logs, and reports are intentionally excluded from git.
 
 ### 1. System Requirements
 
-The supported desktop path is Windows 10 or Windows 11.
+The supported desktop path is Windows 10 or Windows 11 on x64 hardware.
+The September validation used Windows 11, Python 3.12.1 and CPU processing on
+one existing research machine. Other configurations need their own acceptance
+checks; this is not a measured installation success rate.
 
 Required components:
 
 - Python 3.11 or newer. The automatic setup can install the recommended Python
-  3.12 fallback when no compatible interpreter is present.
+  3.12 fallback when no compatible interpreter is present. Use x64 Python;
+  accepting a version during discovery does not prove that every dependency
+  provides a compatible wheel for it.
 - [FFmpeg](https://ffmpeg.org/download.html), including `ffmpeg` and
   `ffprobe`. The automatic setup installs and selects the exact supported
-  full-shared runtime; manual installations must make both commands available
-  on `PATH`.
+  FFmpeg 8.1.2 full-shared runtime. Both executables and its shared DLLs are
+  required for native Face; executable-only builds are insufficient.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), installed by
   `requirements.txt` or available on `PATH`.
-- Microsoft Edge WebView2 Runtime. It is already present on normal current
-  Windows installations.
+- Microsoft Edge WebView2 Runtime for the native desktop window. Verify its
+  availability on managed or minimal Windows installations.
 - The bundled OpenSMILE 3.0.0 Windows distribution for audio acoustic
   features. Keep its complete `LICENSE` and `licenses/` tree. `OPENSMILE_HOME`
   can select a separately installed compatible distribution when required.
+- Git and Git LFS when obtaining the source or materializing the tracked
+  RockSteady JAR. A source archive containing only its LFS pointer is incomplete.
+- WinGet/App Installer when setup must install Python, FFmpeg or a JDK;
+  alternatively, have those prerequisites provisioned before running setup.
+- Network access for package installation and missing model downloads, and
+  writable space for `.venv`, model caches, media, temporary files and reports.
 
-Python 3.11 or newer is required by the pinned dependency stack. Python 3.12 is
+.\.venv\Scripts\python.exe 3.11 or newer is required by the pinned dependency stack. Python 3.12 is
 tested and recommended, while other compatible versions are accepted. If
 `scripts\setup.ps1` cannot find a compatible interpreter and installation is
 allowed, its automatic fallback installs Python 3.12.
 
-Confirm the external commands:
-
-```powershell
-ffmpeg -version
-ffprobe -version
-yt-dlp --version
-```
+See [Installation and validation](docs/INSTALLATION_VALIDATION.md) for source
+acquisition, exact prerequisite checks, managed-machine options and recovery.
 
 ### 2. Create The Python Environment
 
@@ -112,7 +118,8 @@ shared FFmpeg runtime, prepares Face model weights, and checks readiness. From
 the repository root, run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cpu -TextMode Require
+if ($LASTEXITCODE -ne 0) { throw 'Setup failed; inspect its log before continuing.' }
 ```
 
 The setup may use WinGet for a missing Python 3.12 fallback, the exact supported
@@ -120,14 +127,21 @@ FFmpeg runtime, or a JDK when Text is enabled. After every WinGet attempt it
 verifies the actual required files and commands; an already-installed package
 is accepted when that post-install verification succeeds.
 
+The command above selects the tested CPU path and requires Text readiness.
+The default `-TorchRuntime auto` can select CUDA; default `-TextMode Auto` can
+finish with Face ready and Text not ready. Read the final status for both
+modalities. Setup prepares Face checkpoints and checks the Text runtime, but
+first-use Audio, Whisper and Clean Speaker model downloads may still be needed.
+Run a short representative input and inspect its manifests before a study batch.
+
 If Python, PyTorch, FFmpeg, and model preparation are managed separately, the
 manual Python-only path is:
 
 ```powershell
-python -m venv .venv
+.\.venv\Scripts\python.exe -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 The manual path does not select a CPU/CUDA wheel family, install the required
@@ -136,7 +150,7 @@ shared FFmpeg DLLs, prepare Face weights, or perform the setup readiness checks.
 For automated tests:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
 The launcher prefers `.venv\Scripts\python.exe`, then prefers Python 3.12 while
@@ -145,16 +159,22 @@ a repository-local environment makes package versions predictable.
 
 ### 3. Optional CUDA Setup
 
-The default `pip install -r requirements.txt` may install CPU-only PyTorch.
-For NVIDIA acceleration, install matching CUDA builds of both `torch` and
-`torchaudio` before installing the remaining requirements. Follow the
-[official PyTorch selector](https://pytorch.org/get-started/locally/) because
-the correct command depends on the installed driver and supported CUDA build.
+Use the installer to keep torch, torchvision, torchaudio and TorchCodec on the
+project's matched versions:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cu128 -TextMode Require
+if ($LASTEXITCODE -ne 0) { throw 'CUDA setup failed; inspect its log before continuing.' }
+```
+
+The CUDA option checks the selected runtime with a real device computation.
+CUDA was not certified by the September CPU acceptance run. Avoid independently
+upgrading individual members of the PyTorch family.
 
 Check the active environment:
 
 ```powershell
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
 Selecting **CUDA** in the application does not install CUDA. It requires the
@@ -495,105 +515,65 @@ model execution is CPU-backed until a CUDA PyTorch build is installed.
 
 ## Command-Line Use
 
-The desktop application is the recommended path for non-technical users. These
-commands are useful for automation and diagnosis.
+The unified CLI runs the existing Procurement, Face, Audio, Text, and Analysis
+engines without opening the desktop application. Jobs can contain one stage or
+a sequential workflow with explicit output handoffs, metadata profiles,
+resource limits, logs, cancellation and deadlines.
 
-Run the DOCX Procurement pipeline:
+See the [complete CLI and automation guide](docs/CLI.md) for all commands,
+exact parameter defaults, stage/resume controls, scheduling instructions and
+[ready-to-edit JSON examples](docs/CLI.md#example-jobs). The desktop interface
+and existing module commands remain available.
 
-```powershell
-python -m procurement.run_pipeline "C:\path\to\input.docx"
-```
-
-Run a reusable CSV/DOCX catalog from the command line after recording its
-SHA-256 and chosen SourceIDs:
-
-```powershell
-python -m procurement.catalog_runner "C:\path\to\sources.csv" `
-  --run-root "C:\path\to\run" --catalog-sha256 <sha256> `
-  --source-id source-0001 --source-id source-0003
-```
-
-Relative local media paths are allowed from the catalog folder. An absolute
-local file outside that folder requires the explicit CLI option
-`--allow-external-local-paths`; UNC shares, device paths, and linked paths are
-always rejected before access.
-
-Useful Procurement options:
+From the repository root after setup:
 
 ```powershell
-python -m procurement.run_pipeline INPUT.docx --limit 3
-python -m procurement.run_pipeline INPUT.docx --force
-python -m procurement.run_pipeline INPUT.docx --no-stitch
-python -m procurement.run_pipeline INPUT.docx --dry-run
+$python = (Resolve-Path '.\.venv\Scripts\python.exe').Path
+& $python -m application.cli --help
+& $python -m application.cli doctor --component procurement
+& $python -m application.cli inspect source 'C:\Research\TrinityStudy\media' --no-enrich
+
+# Replace these study paths with your own and edit the job before running.
+$job = 'C:\Research\TrinityStudy\jobs\study.json'
+$run = 'C:\Research\TrinityStudy\runs\study-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+& $python -m application.cli validate --job $job --run-dir $run
+if ($LASTEXITCODE -ne 0) { throw 'Job validation failed.' }
+& $python -m application.cli run --job $job --run-dir $run --timeout 43200
+if ($LASTEXITCODE -ne 0) { throw "Workflow failed. Inspect $run" }
 ```
 
-Check audio dependencies:
+The evidence directory must be new. Relative paths inside a job resolve from
+the job file's directory. Commands return JSON on stdout and diagnostics on
+stderr; processing stages retain their own manifests and provenance. A plan
+can defer checks that require an earlier stage's outputs. Readiness checks do
+not install dependencies, download weights, or establish model accuracy.
+
+Existing low-level commands still work, for example:
 
 ```powershell
-python processing\audio_analysis\run_audio_analysis.py doctor
+& $python -m processing.face_analysis --help
+& $python -m processing.text_analysis --help
+& $python processing\audio_analysis\run_audio_analysis.py doctor
+& $python -m analysis.workflow --help
 ```
 
-Run Audio Processing:
-
-```powershell
-python processing\audio_analysis\run_audio_analysis.py batch "C:\path\to\videos"
-python processing\audio_analysis\run_audio_analysis.py single "C:\path\to\video.mp4"
-```
-
-Run lower-level expert native Face, iMotions, and audio Analysis:
-
-```powershell
-python -m analysis.imotions "C:\path\to\imotions_csvs" --logscale
-python -m analysis.native_face "C:\path\to\native_face_output" --logscale
-python -m analysis.audio "C:\path\to\audio_outputs" --logscale
-```
-
-Run the stable combined workflow. Video is one canonical modality; its source
-may contain iMotions/AFFDEX or verified Py-Feat native Face data and is detected
-before any output is created or archived:
-
-```powershell
-python -m analysis.workflow `
-  --output-root "C:\path\to\combined_output" `
-  --video-source "C:\path\to\video_reports" --video-method import `
-  --audio-source "C:\path\to\audio_reports" --audio-method import `
-  --speaker-groups-json '[{"id":"group-1","name":"Group 1","speaker_ids":["Speaker A","Speaker B"]}]'
-```
-
-Use `run` instead of `import` for a modality when its source contains raw
-iMotions exports, verified native `face_core.csv` runs, or processed
-`audio_analysis.csv` files that still need Analysis. The desktop application
-is easier for defining speaker groups.
-
-`--imotions-source` / `--imotions-method` and `--native_face-source` /
-`--native_face-method` remain deprecated one-release aliases. Each normalizes
-to the same Video request and emits a warning; canonical and alias flags, or
-both aliases, cannot be combined.
-
-All documented CLI layers provide `--help`:
-
-```powershell
-python -m processing.face_analysis --help
-python -m processing.text_analysis --help
-python processing/audio_analysis/run_audio_analysis.py --help
-python -m analysis.imotions --help
-python -m analysis.native_face --help
-python -m analysis.audio --help
-python -m analysis.workflow --help
-```
+See the [CLI acceptance record](application/tests/REAL_CLI_ACCEPTANCE.md) for
+the actual tested workflows and remaining validation limits.
 
 ## Verification And Troubleshooting
 
-Run the test suite:
+Run the installer contract checks and complete Python collection from the
+repository root using its environment:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_setup.ps1
-python -m pytest -q
+.\.venv\Scripts\python.exe -m pytest application procurement processing analysis tools -q -ra
 node --check application\static\app.js
 ```
 
-The real-browser Analysis smoke is optional during normal development. Its
-portable test resolver accepts these environment variables:
+The fast Analysis browser test runs in a real browser with mocked API responses.
+It is optional during normal development. Its portable resolver accepts these
+environment variables:
 
 | Variable | Purpose |
 | --- | --- |
@@ -609,7 +589,7 @@ $env:MEAP_TEST_NODE = "C:\Program Files\nodejs\node.exe"
 $env:MEAP_TEST_PLAYWRIGHT = "C:\path\to\node_modules\playwright"
 $env:MEAP_TEST_BROWSER_EXECUTABLE = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 $env:MEAP_STRICT_BROWSER_TESTS = "1"
-python -m unittest application.tests.test_release_ui_contract.ReleaseUiContractTests.test_analysis_browser_interactions_and_responsive_rendering -v
+.\.venv\Scripts\python.exe -m unittest application.tests.test_release_ui_contract.ReleaseUiContractTests.test_analysis_browser_interactions_and_responsive_rendering -v
 ```
 
 Unset the variables after a local check if they should not affect later test
@@ -617,11 +597,20 @@ runs. Without overrides, the test searches common Node, Playwright, and Edge
 locations and skips with setup guidance when optional browser automation is
 not installed.
 
+Release acceptance also requires the separate
+[real launcher E2E suite](application/tests/REAL_BROWSER_ACCEPTANCE.md), which
+uses production HTTP handlers and actual subprocesses. Node/Playwright setup,
+evidence capture and readiness boundaries are documented in
+[Installation and validation](docs/INSTALLATION_VALIDATION.md).
+
 Before Clean Speaker or native Face, select the corresponding **Check model
 readiness** action. Face preparation is an explicit network-enabled action;
 normal Face runs are offline and receive no credentials. Before Audio, run the
 `doctor` command above. Native Text readiness checks Whisper, FFmpeg, the JDK,
 and the Git LFS-managed RockSteady 0.4 JAR/dictionaries before processing.
+Text preflight does not load a Whisper checkpoint, and Audio doctor does not
+run emotion-model inference. A successful check does not guarantee model-host
+access, the preferred Audio backend, or successful processing of every input.
 
 Common causes:
 
@@ -642,7 +631,11 @@ Common causes:
 Further technical documents:
 
 - [Research Methods and Reproducibility](docs/RESEARCH_METHODS.md)
-- [Release Readiness and Limits](docs/RELEASE_READINESS.md)
+- [Installation and validation](docs/INSTALLATION_VALIDATION.md)
+- [Current software release review and defect register](docs/RELEASE_REVIEW_2026-09-04.md)
+- [CLI and Audio optimization validation](docs/CLI_RELEASE_VALIDATION_2026-09-05.md)
+- [September release validation and remaining gates](docs/RELEASE_VALIDATION_2026-09-04.md)
+- [Historical August readiness report](docs/RELEASE_READINESS.md)
 - [Analysis Calculations](analysis/CALCULATIONS.md)
 - [Native Face Processing Contract](processing/face_analysis/README.md)
 - [Native Text Processing Contract](processing/text_analysis/README.md)

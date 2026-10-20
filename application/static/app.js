@@ -321,6 +321,7 @@ const manualCount = document.querySelector("#manualCount");
 
 const PROGRESS_POLL_INTERVAL_MS = 1000;
 const API_TIMEOUT_MS = 15000;
+const LONG_API_TIMEOUT_MS = 5 * 60 * 1000;
 const launcherToken = document.querySelector("meta[name='launcher-token']")?.content || "";
 let progressPollTimer = null;
 let analysisWarningAnnouncementTimer = null;
@@ -1018,14 +1019,15 @@ const state = {
 // Small JSON helper shared by all screens. Every API error returns a JSON
 // payload, so callers can display the server's message directly in the status.
 function api(path, options = {}) {
+  const { timeoutMs = API_TIMEOUT_MS, ...requestOptions } = options;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   const init = {
     headers: {
       "Content-Type": "application/json",
       "X-Launcher-Token": launcherToken,
     },
-    ...options,
+    ...requestOptions,
     signal: controller.signal,
   };
   if (init.body && typeof init.body !== "string") {
@@ -1044,7 +1046,7 @@ function api(path, options = {}) {
     })
     .catch((error) => {
       if (error.name === "AbortError") {
-        throw new Error("The local tool did not respond within 15 seconds.");
+        throw new Error(`The local tool did not respond within ${Math.ceil(timeoutMs / 1000)} seconds.`);
       }
       throw error;
     })
@@ -2270,7 +2272,11 @@ async function scan() {
   setBusy(true);
   setStatus("Scanning...");
   try {
-    const result = await api("/api/scan", { method: "POST", body: { path } });
+    const result = await api("/api/scan", {
+      method: "POST",
+      body: { path },
+      timeoutMs: LONG_API_TIMEOUT_MS,
+    });
     state.scan = result;
     state.activeSpeaker = result.groups[0] ? result.groups[0].speaker : "";
     state.selectedSpeakers = new Set(result.groups.map((group) => group.speaker));
@@ -2368,6 +2374,7 @@ async function runProcurement(segmentManifest) {
           ? "Finding clean speaker segments"
           : "Sampling videos";
   runSubtitle.textContent = "The selected procurement run is in progress.";
+  setRunScreenState("procurement", "running");
   progressBar.style.width = "0%";
   progressLabel.textContent = "Starting...";
   setStatus("Running");
@@ -2447,7 +2454,7 @@ async function runProcurement(segmentManifest) {
   } catch (error) {
     state.activeRunIds.procurement = null;
     setStatus(error.message);
-    runSubtitle.textContent = error.message;
+    setRunScreenState("procurement", "failed", error.message);
   }
 }
 
@@ -3602,6 +3609,7 @@ async function runFaceProcessing() {
   faceProgressBar.style.width = "0%";
   faceProgressLabel.textContent = "Starting...";
   faceNextStep.classList.add("hidden");
+  setRunScreenState("face", "running");
   await showScreen("face-run");
 }
 
@@ -3622,12 +3630,17 @@ async function runTextProcessing() {
   textProgressBar.style.width = "0%";
   textProgressLabel.textContent = "Starting...";
   textNextStep.classList.add("hidden");
+  setRunScreenState("text", "running");
   await showScreen("text-run");
 }
 
 async function checkFaceReadiness(prepareModels = false) {
   const endpoint = prepareModels ? "/api/prepare-face-models" : "/api/face-readiness";
-  const response = await api(endpoint, { method: "POST", body: { device: faceDeviceSelect.value } });
+  const response = await api(endpoint, {
+    method: "POST",
+    body: { device: faceDeviceSelect.value },
+    timeoutMs: LONG_API_TIMEOUT_MS,
+  });
   state.activeRunIds.face = Number(response.runId || 0) || null;
   faceReadinessStatus.textContent = prepareModels
     ? "Preparing and verifying Py-Feat models..."
@@ -3640,7 +3653,11 @@ async function checkTextReadiness() {
   const request = textRequestBody();
   delete request.sourcePath;
   delete request.outputRoot;
-  const response = await api("/api/text-readiness", { method: "POST", body: request });
+  const response = await api("/api/text-readiness", {
+    method: "POST",
+    body: request,
+    timeoutMs: LONG_API_TIMEOUT_MS,
+  });
   state.activeRunIds.text = null;
   if (Array.isArray(response.categories)) {
     textCategorySuggestions.replaceChildren();
@@ -3702,6 +3719,7 @@ async function runAudioProcessing() {
     audioProgressBar.style.width = "100%";
     audioProgressLabel.textContent = "Imported audio outputs selected";
     audioNextStep.classList.remove("hidden");
+    setRunScreenState("audio", "complete", "Imported audio outputs are ready for Analysis.");
     setStatus("Audio import ready");
     return;
   }
@@ -3740,6 +3758,7 @@ async function runAudioProcessing() {
     });
     state.activeRunIds.audio = Number(response.runId || 0) || null;
     state.pendingAudioOutput = audioOutputRootInput.value.trim();
+    setRunScreenState("audio", "running");
     await showScreen("audio-run");
     setStatus("Running audio");
   } catch (error) {
@@ -3747,6 +3766,7 @@ async function runAudioProcessing() {
     state.pendingAudioOutput = "";
     setStatus(error.message);
     audioProgressLabel.textContent = error.message;
+    setRunScreenState("audio", "failed", error.message);
   }
 }
 
@@ -3848,6 +3868,7 @@ async function runAnalysis() {
     }
     state.activeRunIds.analysis = runId;
     runAccepted = true;
+    setRunScreenState("analysis", "running");
     await showScreen("analysis-run");
     setStatus("Running analysis");
   } catch (error) {
@@ -3907,6 +3928,32 @@ function createSegmentManifest() {
 
 // The backend owns process execution; this poller only reflects its current
 // state into whichever run screen is active.
+function setRunScreenState(kind, status, message = "") {
+  const name = {
+    procurement: "Procurement",
+    audio: "Audio processing",
+    face: "Native Face processing",
+    text: "Text processing",
+    analysis: "Analysis",
+  }[kind];
+  const root = document.querySelector(kind === "procurement" ? "#runProgressView" : `#${kind}RunScreen`);
+  if (!name || !root) return;
+  const running = status === "running";
+  root.querySelector(".spinner").classList.toggle("hidden", !running);
+  root.querySelector('button[id^="stop"]').disabled = !running;
+  root.querySelector("h2").textContent = running
+    ? `Running ${name.toLowerCase()}`
+    : `${name} ${status === "complete" ? "complete" : status === "stopped" ? "stopped" : "failed"}`;
+  const subtitle = root.querySelector(".run-center > p, :scope > p");
+  if (subtitle) subtitle.textContent = message || (running
+    ? "The selected run is in progress."
+    : status === "complete"
+      ? "The selected run completed successfully."
+      : status === "stopped"
+        ? "The run was stopped. Review any partial outputs before starting again."
+        : "The run could not complete. Review the error below before starting again.");
+}
+
 async function pollState() {
   try {
     const payload = await api(state.settingsLoaded ? "/api/state" : "/api/state?configuration=1");
@@ -3974,6 +4021,7 @@ async function pollState() {
             ? audioProgressLabel
             : progressLabel;
     if (payload.running) {
+      setRunScreenState(runKind, "running");
       const total = Number(progress.total || 0);
       const current = Number(progress.current || 0);
       const percent = total > 0 ? Math.max(3, Math.min(100, Math.round((current / total) * 100))) : 15;
@@ -3984,6 +4032,7 @@ async function pollState() {
       state.handledRunIds.add(runId);
       activeBar.style.width = "100%";
       activeLabel.textContent = "Complete";
+      setRunScreenState(runKind, "complete");
       setStatus("Complete");
       if (runKind === "procurement") {
         setTextProcessingSourceFromProcurement(progress.processingSourcePath);
@@ -4069,6 +4118,7 @@ async function pollState() {
       }
       const failureMessage = payload.status === "stopped" ? "Stopped." : analysisFailureMessage(progress);
       activeLabel.textContent = failureMessage;
+      setRunScreenState(runKind, payload.status, failureMessage);
       setStatus(payload.status === "stopped" ? "Stopped" : failureMessage);
       if (runKind === "analysis") {
         state.activeRunIds.analysis = null;

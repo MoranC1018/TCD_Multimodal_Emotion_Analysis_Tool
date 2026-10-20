@@ -282,7 +282,7 @@ class AudioAnalysisOutputTests(unittest.TestCase):
         self.assertEqual(metadata["VideoTitle"], "Creative_Commons")
         self.assertEqual(metadata["YoutubeID"], "cc001")
 
-    def test_unavailable_emotion_models_keep_blank_outputs_without_window_exports(self):
+    def test_unavailable_requested_emotion_models_fail_without_writing_outputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             input_video = root / "clip.mp4"
@@ -305,20 +305,16 @@ class AudioAnalysisOutputTests(unittest.TestCase):
                 patch("audio_pipeline.pipeline.run_opensmile_windows", side_effect=fake_opensmile),
                 patch("audio_pipeline.pipeline.export_window_wav") as export_window,
             ):
-                result = run_single_video(
-                    input_video,
-                    root / "out",
-                    emotion_models=FakeUnavailableEmotionModels(),
-                    progress=messages.append,
-                )
-
-            _metadata, rows, _header = read_audio_analysis_csv(result.audio_analysis_csv)
+                with self.assertRaisesRegex(RuntimeError, "model layer.*unavailable"):
+                    run_single_video(
+                        input_video,
+                        root / "out",
+                        emotion_models=FakeUnavailableEmotionModels(),
+                        progress=messages.append,
+                    )
+            self.assertFalse((root / "out").exists())
 
         export_window.assert_not_called()
-        self.assertEqual(rows[0]["PredictedEmotion"], "")
-        self.assertEqual(rows[0]["Anger"], "")
-        self.assertEqual(rows[0]["Arousal"], "")
-        self.assertIn("No emotion model layers are available; leaving model-output columns blank.", messages)
 
     def test_unsupported_emotion_columns_are_blank_not_zero(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -405,7 +401,7 @@ class AudioAnalysisOutputTests(unittest.TestCase):
                 result = run_single_video(
                     input_video,
                     root / "out",
-                    emotion_models=FakeUnavailableEmotionModels(),
+                    emotion_models=FakeEmotionModels(),
                     debug=True,
                 )
 
@@ -414,8 +410,8 @@ class AudioAnalysisOutputTests(unittest.TestCase):
             debug_exists = debug_csv.exists()
             debug_metadata, debug_rows, _debug_header = read_audio_analysis_csv(debug_csv)
 
-        self.assertEqual(main_rows[0]["PredictedEmotion"], "")
-        self.assertEqual(main_rows[0]["Anger"], "")
+        self.assertEqual(main_rows[0]["PredictedEmotion"], "Happiness")
+        self.assertEqual(main_rows[0]["Anger"], "0.05")
         self.assertTrue(debug_exists)
         self.assertEqual(debug_metadata["ModelCategoricalName"], FALLBACK_CATEGORICAL_MODEL_NAME)
         self.assertEqual(debug_rows[0]["PredictedEmotion"], "Happiness")

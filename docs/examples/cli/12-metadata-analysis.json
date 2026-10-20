@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "stage": "analysis",
+  "options": {
+    "modalities": [
+      {
+        "name": "video",
+        "source_method": "run",
+        "source_path": "C:/Research/TrinityStudy/processed/face"
+      },
+      {
+        "name": "audio",
+        "source_method": "run",
+        "source_path": "C:/Research/TrinityStudy/processed/audio"
+      },
+      {
+        "name": "text",
+        "source_method": "import",
+        "source_path": "C:/Research/TrinityStudy/processed/text"
+      }
+    ],
+    "write_combined_workbook": true
+  },
+  "native_options": {
+    "profile_options": {
+      "automatic_group_field": "Country",
+      "sort_fields": [
+        "Country",
+        "Ideology"
+      ],
+      "manual_groups": [],
+      "metadata_filters": {
+        "Country": [
+          "Ireland",
+          "United Kingdom"
+        ]
+      }
+    }
+  }
+}

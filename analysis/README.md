@@ -190,6 +190,12 @@ The combined workbook and its **Measure Guide** use four explicit sections:
   imported on `-1..1` and multiplied by `100` in the combined workbook;
   signed values retain their sign.
 
+Audio dimensional ranges are nominal. Finite regression estimates can exceed
+them; the same affine or multiplicative transform applies to every raw value.
+Fixed-range histograms exclude such values, while descriptive statistics retain
+them. See [Analysis Calculations](CALCULATIONS.md) for denominator and historical
+rounding considerations.
+
 Numeric ranges overlap after Text `x100` scaling, but the modality constructs
 are not calibrated equivalents. The
 Measure Guide columns are Section, Modality, Display measure, Imported source

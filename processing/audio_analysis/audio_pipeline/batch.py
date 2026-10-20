@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import csv
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from spreadsheet_safety import SpreadsheetSafeWriter
-from processing.io_utils import assert_no_output_path_aliases, assert_safe_output_path
+from processing.io_utils import assert_no_output_path_aliases, assert_safe_output_path, atomic_write_csv, atomic_write_json
 
 from . import config
 from .emotion_models import EmotionModelBundle, EmotionModels, load_debug_fallback_emotion_models
-from .full_stack import export_batch_to_analysis_audio_outputs
-from .pipeline import ProgressCallback, SingleVideoResult, emit_progress, run_single_video
-from .source_context import copy_run_sidecars, load_source_context
+from .full_stack import BATCH_STATE_FILENAME, export_batch_to_analysis_audio_outputs
+from .pipeline import (
+    ProgressCallback, SingleVideoResult, emit_progress, run_single_video,
+    validate_audio_options, validate_requested_emotion_models,
+)
+from .source_context import load_source_context, preflight_run_sidecars, publish_run_sidecars, snapshot_run_sidecars
 
 
 STITCHED_VIDEO_NAME = "stitched_imotions.mp4"
@@ -200,6 +202,10 @@ def run_batch(
 ) -> BatchResult:
     """Run OpenSMILE audio analysis over a procurement downloads folder."""
 
+    validate_audio_options(
+        window_seconds, stride_seconds, opensmile_feature_set,
+        skip_emotion_models=skip_emotion_models, device=device,
+    )
     input_path = assert_no_output_path_aliases(
         input_path, description="Audio input"
     ).resolve(strict=True)
@@ -231,9 +237,8 @@ def run_batch(
     long_path_warnings = path_length_warnings(input_path, output_root, jobs)
     for warning in long_path_warnings:
         emit_progress(progress, warning)
-    sidecars_copied = copy_run_sidecars(
+    sidecar_pair = snapshot_run_sidecars(
         input_path,
-        output_root,
         expected_source_ids={
             str(job.source_context.get("source_id") or "")
             for job in all_jobs
@@ -242,29 +247,29 @@ def run_batch(
         source_bindings=[(job.input_video, job.source_context) for job in all_jobs],
         expected_catalog_sha256=expected_catalog_sha256,
     )
-    if any(job.source_context for job in all_jobs) and not sidecars_copied:
+    if any(job.source_context for job in all_jobs) and sidecar_pair is None:
         raise ValueError("Catalog audio source contexts require an immutable top-level source sidecar pair.")
-    output_root.mkdir(parents=True, exist_ok=True)
+    if sidecar_pair is not None:
+        preflight_run_sidecars(output_root, sidecar_pair)
     emit_progress(progress, "Loading shared emotion model bundle.")
     emotion_models = EmotionModelBundle.load(skip=skip_emotion_models, device=device)
+    validate_requested_emotion_models(emotion_models)
+    # Publish an incomplete marker before any sidecar or per-video output can
+    # change. It deliberately survives errors and process interruption; an old
+    # successful manifest must never describe a new partial run.
+    state_path = output_root / BATCH_STATE_FILENAME
+    atomic_write_json(state_path, {
+        "version": 1, "status": "running", "expected_count": len(jobs),
+    })
+    if sidecar_pair is not None:
+        publish_run_sidecars(output_root, sidecar_pair)
+    output_root.mkdir(parents=True, exist_ok=True)
     if getattr(emotion_models, "skipped", False):
         emit_progress(progress, "Emotion models skipped for this batch.")
     else:
         emit_progress(progress, f"Emotion models loaded once for batch on {getattr(emotion_models, 'device', '')}.")
         for error in getattr(emotion_models, "errors", []):
             emit_progress(progress, f"Model warning: {error}")
-        unavailable = []
-        if not getattr(emotion_models, "categorical_available", False):
-            unavailable.append("categorical")
-        if not getattr(emotion_models, "dimensional_available", False):
-            unavailable.append("dimensional")
-        if unavailable:
-            details = " | ".join(getattr(emotion_models, "errors", []) or [])
-            suffix = f" Details: {details}" if details else ""
-            raise RuntimeError(
-                f"Emotion analysis was requested, but the {', '.join(unavailable)} model layer(s) are unavailable."
-                f"{suffix}"
-            )
     debug_fallback_models = None
     if debug and not skip_emotion_models:
         emit_progress(progress, "Debug mode: loading fallback categorical model once for batch.")
@@ -307,11 +312,13 @@ def run_batch(
                 stride_seconds=stride_seconds,
                 opensmile_feature_set=opensmile_feature_set,
                 emotion_models=emotion_models,
+                skip_emotion_models=skip_emotion_models,
                 keep_temp_audio=keep_temp_audio,
                 debug=debug,
                 debug_fallback_emotion_models=debug_fallback_models,
                 source_context=job.source_context,
                 progress=indented_progress(progress),
+                _batch_output_root=output_root,
             )
             processed += 1
             manifest_rows.append(success_row(input_path, job, result, emotion_models))
@@ -329,15 +336,22 @@ def run_batch(
     run_log = output_root / "run_log.txt"
     emit_progress(progress, "Writing batch manifest and run log.")
     write_manifest_csv(manifest_csv, manifest_rows)
-    if getattr(config, "Full_Stack_Deployment", False):
+    completion_line = f"Batch complete: {processed} processed, {failed} failed."
+    log_lines.append(completion_line)
+    run_log.write_text("\n".join(log_lines) + "\n", encoding="utf-8-sig")
+    atomic_write_json(state_path, {
+        "version": 1,
+        "status": "complete" if failed == 0 and processed == len(jobs) else "failed",
+        "expected_count": len(jobs),
+        "manifest_sha256": hashlib.sha256(manifest_csv.read_bytes()).hexdigest(),
+    })
+    if getattr(config, "Full_Stack_Deployment", False) and failed == 0:
         exported_root = export_batch_to_analysis_audio_outputs(
             output_root,
             run_name=batch_run_name(input_path),
             progress=progress,
         )
         log_lines.append(f"Full stack audio outputs: {exported_root}")
-    completion_line = f"Batch complete: {processed} processed, {failed} failed."
-    log_lines.append(completion_line)
     run_log.write_text("\n".join(log_lines) + "\n", encoding="utf-8-sig")
     emit_progress(progress, completion_line)
 
@@ -442,10 +456,7 @@ def write_manifest_csv(path: Path, rows: list[dict[str, object]]) -> Path:
         "dimensional_model",
         "error",
     ]
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = SpreadsheetSafeWriter(csv.DictWriter(handle, fieldnames=fields))
-        writer.writeheader()
-        writer.writerows(rows)
+    atomic_write_csv(path, rows, fields)
     return path
 
 

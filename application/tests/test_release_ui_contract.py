@@ -503,6 +503,15 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn("return selectedPath;", self.javascript)
         self.assertNotIn('setStatus("Enter a YouTube URL, local folder, DOCX list, or video file.");', self.javascript)
 
+    def test_long_local_operations_do_not_use_the_short_api_timeout(self) -> None:
+        self.assertIn("const LONG_API_TIMEOUT_MS = 5 * 60 * 1000;", self.javascript)
+        self.assertIn("const { timeoutMs = API_TIMEOUT_MS, ...requestOptions } = options;", self.javascript)
+        for endpoint in ("/api/scan", "/api/face-readiness", "/api/text-readiness"):
+            with self.subTest(endpoint=endpoint):
+                endpoint_start = self.javascript.index(endpoint)
+                request_block = self.javascript[endpoint_start:endpoint_start + 300]
+                self.assertIn("timeoutMs: LONG_API_TIMEOUT_MS", request_block)
+
     def test_supported_formats_are_explicit_and_docx_wording_is_consistent(self) -> None:
         for expected in ("YouTube URL", "Folder tree", "CSV or DOCX catalog", "Local video"):
             with self.subTest(expected=expected):
@@ -558,26 +567,6 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn("state.activeRunIds", self.javascript)
         self.assertIn('api("/api/validate-path"', self.javascript)
         self.assertIn("runMatchesUi", self.javascript)
-
-    def test_guided_workflow_can_run_text_from_the_procurement_handoff(self) -> None:
-        text_method = self.html.split('id="workflowTextMethod"', 1)[1].split("</select>", 1)[0]
-        self.assertIn('<option value="run">Run in app</option>', text_method)
-        self.assertIn("pendingProcurementSource", self.javascript)
-        self.assertIn("prepareTextProcessingSourceFromProcurement", self.javascript)
-        self.assertIn('nextProcess === "text"', self.javascript)
-        self.assertIn('await advanceGuidedWorkflow("text")', self.javascript)
-
-    def test_new_workflow_clears_stale_text_handoffs_and_explicit_import_wins(self) -> None:
-        start = self.javascript.index("function hydrateAnalysisModalitiesFromImports()")
-        end = self.javascript.index("function showAudioAnalysis()", start)
-        hydration = self.javascript[start:end]
-        self.assertIn("explicitTextImport", hydration)
-        self.assertIn("state.workflow.imports.text || state.pendingTextOutput", hydration)
-        reset_start = self.javascript.index("function resetAnalysisForNewWorkflow()")
-        reset = self.javascript[reset_start:end]
-        self.assertIn('state.pendingTextOutput = ""', reset)
-        self.assertIn('state.pendingProcurementSource = ""', reset)
-        self.assertIn('state.workflow.imports.text = ""', reset)
 
     def test_analysis_has_exactly_video_audio_and_text_cards(self) -> None:
         self.assertEqual(self.html.count('class="analysis-modality-card"'), 3)
@@ -818,6 +807,26 @@ class ReleaseUiContractTests(unittest.TestCase):
         self.assertIn("profileMemberConflict", self.javascript)
         self.assertIn("A source can belong to only one manual group", self.javascript)
         self.assertIn("analysisProfileIssues", self.javascript)
+
+    def test_guided_workflow_can_run_text_from_the_procurement_handoff(self) -> None:
+        text_method = self.html.split('id="workflowTextMethod"', 1)[1].split("</select>", 1)[0]
+        self.assertIn('<option value="run">Run in app</option>', text_method)
+        self.assertIn("pendingProcurementSource", self.javascript)
+        self.assertIn("prepareTextProcessingSourceFromProcurement", self.javascript)
+        self.assertIn('nextProcess === "text"', self.javascript)
+        self.assertIn('await advanceGuidedWorkflow("text")', self.javascript)
+
+    def test_new_workflow_clears_stale_text_handoffs_and_explicit_import_wins(self) -> None:
+        start = self.javascript.index("function hydrateAnalysisModalitiesFromImports()")
+        end = self.javascript.index("function showAudioAnalysis()", start)
+        hydration = self.javascript[start:end]
+        self.assertIn("explicitTextImport", hydration)
+        self.assertIn("state.workflow.imports.text || state.pendingTextOutput", hydration)
+        reset_start = self.javascript.index("function resetAnalysisForNewWorkflow()")
+        reset = self.javascript[reset_start:end]
+        self.assertIn('state.pendingTextOutput = ""', reset)
+        self.assertIn('state.pendingProcurementSource = ""', reset)
+        self.assertIn('state.workflow.imports.text = ""', reset)
 
     def test_analysis_default_output_hydration_rechecks_run_gate(self) -> None:
         self.assertRegex(

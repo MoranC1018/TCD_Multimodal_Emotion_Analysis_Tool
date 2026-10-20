@@ -11,6 +11,7 @@ import statistics
 import unicodedata
 import zlib
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
@@ -24,6 +25,7 @@ from analysis.metadata import (
     load_source_metadata,
     map_report_source_ids,
     resolve_analysis_profile,
+    validate_speaker_text_source_selection,
 )
 from analysis.profile import AnalysisProfile
 from analysis.video_contract import (
@@ -380,10 +382,22 @@ def _parse_number(value: str, context: str) -> float:
 
 
 def _parse_count(value: str, context: str) -> int:
-    number = _parse_number(value, context)
-    if number < 0 or not math.isclose(number, round(number), abs_tol=1e-9):
+    # Check the decimal input before float rounding can erase a fractional part.
+    _parse_number(value, context)
+    try:
+        number = Decimal(value.strip())
+    except InvalidOperation as exc:
+        raise InputError(f"Invalid count for {context}: {value!r}") from exc
+    if number < 0 or number != number.to_integral_value():
         raise InputError(f"Count must be a non-negative integer for {context}: {value!r}")
     return int(number)
+
+
+def _parse_stddev(value: str, context: str) -> float:
+    number = _parse_number(value, context)
+    if number < 0:
+        raise InputError(f"A standard deviation must be non-negative for {context}: {value!r}")
+    return number
 
 
 def _parse_optional_number(value: str) -> float | None:
@@ -476,9 +490,16 @@ def parse_sectioned_csv(path: Path) -> dict[str, MetricSeries]:
         while scan < len(rows) and rows[scan] and rows[scan][0].strip():
             section[rows[scan][0].strip().casefold()] = rows[scan][1:]
             scan += 1
-        source_row = [value.strip() for value in section.get("metric", []) if value.strip()]
+        source_row = [value.strip() for value in section.get("metric", [])]
+        while source_row and not source_row[-1]:
+            source_row.pop()
+        if any(not source for source in source_row):
+            raise InputError(f"{path}: {metric} contains a blank source label")
         slots = _source_slots(path, metric, source_row)
         source_count = len(source_row)
+        for name in ("count", "missing", "mean", "stddev", "kurtosis"):
+            if any(value.strip() for value in section.get(name, [])[source_count:]):
+                raise InputError(f"{path}: {metric} contains unlabelled source data in {name!r}")
 
         def required(name: str) -> list[str]:
             values = section.get(name, [])
@@ -514,7 +535,7 @@ def parse_sectioned_csv(path: Path) -> dict[str, MetricSeries]:
             target_size,
         )
         stddevs = _slot_values(
-            tuple(_parse_number(value, f"{path}:{metric}:stddev") for value in required("stddev")),
+            tuple(_parse_stddev(value, f"{path}:{metric}:stddev") for value in required("stddev")),
             slots,
             0.0,
             target_size,
@@ -641,10 +662,11 @@ def discover_combined_sources_audited(root: str | Path, modality: str) -> Combin
         candidates.append(candidate)
     for path in sorted(candidates, key=lambda item: str(item).casefold()):
         relative = path.relative_to(root_path)
+        run_name = None
         if len(relative.parts) == 5:
             domain, supplied_speaker, combined, findings, filename = relative.parts
         elif len(relative.parts) == 6:
-            domain, _run_name, supplied_speaker, combined, findings, filename = relative.parts
+            domain, run_name, supplied_speaker, combined, findings, filename = relative.parts
         elif len(relative.parts) == 4 and normalized(root_path.parent.name) == "emotion":
             domain = "emotion"
             supplied_speaker, combined, findings, filename = relative.parts
@@ -661,7 +683,11 @@ def discover_combined_sources_audited(root: str | Path, modality: str) -> Combin
             )
             continue
         ignored = ("temp", "tmp", "cache", "debug", "raw")
-        if any(marker in normalized(part) for part in relative.parts for marker in ignored):
+        # Only the optional run directory denotes temporary output. A speaker's
+        # name (for example Temple Grandin or Rawlings) is data, not a marker.
+        if run_name is not None and any(
+            marker in re.split(r"[^a-z0-9]+", run_name.casefold()) for marker in ignored
+        ):
             rejected.append(
                 DiscoveryEntry(
                     modality,
@@ -1724,6 +1750,10 @@ def _profile_text_reports(
 
     profiled: dict[str, TextConstructSummary] = {}
     required = set(required_source_ids)
+    try:
+        validate_speaker_text_source_selection(metadata, required_source_ids)
+    except ValueError as exc:
+        raise InputError(str(exc)) from exc
     selected_by_speaker: dict[str, list[ManifestSource]] = {}
     visible_by_speaker: dict[str, list[ManifestSource]] = {}
     for source in metadata.sources:

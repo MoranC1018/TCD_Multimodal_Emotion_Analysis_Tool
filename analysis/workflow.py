@@ -671,16 +671,24 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
             result=result,
             previous_manifest=loaded,
         )
-    if not workbook.exists():
+    previous_manifest = dict(loaded)
+    previous_request = previous_manifest.get("request")
+    workbook_expected = not (
+        isinstance(previous_request, dict)
+        and previous_request.get("write_combined_workbook") is False
+    )
+    if workbook_expected and not workbook.exists():
         raise WorkflowError(
             "A prior Analysis result must contain both combined_analysis.xlsx and its manifest."
         )
-    previous_manifest = dict(loaded)
-    recorded_workbook = Path(
-        str(previous_manifest.get("workbook_path") or "")
-    ).expanduser().resolve()
-    if recorded_workbook != workbook.resolve():
-        raise WorkflowError("The prior Analysis manifest does not identify the fixed workbook.")
+    if workbook_expected:
+        recorded_workbook = Path(
+            str(previous_manifest.get("workbook_path") or "")
+        ).expanduser().resolve()
+        if recorded_workbook != workbook.resolve():
+            raise WorkflowError("The prior Analysis manifest does not identify the fixed workbook.")
+    elif workbook.exists() or previous_manifest.get("workbook_path") is not None:
+        raise WorkflowError("The prior report-only Analysis result has an unexpected workbook.")
     profile_expected = "analysis_profile_path" in previous_manifest
     if profile_expected != profile.exists():
         raise WorkflowError("The prior Analysis profile and manifest are incomplete.")
@@ -729,16 +737,17 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     video_column_manifest_hash: str | None = None
     committed = False
     try:
-        workbook_hash = _file_sha256(workbook)
+        workbook_hash = _file_sha256(workbook) if workbook_expected else None
         profile_hash = _file_sha256(profile) if profile_expected else None
         video_column_manifest_hash = (
             _file_sha256(video_column_manifest)
             if video_column_manifest_expected
             else None
         )
-        _copy_archive_file(workbook, staged_workbook)
-        if _file_sha256(staged_workbook) != workbook_hash:
-            raise WorkflowError("Staged Analysis workbook verification failed.")
+        if workbook_expected:
+            _copy_archive_file(workbook, staged_workbook)
+            if _file_sha256(staged_workbook) != workbook_hash:
+                raise WorkflowError("Staged Analysis workbook verification failed.")
         if profile_expected:
             _copy_archive_file(profile, staged_profile)
             if _file_sha256(staged_profile) != profile_hash:
@@ -748,7 +757,9 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
             if _file_sha256(staged_video_column_manifest) != video_column_manifest_hash:
                 raise WorkflowError("Staged Video column manifest verification failed.")
 
-        previous_manifest["workbook_path"] = str(archived_workbook.resolve())
+        previous_manifest["workbook_path"] = (
+            str(archived_workbook.resolve()) if workbook_expected else None
+        )
         if profile_expected:
             previous_manifest["analysis_profile_path"] = str(archived_profile.resolve())
         if video_column_manifest_expected:
@@ -758,7 +769,7 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
         archive_metadata: dict[str, object] = {
             "archived_at": started_at,
             "archive_directory": str(archive_directory.resolve()),
-            "original_workbook_path": str(workbook.resolve()),
+            "original_workbook_path": str(workbook.resolve()) if workbook_expected else None,
             "workbook_sha256": workbook_hash,
         }
         if profile_hash is not None:
@@ -800,7 +811,7 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
         if not committed and staging.exists():
             shutil.rmtree(staging)
 
-    if workbook_hash is None:
+    if workbook_expected and workbook_hash is None:
         raise WorkflowError("Staged Analysis workbook verification failed.")
 
     # The verified archive is durable before the fixed trio changes. Move the
@@ -812,7 +823,7 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
     )
     retirement.mkdir()
     _require_no_reparse(retirement, "Analysis history retirement directory")
-    fixed_moves = [(workbook, retirement / workbook.name)]
+    fixed_moves = [(workbook, retirement / workbook.name)] if workbook_expected else []
     if profile_expected:
         fixed_moves.append((profile, retirement / profile.name))
     if video_column_manifest_expected:
@@ -834,7 +845,9 @@ def _archive_fixed_outputs(output_root: Path, started_at: str) -> dict[str, obje
         result["retained_originals_directory"] = str(retirement)
 
     result["archive_directory"] = str(archive_directory.resolve())
-    result["archived_previous_workbook"] = str(archived_workbook.resolve())
+    result["archived_previous_workbook"] = (
+        str(archived_workbook.resolve()) if workbook_expected else None
+    )
     result["archived_previous_workbook_sha256"] = workbook_hash
     result["archived_previous_manifest"] = str(archived_manifest.resolve())
     if profile_expected:

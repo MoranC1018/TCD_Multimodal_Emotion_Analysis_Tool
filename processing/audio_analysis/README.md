@@ -109,7 +109,7 @@ uses the explicit display label `Pooled (no speaker)`.
 ## Setup
 
 Install Python 3.11 or newer, then make sure these external tools are available.
-Python 3.12 is the tested and recommended version, while other versions
+.\.venv\Scripts\python.exe 3.12 is the tested and recommended version, while other versions
 compatible with the pinned stack are accepted:
 
 - `ffmpeg`
@@ -117,28 +117,41 @@ compatible with the pinned stack are accepted:
 - the bundled OpenSMILE 3.0.0 Windows distribution (revision `e882501`), or a
   compatible installation selected through `OPENSMILE_HOME`
 
-Install Python dependencies:
+From the repository root, install the supported shared environment:
 
 ```powershell
-pip install -r requirements.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cpu -TextMode Require
+if ($LASTEXITCODE -ne 0) { throw 'Setup failed; inspect its log before continuing.' }
 ```
 
 The emotion models use Hugging Face Transformers and PyTorch. CPU-only machines
 are supported, but CUDA is used automatically when available.
 
+With emotion models enabled, configured analysis windows must be at most
+15 seconds, matching the supported categorical input limit. Oversized windows
+are rejected rather than silently truncated. Longer acoustic-only windows
+require explicit `--skip-emotion-models`; model-output cells then remain blank.
+The normal 10-second window and 5-second stride fit this limit.
+
 Check the exact Python environment the pipeline will use:
 
 ```powershell
-python processing\audio_analysis\run_audio_analysis.py doctor
+.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py doctor
 ```
 
 The doctor command checks Python packages, `ffmpeg`, `ffprobe`, and OpenSMILE
 executable/config resolution. Run this before a large batch if model columns are
 unexpectedly blank.
+It does not load emotion checkpoints or verify model-host access. Optional
+codec warnings are reported separately from required checks; inspect them for
+the backend you intend to use. A short real input run and its model/fallback
+manifest establish which inference path actually works in that environment.
 
-If `doctor` reports a missing package, run `pip install -r requirements.txt`
-again from the repository root and restart the pipeline. Already-running batch
-jobs do not pick up packages installed after they were started.
+If `doctor` reports a missing package, stop the affected batch and rerun the
+supported installer in the same repository, then repeat doctor and a short
+acceptance run. Already-running batch jobs do not pick up newly installed
+packages. See [Installation and validation](../../docs/INSTALLATION_VALIDATION.md)
+for runtime choices, logs and troubleshooting.
 
 Optional Vox-Profile backend:
 
@@ -184,7 +197,7 @@ https://doi.org/10.1145/1873951.1874246. See the root
 ## Run a Batch
 
 ```powershell
-python processing\audio_analysis\run_audio_analysis.py batch "path\to\downloads"
+.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py batch "path\to\downloads"
 ```
 
 Repeat `--source-id` to analyze only authorized catalog sources and provide the
@@ -193,8 +206,8 @@ before model loading or output writes, and output order remains
 catalog/discovery order:
 
 ```powershell
-python processing\audio_analysis\run_audio_analysis.py batch "path\to\catalog-run" `
-  --catalog-sha256 <sha256> `
+.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py batch "path\to\catalog-run" `
+  --catalog-sha256 "<sha256>" `
   --source-id source-0001 --source-id source-0003
 ```
 
@@ -210,16 +223,19 @@ any error message. A copy of the batch result is also written to `run_log.txt`.
 For fast code checks from the repository root:
 
 ```powershell
-python -m unittest discover -s processing\audio_analysis\tests
+.\.venv\Scripts\python.exe -m unittest discover -s processing\audio_analysis\tests
 ```
 
-Full real-media QA is run from the standalone `Audio_Analysis` workspace so
-generated reports and media fixtures stay out of the main repository.
+Use the [real launcher acceptance suite](../../application/tests/REAL_BROWSER_ACCEPTANCE.md)
+for real procurement/acoustic processing and decoded-artifact checks. Keep its
+evidence outside the repository. Actual emotion-model acceptance and its limits
+are recorded in [release validation](../../docs/RELEASE_VALIDATION_2026-09-04.md);
+an acoustic-only pass does not establish model readiness or accuracy.
 
 ## Run One Video Directly
 
 ```powershell
-python processing\audio_analysis\run_audio_analysis.py single "path\to\stitched_imotions.mp4"
+.\.venv\Scripts\python.exe processing\audio_analysis\run_audio_analysis.py single "path\to\stitched_imotions.mp4"
 ```
 
 For a `stitched_imotions.mp4` inside a procurement `downloads` tree, the
@@ -229,13 +245,16 @@ command would use.
 Equivalent direct modules are also available:
 
 ```powershell
-python -m processing.audio_analysis.audio_pipeline.run_batch "path\to\downloads"
-python -m processing.audio_analysis.audio_pipeline.run_single "path\to\stitched_imotions.mp4"
+.\.venv\Scripts\python.exe -m processing.audio_analysis.audio_pipeline.run_batch "path\to\downloads"
+.\.venv\Scripts\python.exe -m processing.audio_analysis.audio_pipeline.run_single "path\to\stitched_imotions.mp4"
 ```
 
 ## Options
 
-```powershell
+Append the relevant flags to a `single` or `batch` command; the following is an
+option reference, not a standalone PowerShell script:
+
+```text
 --window-seconds 10
 --stride-seconds 5
 --opensmile-feature-set egemaps

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "stage": "analysis",
+  "options": {
+    "modalities": [
+      {
+        "name": "video",
+        "source_method": "import",
+        "source_path": "C:/Research/TrinityStudy/reports/video"
+      },
+      {
+        "name": "audio",
+        "source_method": "import",
+        "source_path": "C:/Research/TrinityStudy/reports/audio"
+      },
+      {
+        "name": "text",
+        "source_method": "import",
+        "source_path": "C:/Research/TrinityStudy/processed/text/analysis"
+      }
+    ],
+    "speaker_groups": [
+      {
+        "group_id": "group-a",
+        "name": "Group A",
+        "speaker_ids": [
+          "Speaker A"
+        ]
+      },
+      {
+        "group_id": "group-b",
+        "name": "Group B",
+        "speaker_ids": [
+          "Speaker B"
+        ]
+      }
+    ],
+    "write_combined_workbook": true,
+    "include_construct_comparison": true,
+    "include_probability_sheets": true,
+    "confidence_level": 0.95,
+    "headline_policy": "weighted",
+    "default_reference": 0.0,
+    "reference_overrides": {},
+    "write_graphs": true
+  }
+}

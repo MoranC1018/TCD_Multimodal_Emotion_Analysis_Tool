@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "stage": "text",
+  "options": {
+    "source_path": "C:/Research/TrinityStudy/media",
+    "output_root": "C:/Research/TrinityStudy/processed/text",
+    "whisper_model": "small",
+    "whisper_device": "cpu",
+    "default_language_variant": "eng",
+    "dictionaries": [
+      "embedded:affectDictionaries/General Language (En)(2011-07-05).dict.xml"
+    ],
+    "dictionary_combination": "merge",
+    "categories": [],
+    "all_categories": true,
+    "threads": 1,
+    "force_rocksteady": false,
+    "write_graphs": true
+  },
+  "native_options": {
+    "from_stage": "rocksteady",
+    "to_stage": "postprocess"
+  }
+}

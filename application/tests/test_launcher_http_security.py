@@ -158,6 +158,80 @@ class LauncherHttpSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("keep this log", launcher.APP_STATE.logs)
 
+    def test_disconnected_response_stream_is_not_rewritten_as_a_server_error(self) -> None:
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        handler.path = "/api/scan"
+        handler.request_authority_is_valid = lambda: True
+        handler.token_is_valid = lambda _parsed: True
+        handler.privileged_origin_is_valid = lambda _parsed: True
+        handler.read_json_body = lambda: {"path": "videos"}
+        handler.handle_scan = lambda _payload: handler.send_json({"ok": True})
+        handler.send_response = unittest.mock.Mock()
+        handler.send_header = unittest.mock.Mock()
+        handler.end_headers = unittest.mock.Mock()
+        handler.wfile = unittest.mock.Mock()
+        handler.wfile.write.side_effect = ConnectionAbortedError(
+            "local UI closed the response"
+        )
+        handler.send_error_json = unittest.mock.Mock()
+
+        with (
+            patch.object(launcher.backend, "terms_are_accepted", return_value=True),
+            patch.object(launcher.APP_STATE, "log") as log,
+        ):
+            handler.do_POST()
+
+        handler.send_error_json.assert_not_called()
+        log.assert_not_called()
+
+    def test_backend_connection_error_is_reported_as_a_server_error(self) -> None:
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        handler.path = "/api/scan"
+        handler.request_authority_is_valid = lambda: True
+        handler.token_is_valid = lambda _parsed: True
+        handler.privileged_origin_is_valid = lambda _parsed: True
+        handler.read_json_body = lambda: {"path": "videos"}
+        handler.handle_scan = unittest.mock.Mock(
+            side_effect=ConnectionAbortedError("backend connection failed")
+        )
+        handler.send_error_json = unittest.mock.Mock()
+
+        with (
+            patch.object(launcher.backend, "terms_are_accepted", return_value=True),
+            patch.object(launcher.APP_STATE, "log") as log,
+        ):
+            handler.do_POST()
+
+        log.assert_called_once_with("ERROR: backend connection failed")
+        handler.send_error_json.assert_called_once_with(
+            launcher.HTTPStatus.INTERNAL_SERVER_ERROR,
+            "backend connection failed",
+        )
+
+    def test_disconnected_request_body_is_ignored_at_the_client_read(self) -> None:
+        handler = object.__new__(launcher.VideoStackUiHandler)
+        handler.path = "/api/scan"
+        handler.headers = {
+            "Content-Type": "application/json",
+            "Content-Length": "2",
+        }
+        handler.rfile = unittest.mock.Mock()
+        handler.rfile.read.side_effect = ConnectionResetError(
+            "local UI closed the request"
+        )
+        handler.request_authority_is_valid = lambda: True
+        handler.token_is_valid = lambda _parsed: True
+        handler.privileged_origin_is_valid = lambda _parsed: True
+        handler.handle_scan = unittest.mock.Mock()
+        handler.send_error_json = unittest.mock.Mock()
+
+        with patch.object(launcher.APP_STATE, "log") as log:
+            handler.do_POST()
+
+        handler.handle_scan.assert_not_called()
+        handler.send_error_json.assert_not_called()
+        log.assert_not_called()
+
     def test_cross_origin_media_request_is_rejected(self) -> None:
         token = launcher.API_TOKEN
         with tempfile.TemporaryDirectory() as temp_dir:

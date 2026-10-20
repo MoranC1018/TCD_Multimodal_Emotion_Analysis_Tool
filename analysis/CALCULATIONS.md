@@ -81,6 +81,27 @@ audio valence is mapped from `0..1` to `-100..100` using:
 signed_valence = (raw_valence * 200) - 100
 ```
 
+These dimensional ranges are nominal: the audEERING regression head can
+produce finite values below 0 or above 1. Arousal and Dominance always use
+`raw * 100`, and Valence always uses the affine transform above. Values are
+not silently clipped or interpreted as already-scaled values. For example,
+raw Valence `1.075053` becomes `115.0106`, not `1.075053`. This adapter accepts
+raw `audio_analysis.csv` exports; already-postprocessed reports use the
+separate report-import path. Fixed-range histograms omit values outside their
+bounds; descriptive statistics retain them. Inspect both counts before using a
+histogram as a denominator or interpreting it as the full observation set.
+
+Before 2026-09-04, raw Valence outside 0..1 was incorrectly left unscaled.
+Recompute affected Audio reports and dependent workbooks from the original
+raw exports. Preserve historical study outputs for comparison; this
+correction does not establish that an old manuscript's numbers are current.
+
+Descriptive-statistics CSVs retain floating-point precision for subsequent
+aggregation. Workbooks format their displayed numbers to two decimal places.
+Before 2026-09-04, per-recording statistics were rounded to two decimals before
+the combined workbook weighted them. Recompute from raw exports to recover
+that precision: importing an old report cannot restore discarded digits.
+
 Native Face input is accepted only when the core CSV hash and manifest binding
 verify. Rows contribute only when `face_detected=true` and
 `is_primary_face=true`; explicit no-face samples are missing observations.

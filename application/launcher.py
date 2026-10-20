@@ -32,6 +32,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from procurement.procurement_beta.readiness import build_readiness_report
 from procurement.console import configure_utf8_stdio
 from procurement.external_tools import credential_free_media_environment, resolve_nvidia_smi
+from processing.ffmpeg_runtime import configure_ffmpeg_shared_libraries
 from analysis.profile import profile_from_payload
 from application import backend
 
@@ -87,7 +88,9 @@ CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
         "JAVA_HOME",
         "LANG",
         "LC_ALL",
+        "LNAME",
         "LOCALAPPDATA",
+        "LOGNAME",
         "MULTIMODAL_EMOTION_ROCKSTEADY_HOME",
         "NUMBER_OF_PROCESSORS",
         "OS",
@@ -113,6 +116,8 @@ CHILD_ENVIRONMENT_ALLOWLIST = frozenset(
         "TORCH_HOME",
         "TRANSFORMERS_CACHE",
         "TRANSFORMERS_OFFLINE",
+        "USER",
+        "USERNAME",
         "USERPROFILE",
         "VOX_PROFILE_RELEASE_DIR",
         "WINDIR",
@@ -612,6 +617,17 @@ class LauncherHttpServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionAbortedError,
+    ConnectionResetError,
+)
+
+
+class _ClientDisconnected(Exception):
+    """Signal a disconnect observed while reading the local HTTP client."""
+
+
 class VideoStackUiHandler(BaseHTTPRequestHandler):
     """Small JSON/static-file server used by the standalone launcher window."""
 
@@ -627,6 +643,37 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def send_error(
+        self,
+        code: int,
+        message: str | None = None,
+        explain: str | None = None,
+    ) -> None:
+        """Suppress only a disconnect raised while emitting an HTTP error response."""
+
+        try:
+            super().send_error(code, message, explain)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return
+
+    def _finish_client_headers(self) -> bool:
+        """Flush buffered headers and report whether the client remained connected."""
+
+        try:
+            self.end_headers()
+        except _CLIENT_DISCONNECT_ERRORS:
+            return False
+        return True
+
+    def _write_client_bytes(self, data: bytes) -> bool:
+        """Write response bytes without hiding failures from non-client operations."""
+
+        try:
+            self.wfile.write(data)
+        except _CLIENT_DISCONNECT_ERRORS:
+            return False
+        return True
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -692,7 +739,10 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
             if not self.privileged_origin_is_valid(parsed):
                 self.send_error_json(HTTPStatus.FORBIDDEN, "Invalid launcher request origin.")
                 return
-            payload = self.read_json_body()
+            try:
+                payload = self.read_json_body()
+            except _ClientDisconnected:
+                return
             if parsed.path not in ACCESS_EXEMPT_POSTS and not backend.terms_are_accepted(REPO_ROOT):
                 self.send_access_denied(schedule_shutdown=True)
                 return
@@ -763,7 +813,11 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         try:
-            raw = self.rfile.read(length).decode("utf-8")
+            raw_bytes = self.rfile.read(length)
+        except _CLIENT_DISCONNECT_ERRORS as exc:
+            raise _ClientDisconnected from exc
+        try:
+            raw = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Request body must be valid UTF-8 JSON.") from exc
         if not raw.strip():
@@ -1263,8 +1317,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(data)
+        if self._finish_client_headers():
+            self._write_client_bytes(data)
 
     def serve_media(self, parsed) -> None:
         """Stream an authorized local video for the Focus segment selector."""
@@ -1294,7 +1348,7 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Range", f"bytes */{file_size}")
                 self.send_header("Content-Length", "0")
                 self.send_header("Referrer-Policy", "no-referrer")
-                self.end_headers()
+                self._finish_client_headers()
                 return
             status = HTTPStatus.PARTIAL_CONTENT
         else:
@@ -1308,7 +1362,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-        self.end_headers()
+        if not self._finish_client_headers():
+            return
         with media_path.open("rb") as handle:
             handle.seek(start)
             remaining = length
@@ -1316,7 +1371,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
                 chunk = handle.read(min(1024 * 1024, remaining))
                 if not chunk:
                     break
-                self.wfile.write(chunk)
+                if not self._write_client_bytes(chunk):
+                    return
                 remaining -= len(chunk)
 
     def send_json(self, payload: dict[str, object], status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -1325,8 +1381,8 @@ class VideoStackUiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Referrer-Policy", "no-referrer")
-        self.end_headers()
-        self.wfile.write(data)
+        if self._finish_client_headers():
+            self._write_client_bytes(data)
 
     def send_error_json(self, status: HTTPStatus, message: str) -> None:
         self.send_json({"error": message}, status=status)
@@ -1418,9 +1474,11 @@ def validate_segment_manifest(
     *,
     selected_speakers: list[str] | None = None,
     require_scanned_source: bool = False,
+    scan_state: LauncherState | None = None,
 ) -> list[dict[str, object]]:
     """Normalize Focus intervals and reject invalid or overlapping selections."""
 
+    state = APP_STATE if scan_state is None else scan_state
     selected_segments = manifest.get("selected_segments")
     if not isinstance(selected_segments, list) or not selected_segments:
         raise ValueError("Focus mode needs at least one selected segment.")
@@ -1448,7 +1506,7 @@ def validate_segment_manifest(
             raise ValueError(f"Focus segment {index} has an invalid source identity: {exc}") from exc
         if allowed_speakers and backend.run_docx_extractions.speaker_match_key(raw_segment.get("speaker")) not in allowed_speakers:
             raise ValueError(f"Focus segment {index} belongs to an unchecked speaker.")
-        if require_scanned_source and not APP_STATE.is_allowed_segment_reference(raw_segment):
+        if require_scanned_source and not state.is_allowed_segment_reference(raw_segment):
             raise ValueError(f"Focus segment {index} is not one of the videos in the current scan.")
         try:
             start = float(raw_segment.get("start_seconds"))
@@ -1458,7 +1516,7 @@ def validate_segment_manifest(
         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end - start < 0.5:
             raise ValueError(f"Focus segment {index} must be at least 0.5 seconds and start at or after zero.")
         if require_scanned_source:
-            duration = APP_STATE.allowed_duration_for_segment(raw_segment)
+            duration = state.allowed_duration_for_segment(raw_segment)
             if duration is None and identity.kind in {"file", "folder"}:
                 source_path = str(raw_segment.get("source_path") or "").strip()
                 if source_path and Path(source_path).expanduser().is_file():
@@ -1471,7 +1529,7 @@ def validate_segment_manifest(
                 raise ValueError(
                     f"Focus segment {index} ends at {end:.3f}s, after the video duration of {duration:.3f}s."
                 )
-        catalog_record = APP_STATE.catalog_record_for_segment(raw_segment, identity)
+        catalog_record = state.catalog_record_for_segment(raw_segment, identity)
         if catalog_record is not None:
             overlap_key = ("source-id", catalog_record.source_id or catalog_record.id)
         else:
@@ -1966,14 +2024,6 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
     text = str(line or "").strip()
     if not text:
         return None
-    procurement_result = re.fullmatch(
-        r"Procurement result root:\s*(.+)", text, flags=re.IGNORECASE
-    )
-    if procurement_result:
-        return {
-            "processingSourcePath": procurement_result.group(1).strip(),
-            "label": "Procurement output ready",
-        }
     workflow_failure = re.fullmatch(r"WorkflowError(?: \[([^\]]+)\])?:\s*(.+)", text, flags=re.IGNORECASE)
     if workflow_failure:
         failed_stage = (workflow_failure.group(1) or "workflow").strip()
@@ -1982,6 +2032,14 @@ def parse_progress_line(line: str) -> dict[str, object] | None:
             "failedStage": failed_stage,
             "error": error,
             "label": error,
+        }
+    procurement_result = re.fullmatch(
+        r"Procurement result root:\s*(.+)", text, flags=re.IGNORECASE
+    )
+    if procurement_result:
+        return {
+            "processingSourcePath": procurement_result.group(1).strip(),
+            "label": "Procurement output ready",
         }
     workflow_start = re.fullmatch(
         r"Starting (Video / iMotions|Py-Feat / Native Face|Audio) analysis",
@@ -2256,16 +2314,19 @@ def ram_limit_status(
 def configure_process_resources(
     process: subprocess.Popen[str],
     settings: dict[str, object],
+    *,
+    logger=None,
 ) -> None:
     """Apply the release resource policy to a new pipeline process."""
 
+    log = APP_STATE.log if logger is None else logger
     if not bool(settings.get("resourceLimitsEnabled", True)):
-        APP_STATE.log("Resource controls are disabled in Settings.")
+        log("Resource controls are disabled in Settings.")
         return
     try:
         import psutil
     except ImportError:
-        APP_STATE.log("Resource controls unavailable: install psutil.")
+        log("Resource controls unavailable: install psutil.")
         return
 
     try:
@@ -2276,13 +2337,14 @@ def configure_process_resources(
             int(settings.get("maxCpuCores") or 0),
         )
         managed.cpu_affinity(affinity)
-        APP_STATE.log(f"Resource control: CPU affinity limited to {len(affinity)}/{os.cpu_count() or 1} logical cores.")
+        log(f"Resource control: CPU affinity limited to {len(affinity)}/{os.cpu_count() or 1} logical cores.")
     except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError, OSError, ValueError) as exc:
-        APP_STATE.log(f"Resource control: CPU affinity could not be applied ({exc}).")
+        log(f"Resource control: CPU affinity could not be applied ({exc}).")
 
     monitor = threading.Thread(
         target=monitor_process_resources,
         args=(process, dict(settings)),
+        kwargs={"logger": log},
         daemon=True,
         name=f"resource-monitor-{process.pid}",
     )
@@ -2292,9 +2354,12 @@ def configure_process_resources(
 def monitor_process_resources(
     process: subprocess.Popen[str],
     settings: dict[str, object],
+    *,
+    logger=None,
 ) -> None:
     """Pause resource-heavy work and hard-stop sustained RAM pressure."""
 
+    log = APP_STATE.log if logger is None else logger
     try:
         import psutil
     except ImportError:
@@ -2332,11 +2397,11 @@ def monitor_process_resources(
                     reasons.append(f"GPU {gpu_percent:.1f}/{max_gpu_percent:.1f}%")
                 if set_process_tree_suspended(processes, psutil, suspended=True):
                     suspended = True
-                    APP_STATE.log(f"Resource control paused the tool: {', '.join(reasons)}.")
+                    log(f"Resource control paused the tool: {', '.join(reasons)}.")
                 else:
-                    APP_STATE.log("Resource control could not pause the process tree; it will retry.")
+                    log("Resource control could not pause the process tree; it will retry.")
             if ram_high and ram_pressure_started is not None and time.monotonic() - ram_pressure_started >= 30.0:
-                APP_STATE.log(
+                log(
                     "Resource control stopped the pipeline after RAM remained above its limit for 30 seconds."
                 )
                 terminate_process_tree(process)
@@ -2352,7 +2417,7 @@ def monitor_process_resources(
             ):
                 if set_process_tree_suspended(processes, psutil, suspended=False):
                     suspended = False
-                    APP_STATE.log("Resource control resumed the tool.")
+                    log("Resource control resumed the tool.")
         time.sleep(max(0.5, poll_seconds))
 
 
@@ -2928,11 +2993,26 @@ def create_server(host: str, preferred_port: int) -> LauncherHttpServer:
     raise RuntimeError(f"Could not bind a local launcher UI port: {last_error}")
 
 
+def initialize_launcher_ffmpeg_runtime() -> Path | None:
+    """Expose the supported FFmpeg runtime to the UI and every child process."""
+
+    directory = configure_ffmpeg_shared_libraries()
+    if directory is None:
+        APP_STATE.log(
+            "WARNING: Supported FFmpeg/ffprobe runtime was not found; "
+            "run scripts/setup.ps1 before scanning or processing media."
+        )
+        return None
+    APP_STATE.log(f"FFmpeg runtime: {directory}")
+    return directory
+
+
 def run_launcher(args: argparse.Namespace) -> int:
     """Run one already-locked desktop launcher instance."""
 
     APP_STATE.reset_shutdown()
     APP_STATE.reset_client_seen()
+    initialize_launcher_ffmpeg_runtime()
     if not ensure_eula_accepted(REPO_ROOT):
         return 1
 

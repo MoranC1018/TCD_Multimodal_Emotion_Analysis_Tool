@@ -104,6 +104,58 @@ class CombinedSummaryTests(unittest.TestCase):
             with self.assertRaisesRegex(InputError, "cumulative.*byte.*1"):
                 discover_combined_sources(self.audio_emotion_root, "audio")
 
+    def test_release_discovery_keeps_speaker_names_containing_temporary_markers(self) -> None:
+        names = ("Temple Grandin", "Rawlings", "Temp", "Debug Andy Burnham")
+        for name in names:
+            self._write_report(self.audio_emotion_root, name, AUDIO_METRICS, 10)
+
+        sources = discover_combined_sources(self.audio_emotion_root, "audio")
+
+        self.assertTrue(set(names).issubset({source.display_name for source in sources}))
+
+    def test_release_sectioned_report_rejects_unlabelled_source_columns(self) -> None:
+        report = self.root / "unlabelled.csv"
+        for sources in (["source-0001", "", "source-0002"], ["source-0001", ""]):
+            with self.subTest(sources=sources):
+                write_sectioned_report(report, AUDIO_METRICS, 10, sources=sources)
+                with self.assertRaisesRegex(InputError, "blank source|unlabelled"):
+                    parse_sectioned_csv(report)
+
+    def test_release_sectioned_report_rejects_fractional_counts_and_negative_sd(self) -> None:
+        report = self.root / "invalid-statistics.csv"
+        for row, value in (("count", "1000000.0005"), ("count", "0.9999999995"),
+                           ("missing", "1000000000.5"), ("stddev", "-4")):
+            with self.subTest(row=row, value=value):
+                write_sectioned_report(report, AUDIO_METRICS, 10, sources=["source-0001"])
+                with report.open(encoding="utf-8", newline="") as handle:
+                    rows = list(csv.reader(handle))
+                for values in rows:
+                    if values and values[0] == row:
+                        values[1] = value
+                with report.open("w", encoding="utf-8", newline="") as handle:
+                    csv.writer(handle).writerows(rows)
+                with self.assertRaisesRegex(InputError, "non-negative integer|standard deviation"):
+                    parse_sectioned_csv(report)
+
+    def test_release_sectioned_report_accepts_exact_counts_and_empty_csv_padding(self) -> None:
+        report = self.root / "padded.csv"
+        write_sectioned_report(report, AUDIO_METRICS, 10, sources=["source-0001"], counts=[1000000])
+        with report.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.reader(handle))
+        for row in rows:
+            if row and row[0] == "count":
+                row[1] = "1000000.0"
+            if row:
+                row.extend(["", ""])
+        with report.open("w", encoding="utf-8", newline="") as handle:
+            csv.writer(handle).writerows(rows)
+
+        anger = parse_sectioned_csv(report)["Anger"]
+
+        self.assertEqual(anger.sources, ("source-0001",))
+        self.assertEqual(anger.counts, (1000000,))
+        self.assertEqual(anger.means, (10.0,))
+
     def test_measure_guide_neutralizes_provider_controlled_formula_text(self) -> None:
         provenance = VideoOutputProvenance(
             requested_modality="video",
@@ -358,7 +410,8 @@ class CombinedSummaryTests(unittest.TestCase):
         debug = (
             self.audio_emotion_root
             / "emotion"
-            / "Debug Andy Burnham"
+            / "debug"
+            / "Andy Burnham"
             / "combined"
             / "other_findings"
             / "descriptive_statistics.csv"
@@ -443,7 +496,8 @@ class CombinedSummaryTests(unittest.TestCase):
         checkout_anchor = self.root / "checkout" / "analysis" / "test_anchor.py"
         checkout_anchor.parent.mkdir(parents=True)
         discovered = protected_manual_discovery_directories(checkout_anchor)
-        self.assertEqual(discovered, (manual_root.resolve(),))
+        self.assertEqual(discovered[0], manual_root.resolve())
+        self.assertEqual(len(discovered), len(set(discovered)))
         destination = manual_root / "task-3-protected-output-do-not-create" / "combined-summary.xlsx"
 
         with patch(

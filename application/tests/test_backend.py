@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -704,6 +705,48 @@ class ProcurementUiBackendTests(unittest.TestCase):
         self.assertEqual(group.videos[0].duration_seconds, 512)
         self.assertEqual(group.videos[0].license, "Standard YouTube License")
         self.assertEqual(group.videos[0].youtube_url, "https://www.youtube.com/watch?v=abcdefghijk")
+
+    def test_folder_scan_probes_missing_durations_with_bounded_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            speaker = root / "Speaker B"
+            speaker.mkdir()
+            for index in range(6):
+                (speaker / f"clip-{index}.mp4").write_bytes(b"synthetic video")
+
+            overlap = threading.Event()
+            counter_lock = threading.Lock()
+            active = 0
+            maximum_active = 0
+
+            def duration_reader(video_path: Path) -> float:
+                nonlocal active, maximum_active
+                with counter_lock:
+                    active += 1
+                    maximum_active = max(maximum_active, active)
+                    if active >= 2:
+                        overlap.set()
+                try:
+                    if not overlap.wait(timeout=2):
+                        self.fail("Local duration probes did not overlap")
+                    return float(video_path.stem.rsplit("-", 1)[1])
+                finally:
+                    with counter_lock:
+                        active -= 1
+
+            with patch.object(backend, "read_duration_seconds", new=duration_reader):
+                result = backend.scan_folder_source(root)
+
+        self.assertGreaterEqual(maximum_active, 2)
+        self.assertLessEqual(maximum_active, backend.LOCAL_SCAN_MAX_WORKERS)
+        self.assertEqual(
+            [video.title for video in result.groups[0].videos],
+            [f"clip-{index}" for index in range(6)],
+        )
+        self.assertEqual(
+            [video.duration_seconds for video in result.groups[0].videos],
+            [float(index) for index in range(6)],
+        )
 
     def test_scan_merges_case_and_whitespace_variants_into_one_speaker_group(self) -> None:
         items = [

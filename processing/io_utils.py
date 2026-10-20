@@ -1105,6 +1105,19 @@ def _is_retryable_rename_error(error: OSError) -> bool:
     return isinstance(error, PermissionError) or getattr(error, "winerror", None) in {5, 32, 33}
 
 
+def _replace_file_with_retry(source: Path, target: Path) -> None:
+    """Allow brief reader locks without removing the previous complete file."""
+
+    for attempt in range(6):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if attempt == 5 or not _is_retryable_rename_error(exc):
+                raise
+            time.sleep(0.1 * (attempt + 1))
+
+
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Durably replace a JSON file without exposing a partially written file."""
 
@@ -1117,7 +1130,7 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_file_with_retry(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -1144,7 +1157,7 @@ def atomic_write_csv(
             writer.writerows(rows)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_file_with_retry(temporary, path)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise

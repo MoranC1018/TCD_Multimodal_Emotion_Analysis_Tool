@@ -175,7 +175,11 @@ def _run_catalog_with_local_snapshots(
     for source in catalog.sources:
         if source.source_id not in selected or source.source_kind != "local":
             continue
-        snapshot_path = snapshot_directory / f"{source.source_id}{Path(source.resolved_link).suffix}"
+        # Keep filename-derived metadata stable while isolating duplicate names
+        # and continuing to probe and process only the sealed media snapshot.
+        source_snapshot_directory = snapshot_directory / source.source_id
+        source_snapshot_directory.mkdir()
+        snapshot_path = source_snapshot_directory / Path(source.resolved_link).name
         remaining = MAX_LOCAL_CATALOG_BYTES - snapshot_bytes
         if remaining <= 0:
             raise ValueError(

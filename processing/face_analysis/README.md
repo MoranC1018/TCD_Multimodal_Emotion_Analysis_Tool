@@ -22,21 +22,23 @@ The third design is implemented.
 
 ## Install
 
-Use the project's single environment:
+Use the project's single environment. From the repository root, the supported
+Windows installer selects the matched Torch family, all project packages and
+TorchCodec's shared FFmpeg runtime, prepares Face weights and checks readiness:
 
-The pinned stack requires Python 3.11 or newer. Python 3.12 is tested and
-recommended, while other compatible versions are accepted; the command below
-selects the recommended version explicitly.
+The pinned stack requires Python 3.11 or newer; Python 3.12 x64 is the tested
+and recommended choice. Other versions accepted by interpreter discovery still
+need compatible package wheels and a successful readiness check.
 
 ```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -TorchRuntime cpu -TextMode Require
+if ($LASTEXITCODE -ne 0) { throw 'Setup failed; inspect its log before continuing.' }
 ```
 
-On Windows, run `scripts\setup.ps1` for the automatic installation. It creates
-the one environment, installs the matched Torch family, all project packages,
-and TorchCodec's shared FFmpeg runtime. These are runtime libraries, not a
-second Python environment.
+See [Installation and validation](../../docs/INSTALLATION_VALIDATION.md) for
+managed prerequisites and runtime choices. Installing only `requirements.txt`
+does not prepare shared FFmpeg DLLs or model caches. Keep the package family
+together when repairing or changing the runtime.
 
 Detectorv2 uses three checkpoints: `retinaface_r34`, `arcface_r50`, and
 `face_multitask_v2`. Their model cards may impose research/non-commercial
@@ -142,6 +144,21 @@ The integer frame step is `round(source_fps / requested_sample_fps)`, with a
 minimum of one. Consequently `--sample-fps` is a requested rate. The exact
 `frame_step`, `effective_sample_fps`, and number of expected frames are stored
 in every `video_manifest.json`.
+
+Face requires constant-frame-rate timing. Before inference, each probe reads the
+video header and streams every decoded frame timestamp through a uniform-cadence
+check, allowing the format's timestamp quantization. Complete metadata does not
+bypass this check: average FPS alone cannot establish correct frame times.
+Nonuniform or missing timestamps, decoding errors and inconsistent frame counts
+fail at the `probe` stage. Video-only duration and decoded frame count determine
+the sampling extent; a longer audio track does not create extra Face observations.
+
+The timing scan has a 300-second limit per FFprobe call and adds one full scan per
+probe. A new run normally probes before and after inference; verified reuse still
+needs the initial check. For variable-frame-rate material, preserve the original
+and prepare a separately identified constant-frame-rate derivative before native
+Face processing. Conversion changes the input and must be recorded in the study's
+source provenance; the tool does not silently resample it.
 
 ### Manifests, recovery, and failures
 

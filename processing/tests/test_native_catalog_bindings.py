@@ -197,6 +197,56 @@ def test_face_catalog_binding_is_in_manifests_index_and_resume_fingerprint(
     )
 
 
+def test_face_catalog_reuses_json_config_and_rejects_changed_source_ids(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Break caught: saved SourceID lists invalidate unchanged tuple settings."""
+
+    pytest.importorskip("pyarrow")
+    import pandas as pd
+    from processing.face_analysis.tests.helpers import complete_detection_row
+
+    run_root, digest, _manifest_bytes, _metadata_bytes = _catalog_run(tmp_path)
+    destination = tmp_path / "face-run"
+
+    class Backend:
+        name = "test"
+        version = "1"
+
+        def analyse(self, *_args):
+            return pd.DataFrame([complete_detection_row()])
+
+    monkeypatch.setattr(face_pipeline, "configure_ffmpeg_shared_libraries", lambda: None)
+    monkeypatch.setattr(
+        face_pipeline,
+        "probe_video",
+        lambda path: VideoMetadata(str(path), "b" * 64, 15, 1.0, 1.0, 1, 10, 10),
+    )
+    config = FaceProcessingConfig(
+        sample_fps=1,
+        batch_size=1,
+        device="cpu",
+        source_ids=("source-0001",),
+        catalog_sha256=digest,
+    )
+    backend = Backend()
+    first = face_pipeline.process_face_input(run_root, destination, config=config, backend=backend)
+    second = face_pipeline.process_face_input(run_root, destination, config=config, backend=backend)
+
+    assert (first.processed, first.skipped, first.failed) == (1, 0, 0)
+    assert (second.processed, second.skipped, second.failed) == (0, 1, 0)
+
+    manifest_path = next(destination.rglob("video_manifest.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["config"]["source_ids"] == ["source-0001"]
+    manifest["config"]["source_ids"] = ["source-0002"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    repaired = face_pipeline.process_face_input(run_root, destination, config=config, backend=backend)
+
+    assert (repaired.processed, repaired.skipped, repaired.failed) == (1, 0, 0)
+
+
 def test_face_rejects_tampered_catalog_before_runtime_or_backend(
     monkeypatch,
     tmp_path: Path,
